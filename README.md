@@ -52,13 +52,7 @@ An AI-powered code review system for the application. This project provides spec
 3. **Install dependencies**:
 
    ```bash
-   pip install openai pydantic requests mcp
-   ```
-
-   If you want to use `.env` file support, also install:
-
-   ```bash
-   pip install python-dotenv
+   pip install -r requirements.txt
    ```
 
 ## Configuration
@@ -89,6 +83,9 @@ An AI-powered code review system for the application. This project provides spec
    MCP_ATLASSIAN_PORT=3000
    MCP_ATLASSIAN_CONTAINER=mcp-atlassian
    MCP_ATLASSIAN_SSH_USER=root
+
+   # GitLab Configuration (Required for MR review)
+   GITLAB_TOKEN=your_gitlab_personal_access_token_here
    ```
 
 3. **Load environment variables** in your code:
@@ -243,12 +240,14 @@ async def classify_file():
 
 ```
 codereviewagent/
+├── main.py                 # Main entry point for GitLab MR reviews
 ├── service_reviewer.py    # Go service code reviewer
 ├── sql_reviewer.py         # SQL migration reviewer
 ├── dataview_reviewer.py    # Dataview code reviewer
 ├── test_reviewer.py        # BDD/test code reviewer
 ├── pbook_reviewer.py       # Error message file reviewer
 ├── starter_agent.py        # File classification agent
+├── requirements.txt        # Python dependencies
 ├── .env                    # Environment variables (not in git)
 ├── .env.example            # Environment variable template
 └── README.md               # This file
@@ -256,17 +255,20 @@ codereviewagent/
 
 ## Environment Variables
 
-| Variable                           | Required | Description                                    |
-| ---------------------------------- | -------- | ---------------------------------------------- |
-| `OPENAI_API_KEY`                   | Yes      | OpenAI API key for AI-powered reviews          |
-| `JIRA_URL`                         | No       | Jira instance URL                              |
-| `JIRA_PERSONAL_ACCESS_TOKEN`       | No       | Jira personal access token                     |
-| `CONFLUENCE_URL`                   | No       | Confluence instance URL                        |
-| `CONFLUENCE_PERSONAL_ACCESS_TOKEN` | No       | Confluence personal access token               |
-| `MCP_ATLASSIAN_ENABLED`            | No       | Enable MCP Atlassian integration (true/false)  |
-| `MCP_ATLASSIAN_HOST`               | No       | MCP server host (default: localhost)           |
-| `MCP_ATLASSIAN_PORT`               | No       | MCP server port (default: 3000)                |
-| `MCP_ATLASSIAN_CONTAINER`          | No       | Docker container name (default: mcp-atlassian) |
+| Variable                           | Required | Description                                            |
+| ---------------------------------- | -------- | ------------------------------------------------------ |
+| `OPENAI_API_KEY`                   | Yes      | OpenAI API key for AI-powered reviews                  |
+| `GITLAB_TOKEN`                     | Yes\*    | GitLab personal access token (required for MR reviews) |
+| `JIRA_URL`                         | No       | Jira instance URL                                      |
+| `JIRA_PERSONAL_ACCESS_TOKEN`       | No       | Jira personal access token                             |
+| `CONFLUENCE_URL`                   | No       | Confluence instance URL                                |
+| `CONFLUENCE_PERSONAL_ACCESS_TOKEN` | No       | Confluence personal access token                       |
+| `MCP_ATLASSIAN_ENABLED`            | No       | Enable MCP Atlassian integration (true/false)          |
+| `MCP_ATLASSIAN_HOST`               | No       | MCP server host (default: localhost)                   |
+| `MCP_ATLASSIAN_PORT`               | No       | MCP server port (default: 3000)                        |
+| `MCP_ATLASSIAN_CONTAINER`          | No       | Docker container name (default: mcp-atlassian)         |
+
+\* Required when using `main.py --gitlab-mr` command
 
 ## Integration with Workflows
 
@@ -284,6 +286,7 @@ This project is designed to be integrated into CI/CD pipelines or code review wo
 - All personal access tokens and API keys are stored in environment variables
 - The `.env` file is already in `.gitignore`
 - Use `.env.example` as a template for team members
+- Make sure to set `GITLAB_TOKEN` in `.env` for merge request reviews
 
 ## Troubleshooting
 
@@ -306,7 +309,7 @@ If environment variables aren't being read:
 Install all required packages:
 
 ```bash
-pip install openai pydantic requests mcp python-dotenv
+pip install -r requirements.txt
 ```
 
 ## Contributing
