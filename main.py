@@ -31,7 +31,7 @@ from dataview_reviewer import DataviewReviewerContext, dataview_reviewer
 from test_reviewer import TestReviewerContext, test_reviewer
 from pbook_reviewer import PbookReviewerContext, pbook_reviewer
 from agents import Runner, RunConfig
-
+from scss_reviewer import ScssReviewerContext, scss_reviewer
 
 def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     """
@@ -44,19 +44,21 @@ def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     # Decode URL-encoded characters (e.g., %2F -> /) to handle Windows/encoded URLs
     decoded_url = unquote(url)
     
-    # Remove /-/merge_requests/ and everything after if there's a path
-    match = re.search(r'([^/]+/[^/]+(?:(?:/[^/]+)*))/-/merge_requests/(\d+)', decoded_url)
+    # Extract domain and path separately
+    parsed = urlparse(decoded_url)
+    domain = f"{parsed.scheme}://{parsed.netloc}"
+    path = parsed.path
+    
+    # Extract project path and MR ID from the path
+    # Path format: /group/project/-/merge_requests/123
+    match = re.search(r'^/(.+?)/-/merge_requests/(\d+)', path)
     if not match:
         print(f"Error: Could not parse GitLab MR URL: {url}")
         print("Expected format: https://gitlab.example.com/group/project/-/merge_requests/123")
         return None
     
-    project_path = match.group(1)
+    project_path = match.group(1)  # group/project (without leading /)
     mr_id = match.group(2)
-    
-    # Extract domain
-    parsed = urlparse(decoded_url)
-    domain = f"{parsed.scheme}://{parsed.netloc}"
     
     return {
         "domain": domain,
@@ -190,6 +192,31 @@ async def review_service_file(
         print(f"Error reviewing service file {classification.file_name}: {e}")
         return []
 
+
+async def review_scss_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
+    """Review a scss file."""
+    try:
+        context = ScssReviewerContext(
+            workflow_input_as_text=f"Review {classification.file_name}",
+            content=classification.content,
+            diff=diff or "",
+            file_name=classification.file_name,
+        )
+        result = await Runner.run(
+            scss_reviewer,
+            input=[{
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Review this scss file"}]
+            }],
+            context=context,
+            run_config=RunConfig()
+        )
+        if result.final_output:
+            return result.final_output.issues
+        return []
+    except Exception as e:
+        print(f"Error reviewing scss file {classification.file_name}: {e}")
+        return []
 
 async def review_sql_file(classification: StarterResponse, diff: str) -> Optional[list]:
     """Review a SQL file."""
@@ -472,6 +499,18 @@ async def process_mr(mr_url: str):
         
         # Get diff
         diff = change.get("diff", "")
+
+
+        classification = StarterResponse(
+            file_name=file_path,
+            file_type="unknown",
+            package_name="unknown",
+            module_name="unknown",
+            content=file_content,
+            diff=diff,
+            target_branch=target_branch,
+            source_branch=source_branch,
+            jira_task_number="unknown")
         
         # Classify file
         print(f"🔍 Classifying file...")
@@ -480,6 +519,7 @@ async def process_mr(mr_url: str):
         elif file_path.endswith(".html"):
             classification.file_type = "html"
         elif file_path.endswith(".scss"):
+            print(f"🔍 Scss file detected: {file_path}")
             classification.file_type = "scss"
         else:
             classification = await classify_file(

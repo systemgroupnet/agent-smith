@@ -28,6 +28,10 @@ def scss_reviewer_instructions(run_context: RunContextWrapper[ScssReviewerContex
     content = run_context.context.content
     diff = run_context.context.diff
     file_name = run_context.context.file_name if hasattr(run_context.context, 'file_name') else ""
+
+    print("\n\n\n\n\ncontent of scss ===>>> ", content)
+    print("diff of scss ===>>> ", diff)
+    print("file_name of scss ===>>> ", file_name)
     
     return f"""
     You are Expert Frontend developer at Javascript, Typescript, Angular, HTML and CSS. You act as code review assistant.
@@ -38,8 +42,8 @@ Detect the language that code has been written with.
 Read the principles below based on language:
 ### \"CSS\" codes principles:
 1. **px2rem Method**: code must use sass function called \"px2rem\" instead of using 'px' unit directly.
-   - ✅ VALID: `.btn{ height: px2rem(20px);}` (uses px2rem for height instead of using 20px directly)
-   - ❌ INVALID: `.btn{ height: 20px;}` (using px unit directly)
+   - ✅ VALID: `.btn{{ height: px2rem(20px);}}` (uses px2rem for height instead of using 20px directly)
+   - ❌ INVALID: `.btn{{ height: 20px;}}` (using px unit directly)
 ## Step 3: Thorough Code Review
 Read the ENTIRE CSS/SCSS file below and Review it based on principles above. Find **ALL lines of code** that violate ANY of the principles above.
 
@@ -84,7 +88,7 @@ scss_reviewer = Agent(
     model_settings=ModelSettings(
         store=True,
         reasoning=Reasoning(
-            effort="low"
+            effort="medium"
         )
     )
 )
