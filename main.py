@@ -15,7 +15,7 @@ import os
 import re
 import sys
 from typing import Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -41,8 +41,11 @@ def parse_gitlab_mr_url(url: str) -> Optional[dict]:
         https://gitlab.example.com/group/project/-/merge_requests/123
         https://gitlab.example.com/group/project/-/merge_requests/123/diffs
     """
+    # Decode URL-encoded characters (e.g., %2F -> /) to handle Windows/encoded URLs
+    decoded_url = unquote(url)
+    
     # Remove /-/merge_requests/ and everything after if there's a path
-    match = re.search(r'([^/]+/[^/]+(?:(?:/[^/]+)*))/-/merge_requests/(\d+)', url)
+    match = re.search(r'([^/]+/[^/]+(?:(?:/[^/]+)*))/-/merge_requests/(\d+)', decoded_url)
     if not match:
         print(f"Error: Could not parse GitLab MR URL: {url}")
         print("Expected format: https://gitlab.example.com/group/project/-/merge_requests/123")
@@ -52,7 +55,7 @@ def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     mr_id = match.group(2)
     
     # Extract domain
-    parsed = urlparse(url)
+    parsed = urlparse(decoded_url)
     domain = f"{parsed.scheme}://{parsed.netloc}"
     
     return {
