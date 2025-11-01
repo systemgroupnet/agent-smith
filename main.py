@@ -491,7 +491,7 @@ async def process_mr(mr_url: str):
         # Review file based on type
         issues = []
         print(f"🔍 Reviewing file...")
-        
+
         if classification.file_type == "service":
             issues = await review_service_file(
                 classification, diff, gitlab_token, gitlab_url, project_path, source_branch
