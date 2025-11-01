@@ -472,15 +472,22 @@ async def process_mr(mr_url: str):
         
         # Classify file
         print(f"🔍 Classifying file...")
-        classification = await classify_file(
-            file_path,
-            file_content,
-            diff,
-            mr_title,
-            target_branch,
-            source_branch
-        )
-        
+        if file_path.endswith(".ts"):
+            classification.file_type = "typescript"
+        elif file_path.endswith(".html"):
+            classification.file_type = "html"
+        elif file_path.endswith(".scss"):
+            classification.file_type = "scss"
+        else:
+            classification = await classify_file(
+                file_path,
+                file_content,
+                diff,
+                mr_title,
+                target_branch,
+                source_branch
+            )
+            
         if not classification:
             print(f"⚠️  Could not classify {file_path}, skipping...")
             continue
@@ -506,6 +513,20 @@ async def process_mr(mr_url: str):
             issues = await review_test_file(classification, diff)
         elif classification.file_type == "pbook":
             issues = await review_pbook_file(classification, diff)
+        elif classification.file_type == "typescript":
+            # Handle TypeScript files with starter agent
+              issues = await review_typescript_file(
+                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
+            )
+        elif classification.file_type == "html":  
+            # Handle HTML files with starter agent
+            issues = await review_html_file(
+                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
+            )
+        elif classification.file_type == "scss":
+            issues = await review_scss_file(
+                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
+            )
         else:
             print(f"⚠️  Unknown file type: {classification.file_type}, skipping review...")
             continue
