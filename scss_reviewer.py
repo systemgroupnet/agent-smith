@@ -33,7 +33,7 @@ def scss_reviewer_instructions(run_context: RunContextWrapper[ScssReviewerContex
     print("diff of scss ===>>> ", diff)
     print("file_name of scss ===>>> ", file_name)
     
-    return f"""
+    x = f"""
     You are Expert Frontend developer at Javascript, Typescript, Angular, HTML and CSS. You act as code review assistant.
 Your task is to read principles below and review the given codes and give result in the format explained. Do your task in steps below:
 ## Step 1: Language Detection
@@ -78,12 +78,13 @@ RESPONSE FORMAT:
 Return a ScssReviewResponse with an "issues" field containing a list of ReviewIssue objects.
 Each ReviewIssue has: problem, suggestion, file_name, line, and severity ("high"|"medium"|"low") fields.
 """
-
+    # print(x)
+    return x
 
 scss_reviewer = Agent(
     name="scss reviewer",
     instructions=scss_reviewer_instructions,
-    model="gpt-5-nano",
+    model="gpt-5",
     output_type=ScssReviewResponse,
     model_settings=ModelSettings(
         store=True,
