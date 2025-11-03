@@ -24,14 +24,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import reviewers
+from html_reviewer import HtmlReviewerContext, html_reviewer
 from starter_agent import starter_agent, StarterResponse
 from service_reviewer import ServiceReviewerContext, run_combined_review
 from sql_reviewer import SqlReviewerContext, sql_reviewer
 from dataview_reviewer import DataviewReviewerContext, dataview_reviewer
 from test_reviewer import TestReviewerContext, test_reviewer
 from pbook_reviewer import PbookReviewerContext, pbook_reviewer
-from agents import Runner, RunConfig
 from scss_reviewer import ScssReviewerContext, scss_reviewer
+from typescript_reviewer import TypescriptReviewerContext, typescript_reviewer
+from agents import Runner, RunConfig
 
 def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     """
@@ -218,6 +220,59 @@ async def review_scss_file(classification: StarterResponse, diff: str, gitlab_to
         print(f"Error reviewing scss file {classification.file_name}: {e}")
         return []
 
+
+async def review_html_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
+    """Review a html file."""
+    try:
+        context = HtmlReviewerContext(
+            workflow_input_as_text=f"Review {classification.file_name}",
+            content=classification.content,
+            diff=diff or "",
+            file_name=classification.file_name
+        )
+        result = await Runner.run(
+            html_reviewer,
+            input=[{
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Review this html file"}]
+            }],
+            context=context,
+            run_config=RunConfig()
+        )
+        if result.final_output:
+            return result.final_output.issues
+        return []
+    except Exception as e:
+        print(f"Error reviewing html file {classification.file_name}: {e}")
+        return []
+
+
+async def review_typescript_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
+    """Review a typescript file."""
+    try:
+        context = TypescriptReviewerContext(
+            workflow_input_as_text=f"Review {classification.file_name}",
+            content=classification.content,
+            diff=diff or "",
+            file_name=classification.file_name
+        )
+        result = await Runner.run(
+            typescript_reviewer,
+            input=[{
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Review this typescript file"}]
+            }],
+            context=context,
+            run_config=RunConfig()
+        )
+        if result.final_output:
+            return result.final_output.issues
+        return []
+    except Exception as e:
+        print(f"Error reviewing typescript file {classification.file_name}: {e}")
+        return []
+
+
 async def review_sql_file(classification: StarterResponse, diff: str) -> Optional[list]:
     """Review a SQL file."""
     try:
@@ -388,22 +443,25 @@ def post_gitlab_comment(
     token: str,
     comment: str,
     file_path: Optional[str] = None,
-    line_number: Optional[int] = None
+    line_number: Optional[int] = None,
+    base_sha: Optional[str] = None,
+    start_sha: Optional[str] = None,
+    head_sha: Optional[str] = None
 ) -> bool:
     """Post a comment to GitLab MR."""
     headers = {"PRIVATE-TOKEN": token, "Content-Type": "application/json"}
     encoded_project = quote(project_path, safe='')
     
     # Use discussions API for file-specific comments, or notes API for general comments
-    if file_path and line_number:
+    if file_path and line_number and base_sha and start_sha and head_sha:
         # Create a discussion on a specific line
         url = f"{gitlab_url}/api/v4/projects/{encoded_project}/merge_requests/{mr_id}/discussions"
         data = {
             "body": comment,
             "position": {
-                "base_sha": None,  # GitLab will determine this
-                "start_sha": None,
-                "head_sha": None,
+                "base_sha": base_sha,
+                "start_sha": start_sha,
+                "head_sha": head_sha,
                 "old_path": file_path,
                 "new_path": file_path,
                 "position_type": "text",
@@ -459,6 +517,12 @@ async def process_mr(mr_url: str):
     mr_title = mr_data.get("title", "")
     source_branch = mr_data.get("source_branch", "")
     target_branch = mr_data.get("target_branch", "")
+    
+    # Get commit SHAs for posting line comments
+    diff_refs = mr_data.get("diff_refs", {})
+    base_sha = diff_refs.get("base_sha")
+    start_sha = diff_refs.get("start_sha")
+    head_sha = diff_refs.get("head_sha")
     
     print(f"📄 Title: {mr_title}")
     print(f"🌿 Source Branch: {source_branch}")
@@ -576,26 +640,65 @@ async def process_mr(mr_url: str):
         
         print(f"✅ Found {len(issues)} issue(s)")
         
-        # Format comment
-        comment = format_comment(issues, classification.file_name, file_path)
-        all_comments.append((file_path, comment, issues))
+        # Store issues with file path for later posting
+        all_comments.append((file_path, issues))
     
     # Post comments to GitLab
     print(f"\n{'=' * 60}")
     print(f"📤 Posting comments to GitLab MR...")
     print(f"{'=' * 60}\n")
     
-    for file_path, comment, issues in all_comments:
-        print(f"💬 Posting comment for {file_path}...")
-        if post_gitlab_comment(gitlab_url, project_path, mr_id, gitlab_token, comment):
-            print(f"✅ Comment posted successfully")
+    total_posted = 0
+    total_failed = 0
+    
+    for file_path, issues in all_comments:
+        if not issues:
+            # Post a general success comment for files with no issues
+            comment = f"✅ **{file_path}** - No issues found!"
+            print(f"💬 Posting summary for {file_path}...")
+            if post_gitlab_comment(gitlab_url, project_path, mr_id, gitlab_token, comment):
+                print(f"✅ Comment posted successfully")
+                total_posted += 1
+            else:
+                print(f"❌ Failed to post comment")
+                total_failed += 1
         else:
-            print(f"❌ Failed to post comment")
+            # Post individual comments for each issue on the specific line
+            print(f"💬 Posting {len(issues)} comment(s) for {file_path}...")
+            for issue in issues:
+                # Format severity emoji
+                severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(issue.severity, "⚪")
+                
+                # Format the comment for this specific issue
+                comment = f"{severity_emoji} **{issue.severity.upper()}** - Line {issue.line}\n\n"
+                comment += f"**Problem:** {issue.problem}\n\n"
+                comment += f"**Suggestion:** {issue.suggestion}"
+                
+                # Post comment on the specific line
+                if post_gitlab_comment(
+                    gitlab_url, 
+                    project_path, 
+                    mr_id, 
+                    gitlab_token, 
+                    comment,
+                    file_path=file_path,
+                    line_number=issue.line,
+                    base_sha=base_sha,
+                    start_sha=start_sha,
+                    head_sha=head_sha
+                ):
+                    print(f"  ✅ Posted comment for line {issue.line}")
+                    total_posted += 1
+                else:
+                    print(f"  ❌ Failed to post comment for line {issue.line}")
+                    total_failed += 1
     
     print(f"\n{'=' * 60}")
     print(f"✨ Review completed!")
-    total_issues = sum(len(issues) for _, _, issues in all_comments)
+    total_issues = sum(len(issues) for _, issues in all_comments)
     print(f"📊 Total issues found: {total_issues}")
+    print(f"📤 Comments posted: {total_posted}")
+    print(f"❌ Failed comments: {total_failed}")
     print(f"{'=' * 60}\n")
 
 
