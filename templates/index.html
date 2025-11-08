@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Mars Reviewer</title>
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background-image: linear-gradient(120deg, #e0c3fc 0%, #8ec5fc 100%);
+        }
+
+        body {
+            background-image: url('/assets/bg2.png');
+            background-repeat: no-repeat;
+            background-size: cover;
+        }
+
+        .liquidGlass-wrapper {
+            position: relative;
+            display: flex;
+            font-weight: 600;
+            overflow: visible;
+
+            color: black;
+
+
+            box-shadow: 0 6px 6px rgba(0, 0, 0, 0.2), 0 0 20px rgba(0, 0, 0, 0.1);
+            border-radius: 1000px;
+
+            transition:0.2s;
+        }
+
+        .liquidGlass-wrapper.loading {
+            opacity: 0.5;
+        }
+
+        .liquidGlass-effect {
+            position: absolute;
+            z-index: 0;
+            inset: 0;
+            border-radius: 1000px;
+
+            backdrop-filter: blur(5px);
+            filter: url(#glass-distortion);
+            overflow: hidden;
+            isolation: isolate;
+        }
+
+        .liquidGlass-tint {
+            z-index: 1;
+            position: absolute;
+            inset: 0;
+            border-radius: 1000px;
+
+            background: rgba(255, 255, 255, 0.25);
+        }
+
+        .liquidGlass-shine {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+
+            overflow: hidden;
+            border-radius: 1000px;
+
+            box-shadow: inset 2px 2px 1px 0 rgba(255, 255, 255, 0.5),
+                inset -1px -1px 1px 1px rgba(255, 255, 255, 0.5);
+        }
+
+        .input-box {
+            padding: 8px;
+            border-radius: 1000px;
+        }
+
+        .input-box input {
+            background-color: transparent;
+            color: #fff;
+            position: relative;
+            z-index: 2;
+            border: none;
+            outline: none;
+            font-size: 18px;
+            width: 65vw;
+            margin-left: 12px;
+        }
+
+        .input-box input::placeholder {
+            color: #fff;
+        }
+
+        .main-wrapper {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+        }
+
+        .button-box {
+            z-index: 10;
+            padding: 4px;
+            border-radius: 10000px;
+        }
+
+        .button-box:hover {
+            transform: scale(1.1) !important;
+        }
+
+        .button-box button {
+            position: relative;
+            z-index: 10;
+            outline: none;
+            border: none;
+            background-color: transparent;
+            color: #fff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* LOADER */
+        .loader {
+            width: 30px;
+            height: 30px;
+            border: 3px solid #FFF;
+            border-bottom-color: transparent;
+            border-radius: 50%;
+            display: inline-block;
+            box-sizing: border-box;
+            animation: rotation 1s linear infinite;
+        }
+
+        .button-box button.loading svg {
+            display: none;
+        }
+
+        .button-box button.loading .loader {
+            display: inline-block;
+        }
+
+
+        .button-box button svg {
+            display: block;
+        }
+
+        .button-box button .loader {
+            display: none;
+        }
+
+        @keyframes rotation {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="main-wrapper">
+        <div id="wrapper" class="liquidGlass-wrapper input-box">
+            <div class="liquidGlass-effect"></div>
+            <div class="liquidGlass-tint"></div>
+            <div class="liquidGlass-shine"></div>
+            <input id="reviewInput" type="text" placeholder="Paste the merge request link here...">
+            <div class="liquidGlass-wrapper button-box">
+                <div class="liquidGlass-effect"></div>
+                <div class="liquidGlass-tint"></div>
+                <div class="liquidGlass-shine"></div>
+                <button id="review">
+
+                    <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 31 27" fill="none">
+                        <path
+                            d="M28.5618 0.328394C29.2102 -0.187226 30.1556 -0.0856631 30.6712 0.562777C31.1907 1.20731 31.0853 2.15257 30.4368 2.67217C22.7649 8.80888 16.7568 16.7852 12.9758 25.8562L12.886 26.0749C12.6829 26.5593 12.2415 26.903 11.7219 26.9812C11.2024 27.0593 10.6828 26.864 10.3469 26.4616L7.08129 22.5397C5.35079 20.4655 3.35468 18.6295 1.13988 17.0788L0.639884 16.7273C-0.0398057 16.2546 -0.203863 15.3211 0.272697 14.6414C0.745357 13.9617 1.6789 13.7976 2.3586 14.2703L2.86251 14.6219C5.29221 16.325 7.48751 18.3407 9.38591 20.6219L11.0968 22.6727C15.0929 13.9774 21.0734 6.32039 28.5618 0.328394Z"
+                            fill="white" />
+                    </svg>
+                    <span class="loader"></span>
+
+
+                </button>
+
+            </div>
+        </div>
+    </div>
+    <script>
+        const wrapper = document.getElementById('wrapper');
+
+        const input = document.getElementById('reviewInput');
+
+        input.addEventListener('input', () => {
+            if (!input.value) {
+
+            }
+        })
+
+
+        const reviewBtn = document.getElementById('review');
+        reviewBtn.addEventListener('click', () => {
+            if (!input.value) {
+                alert('Please Enter the MR link');
+                return;
+            }
+
+            reviewBtn.classList.add('loading');
+            wrapper.classList.add('loading');
+
+
+
+            fetch('/api/review', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ mr: input.value })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    reviewBtn.classList.remove('loading');
+                    wrapper.classList.remove('loading');
+                    setTimeout(() => {
+                        alert('Done ✅');
+                    }, 100);
+                })
+                .catch(error => {
+                    reviewBtn.classList.remove('loading');
+                    wrapper.classList.remove('loading');
+                    setTimeout(() => {
+                        alert('Failed ❌️');
+                    }, 100);
+                });
+        })
+    </script>
+</body>
+
+</html>
