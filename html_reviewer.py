@@ -34,6 +34,9 @@ def html_reviewer_instructions(run_context: RunContextWrapper[HtmlReviewerContex
 
 This document contains HTML and template-related code review rules for the 4thGen Frontend project.
 
+YOU SHOULD STRICTLY FOLLOW THESE RULES AND DO NOT SKIP ANY OF THEM. IF YOU FIND ANY VIOLATION RELATED TO THESE RULES, YOU MUST MARK IT AS **HIGH** SEVERITY.
+SKIP ANY OTHER RULES AND ONLY FOLLOW THESE RULES. OTHER RULES ARE NOT OF **HIGH** SEVERITY AND SHOULD BE MARKED AS **MEDIUM** OR **LOW** SEVERITY.
+
 ## 1. Translation
 
 **Rule**: All words must be translated in Frontend templates.

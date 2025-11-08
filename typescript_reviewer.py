@@ -31,6 +31,9 @@ def typescript_reviewer_instructions(run_context: RunContextWrapper[TypescriptRe
     return f"""
     # TypeScript Code Review Ruleset
 
+YOU SHOULD STRICTLY FOLLOW THESE RULES AND DO NOT SKIP ANY OF THEM. IF YOU FIND ANY VIOLATION RELATED TO THESE RULES, YOU MUST MARK IT AS **HIGH** SEVERITY.
+SKIP ANY OTHER RULES AND ONLY FOLLOW THESE RULES. OTHER RULES ARE NOT OF **HIGH** SEVERITY AND SHOULD BE MARKED AS **MEDIUM** OR **LOW** SEVERITY.
+
 ## 1. ANY Type Usage
 **Rule:** Avoid using the `any` type as it can cause many issues and is not type-safe.
 

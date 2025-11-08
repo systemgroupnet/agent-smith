@@ -34,6 +34,9 @@ def scss_reviewer_instructions(run_context: RunContextWrapper[ScssReviewerContex
 
 Guidelines for enforcing 4thGen Frontend design system conventions and preventing styling inconsistencies.
 
+YOU SHOULD STRICTLY FOLLOW THESE RULES AND DO NOT SKIP ANY OF THEM. IF YOU FIND ANY VIOLATION RELATED TO THESE RULES, YOU MUST MARK IT AS **HIGH** SEVERITY.
+SKIP ANY OTHER RULES AND ONLY FOLLOW THESE RULES. OTHER RULES ARE NOT OF **HIGH** SEVERITY AND SHOULD BE MARKED AS **MEDIUM** OR **LOW** SEVERITY.
+
 ## 1. Using CSS Values for Spacing
 
 **Issue:** Developers are using hardcoded CSS values for spacing instead of the design system tokens.
