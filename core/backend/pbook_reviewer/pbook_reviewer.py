@@ -1,18 +1,7 @@
 from agents import Agent, ModelSettings, RunContextWrapper
 from openai.types.shared.reasoning import Reasoning
-from pydantic import BaseModel
 
-
-class ReviewIssue(BaseModel):
-    problem: str
-    suggestion: str
-    file_name: str
-    line: int
-    severity: str  # "high", "medium", "low"
-
-
-class PbookReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
+from dto.general import ReviewResponse
 
 
 class PbookReviewerContext:
@@ -51,7 +40,7 @@ You MUST assign a severity level to each issue based on these guidelines:
 **CRITICAL REQUIREMENT**: For EVERY issue marked as **high** severity, you MUST provide a clear explanation in your "problem" field explaining WHY this issue is critical. The reason should be explicit and explain the potential impact or consequence of the issue.
 
 RESPONSE FORMAT:
-Return a PbookReviewResponse with an "issues" field containing a list of ReviewIssue objects.
+Return a ReviewResponse with an "issues" field containing a list of ReviewIssue objects.
 Each ReviewIssue has: problem, suggestion, file_name, line, and severity ("high"|"medium"|"low") fields.
 
 File Name: {file_name}
@@ -72,7 +61,7 @@ pbook_reviewer = Agent(
     name="pbook reviewer",
     instructions=pbook_reviewer_instructions,
     model="gpt-5-nano",
-    output_type=PbookReviewResponse,
+    output_type=ReviewResponse,
     model_settings=ModelSettings(
         store=True,
         reasoning=Reasoning(

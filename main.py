@@ -24,16 +24,24 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import reviewers
-from html_reviewer import HtmlReviewerContext, html_reviewer
-from starter_agent import starter_agent, StarterResponse
-from service_reviewer import ServiceReviewerContext, run_combined_review
-from sql_reviewer import SqlReviewerContext, sql_reviewer
-from dataview_reviewer import DataviewReviewerContext, dataview_reviewer
-from test_reviewer import TestReviewerContext, test_reviewer
-from pbook_reviewer import PbookReviewerContext, pbook_reviewer
-from scss_reviewer import ScssReviewerContext, scss_reviewer
-from typescript_reviewer import TypescriptReviewerContext, typescript_reviewer
+from core.frontend.html_reviewer.html_reviewer import HtmlReviewerContext, html_reviewer
+from core.start.starter_agent import starter_agent, StarterResponse
+from core.backend.service_reviewer.service_reviewer import ServiceReviewerContext, run_combined_review
+from core.backend.sql_reviewer.sql_reviewer import SqlReviewerContext, sql_reviewer
+from core.backend.dataview_reviewer.dataview_reviewer import DataviewReviewerContext, dataview_reviewer
+from core.backend.test_reviewer.test_reviewer import TestReviewerContext, test_reviewer
+from core.backend.pbook_reviewer.pbook_reviewer import PbookReviewerContext, pbook_reviewer
+from core.frontend.scss_reviewer.scss_reviewer import ScssReviewerContext, scss_reviewer
+from core.frontend.ts_reviewer.typescript_reviewer import TypescriptReviewerContext, typescript_reviewer
 from agents import Runner, RunConfig
+
+# Import GitLab MCP client (MCP ONLY - No fallback to direct API)
+from core.MCP.gitlab_mcp_client import (
+    get_gitlab_mr_info_via_mcp,
+    get_gitlab_mr_changes_via_mcp,
+    get_gitlab_file_content_via_mcp,
+    post_gitlab_comment_via_mcp
+)
 
 def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     """
@@ -69,59 +77,28 @@ def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     }
 
 
-def get_gitlab_mr_info(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[dict]:
-    """Fetch merge request information from GitLab API."""
-    headers = {"PRIVATE-TOKEN": token}
-    encoded_project = quote(project_path, safe='')
-    
-    mr_url = f"{gitlab_url}/api/v4/projects/{encoded_project}/merge_requests/{mr_id}"
-    
-    try:
-        response = requests.get(mr_url, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching MR info: {e}")
-        if hasattr(e.response, 'text'):
-            print(f"Response: {e.response.text}")
-        return None
+async def get_gitlab_mr_info(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[dict]:
+    """
+    Fetch merge request information from GitLab using MCP.
+    """
+    print(f"  🔍 [GitLab] Using MCP to fetch MR info...")
+    return await get_gitlab_mr_info_via_mcp(project_path, mr_id)
 
 
-def get_gitlab_mr_changes(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[list]:
-    """Fetch changed files and diffs from GitLab MR."""
-    headers = {"PRIVATE-TOKEN": token}
-    encoded_project = quote(project_path, safe='')
-    
-    changes_url = f"{gitlab_url}/api/v4/projects/{encoded_project}/merge_requests/{mr_id}/changes"
-    
-    try:
-        response = requests.get(changes_url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("changes", [])
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching MR changes: {e}")
-        if hasattr(e.response, 'text'):
-            print(f"Response: {e.response.text}")
-        return None
+async def get_gitlab_mr_changes(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[list]:
+    """
+    Fetch changed files and diffs from GitLab MR using MCP.
+    """
+    print(f"  🔍 [GitLab] Using MCP to fetch MR changes...")
+    return await get_gitlab_mr_changes_via_mcp(project_path, mr_id)
 
 
-def get_file_content(gitlab_url: str, project_path: str, file_path: str, branch: str, token: str) -> Optional[str]:
-    """Fetch file content from GitLab repository."""
-    headers = {"PRIVATE-TOKEN": token}
-    encoded_project = quote(project_path, safe='')
-    encoded_file = quote(file_path, safe='')
-    
-    file_url = f"{gitlab_url}/api/v4/projects/{encoded_project}/repository/files/{encoded_file}/raw?ref={branch}"
-    
-    try:
-        response = requests.get(file_url, headers=headers)
-        if response.status_code == 200:
-            return response.text
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"Warning: Could not fetch file {file_path}: {e}")
-        return None
+async def get_file_content(gitlab_url: str, project_path: str, file_path: str, branch: str, token: str) -> Optional[str]:
+    """
+    Fetch file content from GitLab repository using MCP.
+    """
+    print(f"  🔍 [GitLab] Using MCP to fetch file content...")
+    return await get_gitlab_file_content_via_mcp(project_path, file_path, branch)
 
 
 async def classify_file(
@@ -436,7 +413,7 @@ def format_comment(issues: list, file_name: str, file_path: str) -> str:
     return comment
 
 
-def post_gitlab_comment(
+async def post_gitlab_comment(
     gitlab_url: str,
     project_path: str,
     mr_id: str,
@@ -448,40 +425,13 @@ def post_gitlab_comment(
     start_sha: Optional[str] = None,
     head_sha: Optional[str] = None
 ) -> bool:
-    """Post a comment to GitLab MR."""
-    headers = {"PRIVATE-TOKEN": token, "Content-Type": "application/json"}
-    encoded_project = quote(project_path, safe='')
-    
-    # Use discussions API for file-specific comments, or notes API for general comments
-    if file_path and line_number and base_sha and start_sha and head_sha:
-        # Create a discussion on a specific line
-        url = f"{gitlab_url}/api/v4/projects/{encoded_project}/merge_requests/{mr_id}/discussions"
-        data = {
-            "body": comment,
-            "position": {
-                "base_sha": base_sha,
-                "start_sha": start_sha,
-                "head_sha": head_sha,
-                "old_path": file_path,
-                "new_path": file_path,
-                "position_type": "text",
-                "new_line": line_number
-            }
-        }
-    else:
-        # General comment
-        url = f"{gitlab_url}/api/v4/projects/{encoded_project}/merge_requests/{mr_id}/notes"
-        data = {"body": comment}
-    
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"Error posting comment: {e}")
-        if hasattr(e.response, 'text'):
-            print(f"Response: {e.response.text}")
-        return False
+    """
+    Post a comment to GitLab MR using MCP.
+    """
+    print(f"  🔍 [GitLab] Using MCP to post comment...")
+    return await post_gitlab_comment_via_mcp(
+        project_path, mr_id, comment, file_path, line_number
+    )
 
 
 async def process_mr(mr_url: str):
@@ -509,7 +459,7 @@ async def process_mr(mr_url: str):
     
     # Fetch MR information
     print("📥 Fetching MR information...")
-    mr_data = get_gitlab_mr_info(gitlab_url, project_path, mr_id, gitlab_token)
+    mr_data = await get_gitlab_mr_info(gitlab_url, project_path, mr_id, gitlab_token)
     if not mr_data:
         print("Error: Could not fetch MR information.")
         sys.exit(1)
@@ -530,7 +480,7 @@ async def process_mr(mr_url: str):
     
     # Fetch changes
     print("📥 Fetching changed files...")
-    changes = get_gitlab_mr_changes(gitlab_url, project_path, mr_id, gitlab_token)
+    changes = await get_gitlab_mr_changes(gitlab_url, project_path, mr_id, gitlab_token)
     if not changes:
         print("Error: Could not fetch MR changes.")
         sys.exit(1)
@@ -556,7 +506,7 @@ async def process_mr(mr_url: str):
         print(f"{'=' * 60}")
         
         # Get file content
-        file_content = get_file_content(gitlab_url, project_path, file_path, source_branch, gitlab_token)
+        file_content = await get_file_content(gitlab_url, project_path, file_path, source_branch, gitlab_token)
         if not file_content:
             print(f"⚠️  Could not fetch content for {file_path}, skipping...")
             continue
@@ -656,7 +606,7 @@ async def process_mr(mr_url: str):
             # Post a general success comment for files with no issues
             comment = f"✅ **{file_path}** - No issues found!"
             print(f"💬 Posting summary for {file_path}...")
-            if post_gitlab_comment(gitlab_url, project_path, mr_id, gitlab_token, comment):
+            if await post_gitlab_comment(gitlab_url, project_path, mr_id, gitlab_token, comment):
                 print(f"✅ Comment posted successfully")
                 total_posted += 1
             else:
@@ -675,7 +625,7 @@ async def process_mr(mr_url: str):
                 comment += f"**Suggestion:** {issue.suggestion}"
                 
                 # Post comment on the specific line
-                if post_gitlab_comment(
+                if await post_gitlab_comment(
                     gitlab_url, 
                     project_path, 
                     mr_id, 
