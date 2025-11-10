@@ -21,7 +21,6 @@ from __future__ import annotations
 from agents import Agent, ModelSettings, RunContextWrapper, Runner, RunConfig
 from openai import OpenAI
 from openai.types.shared.reasoning import Reasoning
-from pydantic import BaseModel
 import os
 import re
 import requests
@@ -29,28 +28,16 @@ from typing import Optional
 from urllib.parse import quote
 import asyncio
 import json
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
- 
+import traceback
 
-class ReviewIssue(BaseModel):
-    problem: str
-    suggestion: str
-    file_name: str
-    line: int
-    severity: str  # "high", "medium", "low"
+from dto.general import ReviewResponse
 
-
-class ServiceReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
-
-
-class SemanticReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
-
-
-class BusinessLogicReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
+# Import Atlassian MCP client
+from core.MCP.atlassian_mcp_client import (
+    is_mcp_atlassian_enabled,
+    get_jira_issue_via_mcp,
+    get_confluence_page_via_mcp
+)
 
 
 class ServiceReviewerContext:
@@ -84,17 +71,27 @@ class ServiceReviewerContext:
         self.project_path = project_path
         
         # Fetch task description and related documents (using MCP if available)
+        print(f"\n📥 Fetching external data (Jira/Confluence)...")
+        print(f"  🔍 MCP status: {'✅ Enabled' if is_mcp_atlassian_enabled() else '❌ Disabled'}")
+        
         try:
             # Try to get existing event loop
             loop = asyncio.get_event_loop()
+            print(f"  🔄 Using existing event loop")
         except RuntimeError:
             # If there's no event loop, create a new one
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            print(f"  🔄 Created new event loop")
         
         # Run async functions
+        print(f"\n  📋 Fetching task description...")
         self.task_description = loop.run_until_complete(get_task_description_async(jira_task_number))
+        print(f"  ✅ Task description: {len(self.task_description)} chars")
+        
+        print(f"\n  📚 Fetching related documents...")
         self.related_documents = loop.run_until_complete(get_related_documents_async(jira_task_number))
+        print(f"  ✅ Related documents: {len(self.related_documents)} chars")
         
         # Fetch package context (includes all Go files)
         self.package_context = get_package_context(self)
@@ -103,136 +100,17 @@ class ServiceReviewerContext:
 # =============================================================================
 # MCP Atlassian Integration
 # =============================================================================
-
-def is_mcp_enabled() -> bool:
-    """Check if MCP Atlassian integration is enabled."""
-    return os.getenv("MCP_ATLASSIAN_ENABLED", "false").lower() == "true"
-
-
-async def get_mcp_client():
-    """
-    Create and connect to MCP Atlassian server.
-    
-    Supports two modes:
-    1. Local Docker: Connects to local container via docker exec (MCP_ATLASSIAN_HOST=localhost)
-    2. Remote: Connects to remote MCP server via SSH tunnel or direct connection
-    
-    The MCP server is expected to expose MCP over stdio.
-    """
-    mcp_host = os.getenv("MCP_ATLASSIAN_HOST", "localhost")
-    mcp_port = os.getenv("MCP_ATLASSIAN_PORT", "3000")
-    container_name = os.getenv("MCP_ATLASSIAN_CONTAINER", "mcp-atlassian")
-    
-    try:
-        # Local Docker mode: Use docker exec
-        if mcp_host in ["localhost", "127.0.0.1"]:
-            server_params = StdioServerParameters(
-                command="docker",
-                args=["exec", "-i", container_name, "node", "/app/build/index.js"],
-                env=None
-            )
-        else:
-            # Remote mode: Use SSH to connect to remote Docker container
-            # Assumes SSH access to the remote host
-            # Format: ssh user@host docker exec -i container_name command
-            remote_user = os.getenv("MCP_ATLASSIAN_SSH_USER", "root")
-            server_params = StdioServerParameters(
-                command="ssh",
-                args=[
-                    f"{remote_user}@{mcp_host}",
-                    "docker", "exec", "-i", container_name,
-                    "node", "/app/build/index.js"
-                ],
-                env=None
-            )
-        
-        stdio_transport = await stdio_client(server_params)
-        stdio, write = stdio_transport
-        
-        async with ClientSession(stdio, write) as session:
-            await session.initialize()
-            return session
-    except Exception as e:
-        print(f"  ⚠️  Warning: Failed to connect to MCP Atlassian server at {mcp_host}: {e}")
-        return None
-
-
-async def call_mcp_tool(tool_name: str, arguments: dict) -> Optional[dict]:
-    """
-    Call a tool on the MCP Atlassian server.
-    
-    Args:
-        tool_name: Name of the MCP tool to call
-        arguments: Tool arguments as a dictionary
-        
-    Returns:
-        Tool result as a dictionary or None if failed
-    """
-    try:
-        session = await get_mcp_client()
-        if not session:
-            return None
-        
-        async with session:
-            result = await session.call_tool(tool_name, arguments)
-            
-            # Parse the result
-            if result and len(result.content) > 0:
-                content = result.content[0]
-                if hasattr(content, 'text'):
-                    return json.loads(content.text)
-            
-            return None
-            
-    except Exception as e:
-        print(f"  ❌ Error calling MCP tool {tool_name}: {e}")
-        return None
-
-
-async def get_jira_issue_via_mcp(issue_key: str) -> Optional[dict]:
-    if not issue_key:
-        return None
-    
-    print(f"  🔌 Fetching Jira issue via MCP: {issue_key}")
-    
-    result = await call_mcp_tool("jira_get_issue", {"issue_key": issue_key})
-    
-    if result:
-        print(f"  ✅ Jira issue fetched via MCP")
-    
-    return result
-
-
-async def get_confluence_page_via_mcp(page_id: str) -> Optional[dict]:
-    """
-    Fetch Confluence page using MCP Atlassian server.
-    
-    Args:
-        page_id: Confluence page ID
-        
-    Returns:
-        Confluence page data as dictionary or None if failed
-    """
-    if not page_id:
-        return None
-    
-    print(f"  🔌 Fetching Confluence page via MCP: {page_id}")
-    
-    result = await call_mcp_tool("confluence_get_page", {"page_id": page_id})
-    
-    if result:
-        print(f"  ✅ Confluence page fetched via MCP")
-    
-    return result
+# Note: MCP client functions are now imported from core.MCP.atlassian_mcp_client
+# The wrapper functions below use the MCP client when enabled, with fallback to direct API
 
 
 # =============================================================================
-# Async wrapper functions for Jira/Confluence (MCP or direct API)
+# Async wrapper functions for Jira/Confluence (MCP ONLY)
 # =============================================================================
 
 async def get_task_description_async(jira_task_number: Optional[str]) -> str:
     """
-    Fetch Jira task description using MCP if enabled, otherwise fall back to direct API.
+    Fetch Jira task description using MCP.
     
     Args:
         jira_task_number: The Jira task number (e.g., "PROJ-123")
@@ -241,44 +119,51 @@ async def get_task_description_async(jira_task_number: Optional[str]) -> str:
         The task description (translated to English) or an empty string if not available
     """
     if not jira_task_number:
+        print(f"  ⚠️  No Jira task number provided, skipping task description fetch")
         return ""
     
-    print(f"  📋 Fetching Jira task description: {jira_task_number}")
+    print(f"  📋 Fetching Jira task description via MCP: {jira_task_number}")
     
-    # Try MCP first if enabled
-    if is_mcp_enabled():
-        try:
-            issue_data = await get_jira_issue_via_mcp(jira_task_number)
-            if issue_data:
-                description = issue_data.get("fields", {}).get("description", "")
-                summary = issue_data.get("fields", {}).get("summary", "")
-                
-                # Combine summary and description
-                combined_text = ""
-                if description and summary:
-                    combined_text = f"Task: {summary}\n\nDescription:\n{description}"
-                elif summary:
-                    combined_text = f"Task: {summary}"
-                elif description:
-                    combined_text = description
-                else:
-                    return ""
-                
-                # Translate to English
-                print(f"  🌐 Translating task description to English...")
-                translated_text = translate_to_english(combined_text)
-                print(f"  ✅ Task description fetched and translated (via MCP)")
-                return translated_text
-        except Exception as e:
-            print(f"  ⚠️  Warning: MCP fetch failed, falling back to direct API: {e}")
-    
-    # Fall back to direct API call
-    return get_task_description(jira_task_number)
+    try:
+        issue_data = await get_jira_issue_via_mcp(jira_task_number)
+        if not issue_data:
+            print(f"  ⚠️  No data returned from MCP for {jira_task_number}")
+            return ""
+        
+        description = issue_data.get("fields", {}).get("description", "")
+        summary = issue_data.get("fields", {}).get("summary", "")
+        
+        print(f"     - Summary present: {bool(summary)}")
+        print(f"     - Description present: {bool(description)}")
+        
+        # Combine summary and description
+        combined_text = ""
+        if description and summary:
+            combined_text = f"Task: {summary}\n\nDescription:\n{description}"
+        elif summary:
+            combined_text = f"Task: {summary}"
+        elif description:
+            combined_text = description
+        else:
+            print(f"  ⚠️  No summary or description found in issue data")
+            return ""
+        
+        # Translate to English
+        print(f"  🌐 Translating task description to English...")
+        print(f"     - Original length: {len(combined_text)} chars")
+        translated_text = translate_to_english(combined_text)
+        print(f"     - Translated length: {len(translated_text)} chars")
+        print(f"  ✅ Task description fetched and translated via MCP")
+        return translated_text
+    except Exception as e:
+        print(f"  ❌ MCP fetch failed: {e}")
+        print(f"     Traceback: {traceback.format_exc()}")
+        return ""
 
 
 async def get_related_documents_async(jira_task_number: Optional[str]) -> str:
     """
-    Fetch related Confluence documents using MCP if enabled, otherwise fall back to direct API.
+    Fetch related Confluence documents using MCP.
     
     Args:
         jira_task_number: The Jira task number (e.g., "PROJ-123")
@@ -287,76 +172,83 @@ async def get_related_documents_async(jira_task_number: Optional[str]) -> str:
         Related documents content as a string (translated to English)
     """
     if not jira_task_number:
+        print(f"  ⚠️  No Jira task number provided, skipping related documents fetch")
         return ""
     
-    print(f"  📚 Fetching related Confluence documents...")
+    print(f"  📚 Fetching related Confluence documents via MCP for: {jira_task_number}")
     
-    # Try MCP first if enabled
-    if is_mcp_enabled():
-        try:
-            issue_data = await get_jira_issue_via_mcp(jira_task_number)
-            if not issue_data:
-                print(f"  ⚠️  Warning: MCP fetch failed, falling back to direct API")
-                return get_related_documents(jira_task_number)
+    try:
+        issue_data = await get_jira_issue_via_mcp(jira_task_number)
+        if not issue_data:
+            print(f"  ⚠️  No issue data returned from MCP")
+            return ""
+        
+        confluence_content = []
+        
+        # 1. Check remote links for Confluence URLs
+        issue_links = issue_data.get("fields", {}).get("issuelinks", [])
+        print(f"     - Found {len(issue_links)} issue link(s)")
+        
+        # 2. Process issue links to find Confluence pages
+        processed_links = 0
+        for link in issue_links:
+            outward_issue = link.get("outwardIssue")
+            inward_issue = link.get("inwardIssue")
             
-            confluence_content = []
-            
-            # 1. Check remote links for Confluence URLs
-            issue_links = issue_data.get("fields", {}).get("issuelinks", [])
-            
-            # Get remote links via MCP (if the MCP server supports it)
-            # For now, we'll parse the issue data we already have
-            
-            # 2. Process issue links to find Confluence pages
-            for link in issue_links:
-                outward_issue = link.get("outwardIssue")
-                inward_issue = link.get("inwardIssue")
-                
-                # Check both outward and inward links
-                for issue in [outward_issue, inward_issue]:
-                    if issue:
-                        issue_key = issue.get("key")
-                        if issue_key:
-                            # Fetch linked issue via MCP
-                            linked_issue_data = await get_jira_issue_via_mcp(issue_key)
+            # Check both outward and inward links
+            for issue in [outward_issue, inward_issue]:
+                if issue:
+                    issue_key = issue.get("key")
+                    if issue_key:
+                        processed_links += 1
+                        print(f"     - Processing linked issue: {issue_key}")
+                        
+                        # Fetch linked issue via MCP
+                        linked_issue_data = await get_jira_issue_via_mcp(issue_key)
+                        
+                        if linked_issue_data:
+                            description = linked_issue_data.get("fields", {}).get("description", "")
+                            summary = linked_issue_data.get("fields", {}).get("summary", "")
                             
-                            if linked_issue_data:
-                                description = linked_issue_data.get("fields", {}).get("description", "")
-                                summary = linked_issue_data.get("fields", {}).get("summary", "")
-                                
-                                # Look for Confluence URLs in description
-                                confluence_page_id = extract_confluence_page_id(description, summary)
-                                
-                                if confluence_page_id:
-                                    page_data = await get_confluence_page_via_mcp(confluence_page_id)
-                                    if page_data:
-                                        page_content = page_data.get("body", {}).get("storage", {}).get("value", "")
-                                        
-                                        # Clean HTML
-                                        text = re.sub(r'<[^>]+>', '', page_content)
-                                        text = text.replace('&nbsp;', ' ').replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-                                        text = re.sub(r'\s+', ' ', text).strip()
-                                        
-                                        print(f"  🌐 Translating: {summary or 'Confluence Page'}")
-                                        translated_content = translate_to_english(text)
-                                        confluence_content.append(f"=== {summary or 'Confluence Page'} ===\n{translated_content}\n")
-            
-            result = "\n".join(confluence_content) if confluence_content else ""
-            if len(confluence_content) > 0:
-                print(f"  ✅ Found {len(confluence_content)} Confluence page(s) (via MCP)")
-            else:
-                print(f"  ℹ️  No Confluence documents found")
-            return result
-            
-        except Exception as e:
-            print(f"  ⚠️  Warning: MCP fetch failed, falling back to direct API: {e}")
-    
-    # Fall back to direct API call
-    return get_related_documents(jira_task_number)
+                            # Look for Confluence URLs in description
+                            confluence_page_id = extract_confluence_page_id(description, summary)
+                            
+                            if confluence_page_id:
+                                print(f"        ✓ Found Confluence page ID: {confluence_page_id}")
+                                page_data = await get_confluence_page_via_mcp(confluence_page_id)
+                                if page_data:
+                                    page_content = page_data.get("body", {}).get("storage", {}).get("value", "")
+                                    
+                                    # Clean HTML
+                                    text = re.sub(r'<[^>]+>', '', page_content)
+                                    text = text.replace('&nbsp;', ' ').replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+                                    text = re.sub(r'\s+', ' ', text).strip()
+                                    
+                                    print(f"        - Page content length: {len(text)} chars")
+                                    print(f"  🌐 Translating: {summary or 'Confluence Page'}")
+                                    translated_content = translate_to_english(text)
+                                    confluence_content.append(f"=== {summary or 'Confluence Page'} ===\n{translated_content}\n")
+                            else:
+                                print(f"        ✗ No Confluence page ID found in linked issue")
+                        else:
+                            print(f"        ✗ Failed to fetch linked issue data")
+        
+        print(f"     - Processed {processed_links} linked issue(s)")
+        result = "\n".join(confluence_content) if confluence_content else ""
+        if len(confluence_content) > 0:
+            print(f"  ✅ Found {len(confluence_content)} Confluence page(s) via MCP")
+        else:
+            print(f"  ℹ️  No Confluence documents found in linked issues")
+        return result
+        
+    except Exception as e:
+        print(f"  ❌ MCP fetch failed: {e}")
+        print(f"     Traceback: {traceback.format_exc()}")
+        return ""
 
 
 # =============================================================================
-# Direct API functions (fallback when MCP is not available)
+# Helper functions
 # =============================================================================
 
 def translate_to_english(text: str) -> str:
@@ -396,205 +288,6 @@ def translate_to_english(text: str) -> str:
         print(f"Warning: Translation failed: {e}. Using original text.")
         return text
 
-
-def get_task_description(jira_task_number) -> str:
-    """
-    Fetch Jira task description using the Jira API and translate it to English.
-    
-    Args:
-        jira_task_number: The Jira task number (e.g., "PROJ-123")
-        
-    Returns:
-        The task description (translated to English) or an empty string if not available
-    """
-    if not jira_task_number:
-        return ""
-    
-    print(f"  📋 Fetching Jira task description: {jira_task_number}")
-    
-    try:
-        jira_url = os.getenv("JIRA_URL")
-        jira_personal_access_token = os.getenv("JIRA_PERSONAL_ACCESS_TOKEN")
-        
-        if not all([jira_url, jira_personal_access_token]):
-            print("  ⚠️  Warning: Jira credentials not configured. Skipping task description fetch.")
-            return ""
-        
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {jira_personal_access_token}"
-        }
-        
-        # Fetch issue details (using API v2 which is more widely supported)
-        issue_url = f"{jira_url}/rest/api/2/issue/{jira_task_number}"
-        response = requests.get(issue_url, headers=headers)
-        
-        if response.status_code == 200:
-            issue_data = response.json()
-            description = issue_data.get("fields", {}).get("description", "")
-            
-            # Extract summary as well
-            summary = issue_data.get("fields", {}).get("summary", "")
-            
-            # Combine summary and description
-            combined_text = ""
-            if description and summary:
-                combined_text = f"Task: {summary}\n\nDescription:\n{description}"
-            elif summary:
-                combined_text = f"Task: {summary}"
-            elif description:
-                combined_text = description
-            else:
-                return ""
-            
-            # Translate to English
-            print(f"  🌐 Translating task description to English...")
-            translated_text = translate_to_english(combined_text)
-            print(f"  ✅ Task description fetched and translated")
-            return translated_text
-        else:
-            print(f"  ⚠️  Warning: Failed to fetch Jira task {jira_task_number}. Status code: {response.status_code}")
-            return ""
-            
-    except Exception as e:
-        print(f"  ❌ Error fetching Jira task description: {e}")
-        return ""
-
-
-def get_related_documents(jira_task_number: Optional[str] = None) -> str:
-    """
-    Fetch related Confluence documents from Jira task's related links.
-    Automatically translates content to English.
-    
-    Args:
-        jira_task_number: The Jira task number (e.g., "PROJ-123")
-        
-    Returns:
-        Related documents content as a string (translated to English)
-    """
-    if not jira_task_number:
-        return ""
-    
-    print(f"  📚 Fetching related Confluence documents...")
-    
-    try:
-        jira_url = os.getenv("JIRA_URL")
-        jira_personal_access_token = os.getenv("JIRA_PERSONAL_ACCESS_TOKEN")
-        
-        confluence_url = os.getenv("CONFLUENCE_URL")
-        confluence_personal_access_token = os.getenv("CONFLUENCE_PERSONAL_ACCESS_TOKEN")
-        
-        if not all([jira_url, jira_personal_access_token]):
-            print("  ⚠️  Warning: Jira credentials not configured. Skipping related documents fetch.")
-            return ""
-        
-        if not all([confluence_url, confluence_personal_access_token]):
-            print("  ⚠️  Warning: Confluence credentials not configured. Skipping related documents fetch.")
-            return ""
-        
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {jira_personal_access_token}"
-        }
-        
-        # Fetch issue details (using API v2 which is more widely supported)
-        issue_url = f"{jira_url}/rest/api/2/issue/{jira_task_number}"
-        response = requests.get(issue_url, headers=headers)
-        
-        if response.status_code != 200:
-            print(f"  ⚠️  Warning: Failed to fetch Jira task {jira_task_number}. Status code: {response.status_code}")
-            return ""
-        
-        issue_data = response.json()
-        
-        # Extract issue links
-        issue_links = issue_data.get("fields", {}).get("issuelinks", [])
-
-        confluence_content = []
-        confluence_headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {confluence_personal_access_token}"
-        }
-        
-        # 1. Check remote links (web links) for direct Confluence URLs
-        try:
-            remotelink_url = f"{jira_url}/rest/api/2/issue/{jira_task_number}/remotelink"
-            remotelink_response = requests.get(remotelink_url, headers=headers)
-            
-            if remotelink_response.status_code == 200:
-                remote_links = remotelink_response.json()
-                if len(remote_links) > 0:
-                    print(f"  🔗 Found {len(remote_links)} remote link(s)")
-                
-                for remote_link in remote_links:
-                    link_object = remote_link.get("object", {})
-                    link_url = link_object.get("url", "")
-                    link_title = link_object.get("title", "")
-                    
-                    # Check if this is a Confluence URL
-                    if "confluence" in link_url.lower() or confluence_url.replace("http://", "").replace("https://", "").strip("/") in link_url:
-                        # Extract page ID from URL
-                        confluence_page_id = extract_confluence_page_id_from_url(link_url)
-                        
-                        if confluence_page_id:
-                            page_content = fetch_confluence_page(confluence_url, confluence_headers, confluence_page_id)
-                            if page_content:
-                                print(f"  🌐 Translating: {link_title or 'Confluence Page'}")
-                                translated_content = translate_to_english(page_content)
-                                confluence_content.append(f"=== {link_title or 'Confluence Page'} ===\n{translated_content}\n")
-            else:
-                print(f"  ⚠️  Warning: Failed to fetch remote links. Status code: {remotelink_response.status_code}")
-        except Exception as e:
-            print(f"  ❌ Error fetching remote links: {e}")
-        
-        # 2. Process issue links to find Confluence pages
-        for link in issue_links:
-            outward_issue = link.get("outwardIssue")
-            inward_issue = link.get("inwardIssue")
-            
-            # Check both outward and inward links
-            for issue in [outward_issue, inward_issue]:
-                if issue:
-                    issue_key = issue.get("key")
-                    if issue_key:
-                        # Check if this links to a Confluence page
-                        try:
-                            linked_issue_url = f"{jira_url}/rest/api/2/issue/{issue_key}"
-                            linked_response = requests.get(linked_issue_url, headers=headers)
-                            
-                            if linked_response.status_code == 200:
-                                linked_issue_data = linked_response.json()
-                                issue_type = linked_issue_data.get("fields", {}).get("issuetype", {}).get("name", "")
-                                
-                                # Check if it's a Confluence page link
-                                if "confluence" in issue_type.lower() or "page" in issue_type.lower():
-                                    # Try to extract Confluence page ID from URL or other fields
-                                    description = linked_issue_data.get("fields", {}).get("description", "")
-                                    summary = linked_issue_data.get("fields", {}).get("summary", "")
-                                    
-                                    # Look for Confluence URLs in description
-                                    confluence_page_id = extract_confluence_page_id(description, summary)
-                                    
-                                    if confluence_page_id:
-                                        page_content = fetch_confluence_page(confluence_url, confluence_headers, confluence_page_id)
-                                        if page_content:
-                                            print(f"  🌐 Translating: {summary or 'Confluence Page'}")
-                                            translated_content = translate_to_english(page_content)
-                                            confluence_content.append(f"=== {summary or 'Confluence Page'} ===\n{translated_content}\n")
-                        except Exception as e:
-                            print(f"  ❌ Error processing linked issue {issue_key}: {e}")
-                            continue
-        
-        result = "\n".join(confluence_content) if confluence_content else ""
-        if len(confluence_content) > 0:
-            print(f"  ✅ Found {len(confluence_content)} Confluence page(s)")
-        else:
-            print(f"  ℹ️  No Confluence documents found")
-        return result
-         
-    except Exception as e:
-        print(f"  ❌ Error fetching related documents: {e}")
-        return ""
 
 def extract_confluence_page_id_from_url(url: str) -> Optional[str]:
     """
@@ -661,50 +354,11 @@ def extract_confluence_page_id(description: str, summary: str) -> Optional[str]:
     return None
 
 
-def fetch_confluence_page(confluence_url: str, auth, headers: dict, page_id: str) -> Optional[str]:
-    """
-    Fetch content from a Confluence page.
-    
-    Args:
-        confluence_url: Base URL of Confluence instance
-        auth: HTTPBasicAuth credentials
-        headers: Request headers
-        page_id: Confluence page ID
-        
-    Returns:
-        Page content as a string or None if failed
-    """
-    try:
-        # Fetch page content in storage format
-        page_url = f"{confluence_url}/rest/api/content/{page_id}?expand=body.storage"
-        response = requests.get(page_url, auth=auth, headers=headers)
-        
-        if response.status_code == 200:
-            page_data = response.json()
-            # Extract text from storage format
-            body_storage = page_data.get("body", {}).get("storage", {}).get("value", "")
-            
-            # Basic HTML tag removal (you might want to use BeautifulSoup for better parsing)
-            # Remove HTML tags
-            text = re.sub(r'<[^>]+>', '', body_storage)
-            # Decode HTML entities
-            text = text.replace('&nbsp;', ' ').replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-            # Clean up whitespace
-            text = re.sub(r'\s+', ' ', text).strip()
-            
-            return text
-        else:
-            print(f"Warning: Failed to fetch Confluence page {page_id}. Status code: {response.status_code}")
-            return None
-            
-    except Exception as e:
-        print(f"Error fetching Confluence page {page_id}: {e}")
-        return None
-
-
 def get_gitlab_file_content(context: 'ServiceReviewerContext', file_path: str) -> Optional[str]:
     """
-    Fetch file content from GitLab.
+    Fetch file content from GitLab using direct API.
+    Note: This function uses direct GitLab API for package context gathering.
+    The main MR review flow uses MCP for all GitLab operations.
     
     Args:
         context: ServiceReviewerContext with GitLab credentials
@@ -743,7 +397,9 @@ def get_gitlab_file_content(context: 'ServiceReviewerContext', file_path: str) -
 
 def get_gitlab_directory_tree(context: 'ServiceReviewerContext', dir_path: str) -> list[str]:
     """
-    List files in a GitLab directory.
+    List files in a GitLab directory using direct API.
+    Note: This function uses direct GitLab API for package context gathering.
+    The main MR review flow uses MCP for all GitLab operations.
     
     Args:
         context: ServiceReviewerContext with GitLab credentials
@@ -962,7 +618,7 @@ CONSTRAINTS:
 
 DATABASE CONTEXT: Postgres + GORM
 
-RESPONSE: Return SemanticReviewResponse with "issues" array. Each issue needs: problem (specific), suggestion (actionable with code), file_name, line (exact number), severity ("high"|"medium"|"low").
+RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (specific), suggestion (actionable with code), file_name, line (exact number), severity ("high"|"medium"|"low").
 
 Package Context (Dependencies, Structure, All Package Files):
 {package_context if package_context else "Package context not available."}
@@ -1015,7 +671,7 @@ CONSTRAINTS:
 - Focus on changed code (Git Diff)
 - NO technical/performance/error handling review
 
-RESPONSE: Return BusinessLogicReviewResponse with "issues" array. Each issue needs: problem (with requirement reference), suggestion (with spec reference), file_name, line (exact number), severity ("high"|"medium"|"low").
+RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (with requirement reference), suggestion (with spec reference), file_name, line (exact number), severity ("high"|"medium"|"low").
 
 Task Description:
 {task_description if task_description else "No task description available."}
@@ -1042,7 +698,7 @@ semantic_reviewer = Agent(
     name="semantic code reviewer",
     instructions=semantic_reviewer_instructions,
     model="gpt-5-nano",
-    output_type=SemanticReviewResponse,
+    output_type=ReviewResponse,
     model_settings=ModelSettings(
         parallel_tool_calls=True,
         store=True,
@@ -1058,7 +714,7 @@ business_logic_reviewer = Agent(
     name="business logic reviewer",
     instructions=business_logic_reviewer_instructions,
     model="gpt-5-nano",
-    output_type=BusinessLogicReviewResponse,
+    output_type=ReviewResponse,
     model_settings=ModelSettings(
         parallel_tool_calls=True,
         store=True,
@@ -1070,7 +726,7 @@ business_logic_reviewer = Agent(
 
 
 # Orchestrator function that calls both reviewers and combines results
-async def run_combined_review(context: ServiceReviewerContext) -> ServiceReviewResponse:
+async def run_combined_review(context: ServiceReviewerContext) -> ReviewResponse:
     """
     Orchestrates both semantic and business logic reviews.
     This function should be called from the workflow level.
@@ -1147,4 +803,4 @@ async def run_combined_review(context: ServiceReviewerContext) -> ServiceReviewR
     print(f"    📊 Total Issues Found: {len(issues)}")
     print("    " + "="*50 + "\n")
     
-    return ServiceReviewResponse(issues=issues)
+    return ReviewResponse(issues=issues)

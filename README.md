@@ -21,10 +21,10 @@ An AI-powered code review system for the application. This project provides spec
   - Security vulnerability detection
 
 - **Integration**:
-  - GitLab API integration for fetching file contents
-  - Jira integration for fetching task descriptions
-  - Confluence integration for related documentation
-  - MCP Atlassian support (optional)
+  - **GitLab MCP** - Uses GitLab MCP server for all GitLab operations (merge requests, file contents, comments)
+  - **Atlassian MCP** - Uses Atlassian MCP server for Jira and Confluence integration
+  - All integrations use MCP (Model Context Protocol) - no direct API fallbacks
+  - Note: Some internal functions use direct GitLab API for package context gathering only
 
 ## Prerequisites
 
@@ -55,6 +55,29 @@ An AI-powered code review system for the application. This project provides spec
    pip install -r requirements.txt
    ```
 
+4. **Set up GitLab MCP Server (Required)**:
+
+   The code review agent uses the GitLab MCP server for all GitLab operations. You must set it up:
+
+   **Option A: Using Docker (Recommended)**
+
+   Clone and build the GitLab MCP server:
+
+   ```bash
+   git clone https://github.com/zereight/gitlab-mcp.git mcp-gitlab
+   cd mcp-gitlab
+   npm install
+   npm run build
+   ```
+
+   Then create a `Dockerfile` in the `mcp-gitlab` directory or update `docker-compose.yml` to build from source.
+
+   **Option B: Run locally**
+
+   Install and run the GitLab MCP server locally, then update `MCP_GITLAB_HOST` in your `.env` file accordingly.
+
+   **Note**: The agent requires MCP servers to be running. There are no direct API fallbacks.
+
 ## Configuration
 
 1. **Copy the environment template**:
@@ -77,14 +100,21 @@ An AI-powered code review system for the application. This project provides spec
    CONFLUENCE_URL=http://confluence.example.com/
    CONFLUENCE_PERSONAL_ACCESS_TOKEN=your_confluence_personal_access_token_here
 
-   # MCP Atlassian Configuration (Optional)
-   MCP_ATLASSIAN_ENABLED=false
+   # MCP Atlassian Configuration (Required for Jira/Confluence integration)
+   MCP_ATLASSIAN_ENABLED=true
    MCP_ATLASSIAN_HOST=localhost
    MCP_ATLASSIAN_PORT=3000
    MCP_ATLASSIAN_CONTAINER=mcp-atlassian
    MCP_ATLASSIAN_SSH_USER=root
 
-   # GitLab Configuration (Required for MR review)
+   # MCP GitLab Configuration (Required - uses MCP for all GitLab operations)
+   MCP_GITLAB_ENABLED=true
+   MCP_GITLAB_HOST=localhost
+   MCP_GITLAB_CONTAINER=mcp-gitlab
+   MCP_GITLAB_SSH_USER=root
+
+   # GitLab Configuration (Required - used by MCP servers and internal package context functions)
+   GITLAB_URL=https://gitlab.example.com
    GITLAB_TOKEN=your_gitlab_personal_access_token_here
    ```
 
@@ -113,7 +143,7 @@ This project provides reviewer agents as Python modules. Import and use them in 
 
 ```python
 import asyncio
-from service_reviewer import ServiceReviewerContext, run_combined_review
+from agents.backend.service_reviewer.service_reviewer import ServiceReviewerContext, run_combined_review
 
 async def review_code():
     # Create context with file content and metadata
@@ -158,7 +188,7 @@ asyncio.run(review_code())
 ### Example: Using SQL Reviewer
 
 ```python
-from sql_reviewer import SqlReviewerContext, sql_reviewer
+from agents.backend.sql_reviewer.sql_reviewer import SqlReviewerContext, sql_reviewer
 from agents import Runner, RunConfig
 
 async def review_sql():
@@ -190,7 +220,7 @@ async def review_sql():
 ### Example: Using Starter Agent for File Classification
 
 ```python
-from starter_agent import starter_agent
+from agents.start.starter_agent import starter_agent
 from agents import Runner, RunConfig
 
 async def classify_file():
@@ -267,6 +297,11 @@ codereviewagent/
 | `MCP_ATLASSIAN_HOST`               | No       | MCP server host (default: localhost)                   |
 | `MCP_ATLASSIAN_PORT`               | No       | MCP server port (default: 3000)                        |
 | `MCP_ATLASSIAN_CONTAINER`          | No       | Docker container name (default: mcp-atlassian)         |
+| `MCP_GITLAB_ENABLED`               | No       | Enable MCP GitLab integration (default: true)          |
+| `MCP_GITLAB_HOST`                  | No       | GitLab MCP server host (default: localhost)            |
+| `MCP_GITLAB_CONTAINER`             | No       | GitLab MCP container name (default: mcp-gitlab)        |
+| `GITLAB_URL`                       | Yes\*    | GitLab instance URL                                    |
+| `GITLAB_TOKEN`                     | Yes\*    | GitLab personal access token (required for MR reviews) |
 
 \* Required when using `main.py --gitlab-mr` command
 

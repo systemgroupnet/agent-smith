@@ -11,25 +11,14 @@ Usage:
 
 from __future__ import annotations
 
-from agents import Agent, ModelSettings, RunContextWrapper, Runner, RunConfig
+from agents import Agent, ModelSettings, RunContextWrapper
 from openai.types.shared.reasoning import Reasoning
-from pydantic import BaseModel
 import os
 import re
 import requests
 from typing import Optional
 
-
-class ReviewIssue(BaseModel):
-    problem: str
-    suggestion: str
-    file_name: str
-    line: int
-    severity: str  # "high", "medium", "low"
-
-
-class DataviewReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
+from dto.general import ReviewResponse
 
 
 class DataviewReviewerContext:
@@ -433,7 +422,7 @@ CRITICAL NOTES:
 
 
 RESPONSE FORMAT:
-Return a DataviewReviewResponse with an "issues" field containing a list of ReviewIssue objects.
+Return a ReviewResponse with an "issues" field containing a list of ReviewIssue objects.
 Each ReviewIssue has: problem, suggestion, file_name, line, and severity ("high"|"medium"|"low") fields.
 
 IMPORTANT: Only report significant issues that impact correctness, performance, maintainability, or semantic consistency. Be specific and avoid generic suggestions. DO NOT validate business logic or business requirements.
@@ -453,7 +442,7 @@ dataview_reviewer = Agent(
     name="dataview reviewer",
     instructions=dataview_reviewer_instructions,
     model="gpt-5-nano",
-    output_type=DataviewReviewResponse,
+    output_type=ReviewResponse,
     model_settings=ModelSettings(
         parallel_tool_calls=True,
         store=True,

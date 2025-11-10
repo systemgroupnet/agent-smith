@@ -1,18 +1,7 @@
 from agents import Agent, ModelSettings, RunContextWrapper
 from openai.types.shared.reasoning import Reasoning
-from pydantic import BaseModel
 
-
-class ReviewIssue(BaseModel):
-    problem: str
-    suggestion: str
-    file_name: str
-    line: int
-    severity: str  # "high", "medium", "low"
-
-
-class TestReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
+from dto.general import ReviewResponse
 
 
 class TestReviewerContext:
@@ -203,7 +192,7 @@ test_reviewer = Agent(
     name="test reviewer",
     instructions=test_reviewer_instructions,
     model="gpt-5-nano",
-    output_type=TestReviewResponse,
+    output_type=ReviewResponse,
     model_settings=ModelSettings(
         store=True,
         reasoning=Reasoning(

@@ -1,18 +1,7 @@
 from agents import Agent, ModelSettings, RunContextWrapper
 from openai.types.shared.reasoning import Reasoning
-from pydantic import BaseModel
 
-
-class ReviewIssue(BaseModel):
-    problem: str
-    suggestion: str
-    file_name: str
-    line: int
-    severity: str  # "high", "medium", "low"
-
-
-class ScssReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
+from dto.general import ReviewResponse
 
 
 class ScssReviewerContext:
@@ -205,7 +194,7 @@ class ReviewIssue(BaseModel):
     severity: str  # "high", "medium", "low"
 
 
-class ScssReviewResponse(BaseModel):
+class ReviewResponse(BaseModel):
     issues: list[ReviewIssue]
 
 ```
@@ -218,7 +207,7 @@ class ScssReviewResponse(BaseModel):
 > NOTICE: Do not say anything, only give me the JSON format result
 
 RESPONSE FORMAT:
-Return a ScssReviewResponse with an "issues" field containing a list of ReviewIssue objects.
+Return a ReviewResponse with an "issues" field containing a list of ReviewIssue objects.
 
 Each ReviewIssue has: problem, suggestion, file_name, line, and severity ("high"|"medium"|"low") fields.
 
@@ -244,7 +233,7 @@ scss_reviewer = Agent(
     name="scss reviewer",
     instructions=scss_reviewer_instructions,
     model="gpt-5",
-    output_type=ScssReviewResponse,
+    output_type=ReviewResponse,
     model_settings=ModelSettings(
         store=True,
         reasoning=Reasoning(

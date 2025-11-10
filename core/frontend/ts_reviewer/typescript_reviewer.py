@@ -1,17 +1,7 @@
 from agents import Agent, ModelSettings, RunContextWrapper
 from openai.types.shared.reasoning import Reasoning
-from pydantic import BaseModel
 
-class ReviewIssue(BaseModel):
-    problem: str
-    suggestion: str
-    file_name: str
-    line: int
-    severity: str  # "high", "medium", "low"
-
-
-class TypescriptReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
+from dto.general import ReviewResponse
 
 
 class TypescriptReviewerContext:
@@ -146,7 +136,7 @@ class ReviewIssue(BaseModel):
     severity: str  # "high", "medium", "low"
 
 
-class TypescriptReviewResponse(BaseModel):
+class ReviewResponse(BaseModel):
     issues: list[ReviewIssue]
 ```
 
@@ -158,7 +148,7 @@ class TypescriptReviewResponse(BaseModel):
 > NOTICE: Do not say anything, only give me the JSON format result
 
 RESPONSE FORMAT:
-Return a TypescriptReviewResponse with an "issues" field containing a list of ReviewIssue objects.
+Return a ReviewResponse with an "issues" field containing a list of ReviewIssue objects.
 
 Each ReviewIssue has: problem, suggestion, file_name, line, and severity ("high"|"medium"|"low") fields.
 
@@ -183,7 +173,7 @@ typescript_reviewer = Agent(
     name="typescript reviewer",
     instructions=typescript_reviewer_instructions,
     model="gpt-5",
-    output_type=TypescriptReviewResponse,
+    output_type=ReviewResponse,
     model_settings=ModelSettings(
         store=True,
         reasoning=Reasoning(

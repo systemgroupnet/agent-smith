@@ -1,18 +1,7 @@
 from agents import Agent, ModelSettings, RunContextWrapper
 from openai.types.shared.reasoning import Reasoning
-from pydantic import BaseModel
 
-
-class ReviewIssue(BaseModel):
-    problem: str
-    suggestion: str
-    file_name: str
-    line: int
-    severity: str  # "high", "medium", "low"
-
-
-class HtmlReviewResponse(BaseModel):
-    issues: list[ReviewIssue]
+from dto.general import ReviewResponse
 
 
 class HtmlReviewerContext:
@@ -277,7 +266,7 @@ class ReviewIssue(BaseModel):
     severity: str  # "high", "medium", "low"
 
 
-class HtmlReviewResponse(BaseModel):
+class ReviewResponse(BaseModel):
     issues: list[ReviewIssue]
 
 ```
@@ -290,7 +279,7 @@ class HtmlReviewResponse(BaseModel):
 > NOTICE: Do not say anything, only give me the JSON format result
 
 RESPONSE FORMAT:
-Return a HtmlReviewResponse with an "issues" field containing a list of ReviewIssue objects.
+Return a ReviewResponse with an "issues" field containing a list of ReviewIssue objects.
 
 Each ReviewIssue has: problem, suggestion, file_name, line, and severity ("high"|"medium"|"low") fields.
 
@@ -317,7 +306,7 @@ html_reviewer = Agent(
     name="html reviewer",
     instructions=html_reviewer_instructions,
     model="gpt-5",
-    output_type=HtmlReviewResponse,
+    output_type=ReviewResponse,
     model_settings=ModelSettings(
         store=True,
         reasoning=Reasoning(
