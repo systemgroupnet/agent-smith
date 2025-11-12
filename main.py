@@ -23,6 +23,10 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Setup proxy configuration for OpenAI API calls
+from core.config import setup_proxy
+setup_proxy()
+
 # Import reviewers
 from core.frontend.html_reviewer.html_reviewer import HtmlReviewerContext, html_reviewer
 from core.start.starter_agent import starter_agent, StarterResponse
