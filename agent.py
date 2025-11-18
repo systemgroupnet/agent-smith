@@ -1,6 +1,12 @@
 from agents import TResponseInputItem, Runner, RunConfig, trace
 from pydantic import BaseModel
 import os
+from dotenv import load_dotenv
+
+# Load environment variables and setup proxy
+load_dotenv()
+from core.config import setup_proxy
+setup_proxy()
 
 from core.start import starter_agent
 from core.backend.pbook_reviewer import pbook_reviewer, PbookReviewerContext

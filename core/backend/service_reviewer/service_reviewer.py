@@ -382,7 +382,8 @@ def get_gitlab_file_content(context: 'ServiceReviewerContext', file_path: str) -
         
         # Fetch file content
         file_url = f"{gitlab_url}/projects/{encoded_project_path}/repository/files/{encoded_file_path}/raw?ref={context.source_branch}"
-        response = requests.get(file_url, headers=headers)
+        # Explicitly disable proxy for GitLab requests
+        response = requests.get(file_url, headers=headers, proxies={'http': None, 'https': None})
         
         if response.status_code == 200:
             return response.text
@@ -435,7 +436,8 @@ def get_gitlab_directory_tree(context: 'ServiceReviewerContext', dir_path: str) 
         print(f"    - URL: {tree_url}")
         print(f"    - Params: {params}")
         
-        response = requests.get(tree_url, headers=headers, params=params)
+        # Explicitly disable proxy for GitLab requests
+        response = requests.get(tree_url, headers=headers, params=params, proxies={'http': None, 'https': None})
         
         print(f"  🔍 DEBUG - Response status: {response.status_code}")
         

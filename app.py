@@ -1,6 +1,12 @@
 from flask import Flask, render_template, request, jsonify
 from main import process_mr
 import asyncio
+from dotenv import load_dotenv
+
+# Load environment variables and setup proxy
+load_dotenv()
+from core.config import setup_proxy
+setup_proxy()
 
 app = Flask(__name__,static_folder='assets', static_url_path='/assets')
 

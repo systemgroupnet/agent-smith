@@ -74,7 +74,8 @@ def get_task_description(jira_task_number: Optional[str] = None) -> str:
 
         # Fetch issue details
         issue_url = f"{jira_url}/rest/api/3/issue/{jira_task_number}"
-        response = requests.get(issue_url, auth=auth, headers=headers)
+        # Explicitly disable proxy for Atlassian requests
+        response = requests.get(issue_url, auth=auth, headers=headers, proxies={'http': None, 'https': None})
 
         if response.status_code == 200:
             issue_data = response.json()
@@ -136,7 +137,8 @@ def get_related_documents(jira_task_number: Optional[str] = None) -> str:
         
         # Fetch issue links
         issue_url = f"{jira_url}/rest/api/3/issue/{jira_task_number}"
-        response = requests.get(issue_url, auth=auth, headers=headers)
+        # Explicitly disable proxy for Atlassian requests
+        response = requests.get(issue_url, auth=auth, headers=headers, proxies={'http': None, 'https': None})
         
         if response.status_code != 200:
             print(f"Warning: Failed to fetch Jira task {jira_task_number}. Status code: {response.status_code}")
@@ -165,7 +167,8 @@ def get_related_documents(jira_task_number: Optional[str] = None) -> str:
                         # We need to fetch the issue to see if it's a Confluence link
                         try:
                             linked_issue_url = f"{jira_url}/rest/api/3/issue/{issue_key}"
-                            linked_response = requests.get(linked_issue_url, auth=auth, headers=headers)
+                            # Explicitly disable proxy for Atlassian requests
+                            linked_response = requests.get(linked_issue_url, auth=auth, headers=headers, proxies={'http': None, 'https': None})
                             
                             if linked_response.status_code == 200:
                                 linked_issue_data = linked_response.json()
@@ -242,7 +245,8 @@ def fetch_confluence_page(confluence_url: str, auth, headers: dict, page_id: str
     try:
         # Fetch page content in storage format
         page_url = f"{confluence_url}/rest/api/content/{page_id}?expand=body.storage"
-        response = requests.get(page_url, auth=auth, headers=headers)
+        # Explicitly disable proxy for Atlassian requests
+        response = requests.get(page_url, auth=auth, headers=headers, proxies={'http': None, 'https': None})
         
         if response.status_code == 200:
             page_data = response.json()
@@ -291,7 +295,8 @@ def get_gitlab_file_content(context: 'DataviewReviewerContext', file_path: str) 
         
         # Fetch file content
         file_url = f"{gitlab_url}/projects/{context.project_path}/repository/files/{encoded_path}/raw?ref={context.source_branch}"
-        response = requests.get(file_url, headers=headers)
+        # Explicitly disable proxy for GitLab requests
+        response = requests.get(file_url, headers=headers, proxies={'http': None, 'https': None})
         
         if response.status_code == 200:
             return response.text

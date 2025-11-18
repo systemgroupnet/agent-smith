@@ -92,6 +92,14 @@ An AI-powered code review system for the application. This project provides spec
    # OpenAI API Key (Required)
    OPENAI_API_KEY=your_openai_api_key_here
 
+   # Proxy Configuration (Optional - for OpenAI API calls)
+   # Leave empty if not using a proxy
+   HTTP_PROXY=http://proxy.example.com:8080
+   HTTPS_PROXY=http://proxy.example.com:8080
+   # Proxy authentication (optional) - leave empty if proxy doesn't require authentication
+   PROXY_USERNAME=your_proxy_username
+   PROXY_PASSWORD=your_proxy_password
+
    # Jira Configuration (Optional - for fetching task descriptions)
    JIRA_URL=http://jira.example.com
    JIRA_PERSONAL_ACCESS_TOKEN=your_jira_personal_access_token_here
@@ -288,6 +296,10 @@ codereviewagent/
 | Variable                           | Required | Description                                            |
 | ---------------------------------- | -------- | ------------------------------------------------------ |
 | `OPENAI_API_KEY`                   | Yes      | OpenAI API key for AI-powered reviews                  |
+| `HTTP_PROXY`                       | No       | HTTP proxy URL (e.g., http://proxy.example.com:8080)   |
+| `HTTPS_PROXY`                      | No       | HTTPS proxy URL (e.g., http://proxy.example.com:8080)  |
+| `PROXY_USERNAME`                   | No       | Proxy authentication username (if required)            |
+| `PROXY_PASSWORD`                   | No       | Proxy authentication password (if required)            |
 | `GITLAB_TOKEN`                     | Yes\*    | GitLab personal access token (required for MR reviews) |
 | `JIRA_URL`                         | No       | Jira instance URL                                      |
 | `JIRA_PERSONAL_ACCESS_TOKEN`       | No       | Jira personal access token                             |
@@ -323,6 +335,30 @@ This project is designed to be integrated into CI/CD pipelines or code review wo
 - Use `.env.example` as a template for team members
 - Make sure to set `GITLAB_TOKEN` in `.env` for merge request reviews
 
+## Proxy Configuration
+
+If you're behind a corporate proxy or need to route OpenAI API calls through a proxy server, configure the proxy settings in your `.env` file:
+
+### Without Authentication
+
+```env
+HTTP_PROXY=http://proxy.example.com:8080
+HTTPS_PROXY=http://proxy.example.com:8080
+```
+
+### With Authentication
+
+```env
+HTTP_PROXY=http://proxy.example.com:8080
+HTTPS_PROXY=http://proxy.example.com:8080
+PROXY_USERNAME=your_username
+PROXY_PASSWORD=your_password
+```
+
+The proxy configuration is automatically applied at startup for all OpenAI API calls. The credentials are URL-encoded and embedded in the proxy URL securely.
+
+**Note**: Leave the proxy variables empty or unset if you don't need a proxy.
+
 ## Troubleshooting
 
 ### Environment Variables Not Loading
@@ -338,6 +374,16 @@ If environment variables aren't being read:
 - Verify API keys are correct in `.env`
 - Check network connectivity
 - Ensure URLs are accessible (Jira, Confluence, etc.)
+- If using a proxy, verify proxy settings and credentials are correct
+
+### Proxy Issues
+
+If OpenAI API calls fail with proxy:
+
+- Verify `HTTP_PROXY` and `HTTPS_PROXY` are correctly formatted
+- Check proxy credentials if authentication is required
+- Ensure proxy server allows outbound connections to api.openai.com
+- Test proxy connectivity: `curl -x http://proxy:8080 https://api.openai.com`
 
 ### Missing Dependencies
 
