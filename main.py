@@ -27,16 +27,9 @@ load_dotenv()
 from core.config import setup_proxy
 setup_proxy()
 
-# Import reviewers
-from core.frontend.html_reviewer.html_reviewer import HtmlReviewerContext, html_reviewer
-from core.start.starter_agent import starter_agent, StarterResponse
-from core.backend.service_reviewer.service_reviewer import ServiceReviewerContext, run_combined_review
-from core.backend.sql_reviewer.sql_reviewer import SqlReviewerContext, sql_reviewer
-from core.backend.dataview_reviewer.dataview_reviewer import DataviewReviewerContext, dataview_reviewer
-from core.backend.test_reviewer.test_reviewer import TestReviewerContext, test_reviewer
-from core.backend.pbook_reviewer.pbook_reviewer import PbookReviewerContext, pbook_reviewer
-from core.frontend.scss_reviewer.scss_reviewer import ScssReviewerContext, scss_reviewer
-from core.frontend.ts_reviewer.typescript_reviewer import TypescriptReviewerContext, typescript_reviewer
+# Import LangGraph workflow
+from core.workflow.graph import review_workflow
+from core.workflow.state import create_initial_state, StarterResponse
 
 # Import GitLab MCP client (MCP ONLY - No fallback to direct API)
 from core.MCP.gitlab_mcp_client import (
@@ -104,15 +97,18 @@ async def get_file_content(gitlab_url: str, project_path: str, file_path: str, b
     return await get_gitlab_file_content_via_mcp(project_path, file_path, branch)
 
 
-async def classify_file(
+async def review_file_with_workflow(
     file_path: str,
     content: str,
     diff: str,
     merge_request_title: str,
     target_branch: str,
-    source_branch: str
-) -> Optional[StarterResponse]:
-    """Classify a file using the starter agent."""
+    source_branch: str,
+    gitlab_token: Optional[str],
+    gitlab_domain: Optional[str],
+    project_path: Optional[str]
+) -> Optional[list]:
+    """Review a file using LangGraph workflow."""
     try:
         input_text = f"""
 file_path: {file_path}
@@ -125,215 +121,38 @@ target_branch: {target_branch}
 source_branch: {source_branch}
 """
         
-        result = await starter_agent.run(input_text)
-        
-        if result.data:
-            return result.data
-        return None
-    except Exception as e:
-        print(f"Error classifying file {file_path}: {e}")
-        return None
-
-
-async def review_service_file(
-    classification: StarterResponse,
-    diff: str,
-    gitlab_token: Optional[str],
-    gitlab_domain: Optional[str],
-    project_path: Optional[str],
-    source_branch: Optional[str]
-) -> Optional[list]:
-    """Review a service file."""
-    try:
-        context = ServiceReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            jira_task_number=classification.jira_task_number if classification.jira_task_number != "UNKNOWN" else None,
-            package_name=classification.package_name,
-            module_name=classification.module_name,
-            file_name=classification.file_name,
-            file_path=None,  # Can be extracted from classification if needed
-            gitlab_token=gitlab_token,
-            gitlab_domain=gitlab_domain.replace("https://", "").replace("http://", "") if gitlab_domain else None,
+        # Create initial state
+        initial_state = create_initial_state(
+            input_text=input_text,
+            file_path=file_path,
+            content=content,
+            diff=diff,
+            merge_request_title=merge_request_title,
+            target_branch=target_branch,
             source_branch=source_branch,
+            gitlab_token=gitlab_token,
+            gitlab_domain=gitlab_domain,
             project_path=project_path
         )
         
-        result = await run_combined_review(context)
-        return result.issues if result else []
-    except Exception as e:
-        print(f"Error reviewing service file {classification.file_name}: {e}")
-        return []
-
-
-async def review_scss_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
-    """Review a scss file."""
-    try:
-        context = ScssReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name,
-        )
-        result = await scss_reviewer.run(
-            "Review this scss file",
-            deps=context
-        )
-        if result.data:
-            return result.data.issues
+        # Run workflow
+        final_state = await review_workflow.ainvoke(initial_state)
+        
+        # Extract issues from output
+        if final_state.get("error"):
+            print(f"  ❌ Workflow error: {final_state['error']}")
+            return []
+        
+        output = final_state.get("output")
+        if output and isinstance(output, dict):
+            issues = output.get("issues", [])
+            return issues
+        
         return []
     except Exception as e:
-        print(f"Error reviewing scss file {classification.file_name}: {e}")
-        return []
+        print(f"Error reviewing file {file_path}: {e}")
+        return None
 
-
-async def review_html_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
-    """Review a html file."""
-    try:
-        context = HtmlReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        result = await html_reviewer.run(
-            "Review this html file",
-            deps=context
-        )
-        if result.data:
-            return result.data.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing html file {classification.file_name}: {e}")
-        return []
-
-
-async def review_typescript_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
-    """Review a typescript file."""
-    try:
-        context = TypescriptReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        result = await typescript_reviewer.run(
-            "Review this typescript file",
-            deps=context
-        )
-        if result.data:
-            return result.data.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing typescript file {classification.file_name}: {e}")
-        return []
-
-
-async def review_sql_file(classification: StarterResponse, diff: str) -> Optional[list]:
-    """Review a SQL file."""
-    try:
-        context = SqlReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        
-        result = await sql_reviewer.run(
-            "Review this SQL file",
-            deps=context
-        )
-        
-        if result.data:
-            return result.data.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing SQL file {classification.file_name}: {e}")
-        return []
-
-
-async def review_dataview_file(
-    classification: StarterResponse,
-    diff: str,
-    gitlab_token: Optional[str],
-    gitlab_domain: Optional[str],
-    project_path: Optional[str],
-    source_branch: Optional[str]
-) -> Optional[list]:
-    """Review a dataview file."""
-    try:
-        context = DataviewReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            jira_task_number=classification.jira_task_number if classification.jira_task_number != "UNKNOWN" else None,
-            package_name=classification.package_name,
-            module_name=classification.module_name,
-            file_name=classification.file_name,
-            gitlab_token=gitlab_token,
-            gitlab_domain=gitlab_domain.replace("https://", "").replace("http://", "") if gitlab_domain else None,
-            source_branch=source_branch,
-            project_path=project_path
-        )
-        
-        result = await dataview_reviewer.run(
-            "Review this dataview file",
-            deps=context
-        )
-        
-        if result.data:
-            return result.data.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing dataview file {classification.file_name}: {e}")
-        return []
-
-
-async def review_test_file(classification: StarterResponse, diff: str) -> Optional[list]:
-    """Review a test file."""
-    try:
-        context = TestReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        
-        result = await test_reviewer.run(
-            "Review this test file",
-            deps=context
-        )
-        
-        if result.data:
-            return result.data.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing test file {classification.file_name}: {e}")
-        return []
-
-
-async def review_pbook_file(classification: StarterResponse, diff: str) -> Optional[list]:
-    """Review a pbook file."""
-    try:
-        context = PbookReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        
-        result = await pbook_reviewer.run(
-            "Review this pbook file",
-            deps=context
-        )
-        
-        if result.data:
-            return result.data.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing pbook file {classification.file_name}: {e}")
-        return []
 
 
 def format_comment(issues: list, file_name: str, file_path: str) -> str:
@@ -344,31 +163,43 @@ def format_comment(issues: list, file_name: str, file_path: str) -> str:
     comment = f"## 📝 Review for `{file_path}`\n\n"
     comment += f"Found **{len(issues)}** issue(s):\n\n"
     
-    # Group by severity
-    high_issues = [i for i in issues if i.severity == "high"]
-    medium_issues = [i for i in issues if i.severity == "medium"]
-    low_issues = [i for i in issues if i.severity == "low"]
+    # Group by severity (handle both dict and object formats)
+    def get_severity(issue):
+        return issue.get("severity", "low") if isinstance(issue, dict) else issue.severity
+    
+    def get_line(issue):
+        return issue.get("line", 1) if isinstance(issue, dict) else issue.line
+    
+    def get_problem(issue):
+        return issue.get("problem", "") if isinstance(issue, dict) else issue.problem
+    
+    def get_suggestion(issue):
+        return issue.get("suggestion", "") if isinstance(issue, dict) else issue.suggestion
+    
+    high_issues = [i for i in issues if get_severity(i) == "high"]
+    medium_issues = [i for i in issues if get_severity(i) == "medium"]
+    low_issues = [i for i in issues if get_severity(i) == "low"]
     
     if high_issues:
         comment += "### 🔴 High Priority Issues\n\n"
         for i, issue in enumerate(high_issues, 1):
-            comment += f"**{i}. Line {issue.line}**\n"
-            comment += f"- **Problem**: {issue.problem}\n"
-            comment += f"- **Suggestion**: {issue.suggestion}\n\n"
+            comment += f"**{i}. Line {get_line(issue)}**\n"
+            comment += f"- **Problem**: {get_problem(issue)}\n"
+            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
     
     if medium_issues:
         comment += "### 🟡 Medium Priority Issues\n\n"
         for i, issue in enumerate(medium_issues, 1):
-            comment += f"**{i}. Line {issue.line}**\n"
-            comment += f"- **Problem**: {issue.problem}\n"
-            comment += f"- **Suggestion**: {issue.suggestion}\n\n"
+            comment += f"**{i}. Line {get_line(issue)}**\n"
+            comment += f"- **Problem**: {get_problem(issue)}\n"
+            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
     
     if low_issues:
         comment += "### 🟢 Low Priority Issues\n\n"
         for i, issue in enumerate(low_issues, 1):
-            comment += f"**{i}. Line {issue.line}**\n"
-            comment += f"- **Problem**: {issue.problem}\n"
-            comment += f"- **Suggestion**: {issue.suggestion}\n\n"
+            comment += f"**{i}. Line {get_line(issue)}**\n"
+            comment += f"- **Problem**: {get_problem(issue)}\n"
+            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
     
     return comment
 
@@ -473,79 +304,23 @@ async def process_mr(mr_url: str):
         
         # Get diff
         diff = change.get("diff", "")
-
-
-        classification = StarterResponse(
-            file_name=file_path,
-            file_type="unknown",
-            package_name="unknown",
-            module_name="unknown",
+        
+        # Review file using LangGraph workflow
+        print(f"🔍 Reviewing file...")
+        issues = await review_file_with_workflow(
+            file_path=file_path,
             content=file_content,
             diff=diff,
+            merge_request_title=mr_title,
             target_branch=target_branch,
             source_branch=source_branch,
-            jira_task_number="unknown")
+            gitlab_token=gitlab_token,
+            gitlab_domain=gitlab_domain,
+            project_path=project_path
+        )
         
-        # Classify file
-        print(f"🔍 Classifying file...")
-        if file_path.endswith(".ts"):
-            classification.file_type = "typescript"
-        elif file_path.endswith(".html"):
-            classification.file_type = "html"
-        elif file_path.endswith(".scss"):
-            print(f"🔍 Scss file detected: {file_path}")
-            classification.file_type = "scss"
-        else:
-            classification = await classify_file(
-                file_path,
-                file_content,
-                diff,
-                mr_title,
-                target_branch,
-                source_branch
-            )
-            
-        if not classification:
-            print(f"⚠️  Could not classify {file_path}, skipping...")
-            continue
-        
-        print(f"✅ Classified as: {classification.file_type}")
-        print(f"   Module: {classification.module_name}, Package: {classification.package_name}")
-        
-        # Review file based on type
-        issues = []
-        print(f"🔍 Reviewing file...")
-
-        if classification.file_type == "service":
-            issues = await review_service_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        elif classification.file_type == "sql":
-            issues = await review_sql_file(classification, diff)
-        elif classification.file_type == "dataview":
-            issues = await review_dataview_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        elif classification.file_type == "test":
-            issues = await review_test_file(classification, diff)
-        elif classification.file_type == "pbook":
-            issues = await review_pbook_file(classification, diff)
-        elif classification.file_type == "typescript":
-            # Handle TypeScript files with starter agent
-              issues = await review_typescript_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        elif classification.file_type == "html":  
-            # Handle HTML files with starter agent
-            issues = await review_html_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        elif classification.file_type == "scss":
-            issues = await review_scss_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        else:
-            print(f"⚠️  Unknown file type: {classification.file_type}, skipping review...")
+        if issues is None:
+            print(f"⚠️  Could not review {file_path}, skipping...")
             continue
         
         print(f"✅ Found {len(issues)} issue(s)")
@@ -576,13 +351,19 @@ async def process_mr(mr_url: str):
             # Post individual comments for each issue on the specific line
             print(f"💬 Posting {len(issues)} comment(s) for {file_path}...")
             for issue in issues:
+                # Handle both dict and object formats
+                severity = issue.get("severity", "low") if isinstance(issue, dict) else issue.severity
+                line = issue.get("line", 1) if isinstance(issue, dict) else issue.line
+                problem = issue.get("problem", "") if isinstance(issue, dict) else issue.problem
+                suggestion = issue.get("suggestion", "") if isinstance(issue, dict) else issue.suggestion
+                
                 # Format severity emoji
-                severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(issue.severity, "⚪")
+                severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
                 
                 # Format the comment for this specific issue
-                comment = f"{severity_emoji} **{issue.severity.upper()}** - Line {issue.line}\n\n"
-                comment += f"**Problem:** {issue.problem}\n\n"
-                comment += f"**Suggestion:** {issue.suggestion}"
+                comment = f"{severity_emoji} **{severity.upper()}** - Line {line}\n\n"
+                comment += f"**Problem:** {problem}\n\n"
+                comment += f"**Suggestion:** {suggestion}"
                 
                 # Post comment on the specific line
                 if await post_gitlab_comment(
@@ -592,15 +373,15 @@ async def process_mr(mr_url: str):
                     gitlab_token, 
                     comment,
                     file_path=file_path,
-                    line_number=issue.line,
+                    line_number=line,
                     base_sha=base_sha,
                     start_sha=start_sha,
                     head_sha=head_sha
                 ):
-                    print(f"  ✅ Posted comment for line {issue.line}")
+                    print(f"  ✅ Posted comment for line {line}")
                     total_posted += 1
                 else:
-                    print(f"  ❌ Failed to post comment for line {issue.line}")
+                    print(f"  ❌ Failed to post comment for line {line}")
                     total_failed += 1
     
     print(f"\n{'=' * 60}")
