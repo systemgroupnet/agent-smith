@@ -43,7 +43,7 @@ class ServiceContext(BaseModel):
     related_documents: str = ""
     package_context: str = ""
     gitlab_token: Optional[str] = None
-    gitlab_domain: Optional[str] = None
+    gitlab_url: Optional[str] = None  # Full URL with protocol (e.g., https://gitlab.example.com)
     source_branch: Optional[str] = None
     project_path: Optional[str] = None
 
@@ -163,7 +163,7 @@ async def get_related_documents_async(jira_task_number: Optional[str]) -> str:
 
 def get_gitlab_file_content(context: ServiceContext, file_path: str) -> str:
     """Fetch file content from GitLab."""
-    if not context.gitlab_token or not context.gitlab_domain or not context.project_path:
+    if not context.gitlab_token or not context.gitlab_url or not context.project_path:
         return ""
     
     try:
@@ -171,7 +171,9 @@ def get_gitlab_file_content(context: ServiceContext, file_path: str) -> str:
         encoded_file_path = quote(file_path, safe='')
         branch = context.source_branch or "main"
         
-        url = f"https://{context.gitlab_domain}/api/v4/projects/{encoded_project_path}/repository/files/{encoded_file_path}/raw"
+        # Extract domain from URL if needed, or use URL directly
+        gitlab_base = context.gitlab_url.rstrip('/')
+        url = f"{gitlab_base}/api/v4/projects/{encoded_project_path}/repository/files/{encoded_file_path}/raw"
         headers = {"PRIVATE-TOKEN": context.gitlab_token}
         params = {"ref": branch}
         

@@ -105,7 +105,7 @@ async def review_file_with_workflow(
     target_branch: str,
     source_branch: str,
     gitlab_token: Optional[str],
-    gitlab_domain: Optional[str],
+    gitlab_url: Optional[str],
     project_path: Optional[str]
 ) -> Optional[list]:
     """Review a file using LangGraph workflow."""
@@ -131,7 +131,7 @@ source_branch: {source_branch}
             target_branch=target_branch,
             source_branch=source_branch,
             gitlab_token=gitlab_token,
-            gitlab_domain=gitlab_domain,
+            gitlab_url=gitlab_url,
             project_path=project_path
         )
         
@@ -279,7 +279,6 @@ async def process_mr(mr_url: str):
     print(f"Found {len(changes)} changed file(s)\n")
     
     # Process each file
-    gitlab_domain = gitlab_url.replace("https://", "").replace("http://", "")
     all_comments = []
     
     for change in changes:
@@ -315,7 +314,7 @@ async def process_mr(mr_url: str):
             target_branch=target_branch,
             source_branch=source_branch,
             gitlab_token=gitlab_token,
-            gitlab_domain=gitlab_domain,
+            gitlab_url=gitlab_url,
             project_path=project_path
         )
         

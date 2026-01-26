@@ -59,7 +59,7 @@ class ReviewState(TypedDict):
     
     # GitLab/MCP configuration
     gitlab_token: Optional[str]
-    gitlab_domain: Optional[str]
+    gitlab_url: Optional[str]  # Full URL with protocol (e.g., https://gitlab.example.com)
     project_path: Optional[str]
     
     # Review results
@@ -103,7 +103,7 @@ def create_initial_state(input_text: str, **kwargs) -> ReviewState:
         "related_documents": None,
         "package_context": None,
         "gitlab_token": kwargs.get("gitlab_token"),
-        "gitlab_domain": kwargs.get("gitlab_domain"),
+        "gitlab_url": kwargs.get("gitlab_url"),
         "project_path": kwargs.get("project_path"),
         "reviews": [],
         "final_issues": [],

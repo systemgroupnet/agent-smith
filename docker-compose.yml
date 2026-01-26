@@ -37,10 +37,10 @@ services:
       - ./mcp-gitlab-config:/app/config
 
   codereviewagent:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: code-reviewer:latest
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: registry.example.com/code-reviewer:v0.0.1
     container_name: codereviewagent
     restart: unless-stopped
     depends_on:

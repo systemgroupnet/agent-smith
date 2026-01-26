@@ -95,7 +95,7 @@ async def review_service_node(state: ReviewState) -> ReviewState:
             module_name=state.get("module_name"),
             jira_task_number=state.get("jira_task_number"),
             gitlab_token=state.get("gitlab_token"),
-            gitlab_domain=state.get("gitlab_domain"),
+            gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
         )
@@ -203,7 +203,7 @@ async def review_dataview_node(state: ReviewState) -> ReviewState:
             module_name=state.get("module_name"),
             jira_task_number=state.get("jira_task_number"),
             gitlab_token=state.get("gitlab_token"),
-            gitlab_domain=state.get("gitlab_domain"),
+            gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
         )
