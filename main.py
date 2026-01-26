@@ -37,7 +37,6 @@ from core.backend.test_reviewer.test_reviewer import TestReviewerContext, test_r
 from core.backend.pbook_reviewer.pbook_reviewer import PbookReviewerContext, pbook_reviewer
 from core.frontend.scss_reviewer.scss_reviewer import ScssReviewerContext, scss_reviewer
 from core.frontend.ts_reviewer.typescript_reviewer import TypescriptReviewerContext, typescript_reviewer
-from agents import Runner, RunConfig
 
 # Import GitLab MCP client (MCP ONLY - No fallback to direct API)
 from core.MCP.gitlab_mcp_client import (
@@ -126,18 +125,10 @@ target_branch: {target_branch}
 source_branch: {source_branch}
 """
         
-        result = await Runner.run(
-            starter_agent,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": input_text}]
-            }],
-            context=None,
-            run_config=RunConfig()
-        )
+        result = await starter_agent.run(input_text)
         
-        if result.final_output:
-            return result.final_output
+        if result.data:
+            return result.data
         return None
     except Exception as e:
         print(f"Error classifying file {file_path}: {e}")
@@ -185,17 +176,12 @@ async def review_scss_file(classification: StarterResponse, diff: str, gitlab_to
             diff=diff or "",
             file_name=classification.file_name,
         )
-        result = await Runner.run(
-            scss_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this scss file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
+        result = await scss_reviewer.run(
+            "Review this scss file",
+            deps=context
         )
-        if result.final_output:
-            return result.final_output.issues
+        if result.data:
+            return result.data.issues
         return []
     except Exception as e:
         print(f"Error reviewing scss file {classification.file_name}: {e}")
@@ -211,17 +197,12 @@ async def review_html_file(classification: StarterResponse, diff: str, gitlab_to
             diff=diff or "",
             file_name=classification.file_name
         )
-        result = await Runner.run(
-            html_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this html file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
+        result = await html_reviewer.run(
+            "Review this html file",
+            deps=context
         )
-        if result.final_output:
-            return result.final_output.issues
+        if result.data:
+            return result.data.issues
         return []
     except Exception as e:
         print(f"Error reviewing html file {classification.file_name}: {e}")
@@ -237,17 +218,12 @@ async def review_typescript_file(classification: StarterResponse, diff: str, git
             diff=diff or "",
             file_name=classification.file_name
         )
-        result = await Runner.run(
-            typescript_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this typescript file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
+        result = await typescript_reviewer.run(
+            "Review this typescript file",
+            deps=context
         )
-        if result.final_output:
-            return result.final_output.issues
+        if result.data:
+            return result.data.issues
         return []
     except Exception as e:
         print(f"Error reviewing typescript file {classification.file_name}: {e}")
@@ -264,18 +240,13 @@ async def review_sql_file(classification: StarterResponse, diff: str) -> Optiona
             file_name=classification.file_name
         )
         
-        result = await Runner.run(
-            sql_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this SQL file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
+        result = await sql_reviewer.run(
+            "Review this SQL file",
+            deps=context
         )
         
-        if result.final_output:
-            return result.final_output.issues
+        if result.data:
+            return result.data.issues
         return []
     except Exception as e:
         print(f"Error reviewing SQL file {classification.file_name}: {e}")
@@ -306,18 +277,13 @@ async def review_dataview_file(
             project_path=project_path
         )
         
-        result = await Runner.run(
-            dataview_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this dataview file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
+        result = await dataview_reviewer.run(
+            "Review this dataview file",
+            deps=context
         )
         
-        if result.final_output:
-            return result.final_output.issues
+        if result.data:
+            return result.data.issues
         return []
     except Exception as e:
         print(f"Error reviewing dataview file {classification.file_name}: {e}")
@@ -334,18 +300,13 @@ async def review_test_file(classification: StarterResponse, diff: str) -> Option
             file_name=classification.file_name
         )
         
-        result = await Runner.run(
-            test_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this test file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
+        result = await test_reviewer.run(
+            "Review this test file",
+            deps=context
         )
         
-        if result.final_output:
-            return result.final_output.issues
+        if result.data:
+            return result.data.issues
         return []
     except Exception as e:
         print(f"Error reviewing test file {classification.file_name}: {e}")
@@ -362,18 +323,13 @@ async def review_pbook_file(classification: StarterResponse, diff: str) -> Optio
             file_name=classification.file_name
         )
         
-        result = await Runner.run(
-            pbook_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this pbook file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
+        result = await pbook_reviewer.run(
+            "Review this pbook file",
+            deps=context
         )
         
-        if result.final_output:
-            return result.final_output.issues
+        if result.data:
+            return result.data.issues
         return []
     except Exception as e:
         print(f"Error reviewing pbook file {classification.file_name}: {e}")

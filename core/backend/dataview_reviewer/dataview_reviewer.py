@@ -11,14 +11,14 @@ Usage:
 
 from __future__ import annotations
 
-from agents import Agent, ModelSettings, RunContextWrapper
-from openai.types.shared.reasoning import Reasoning
+from pydantic_ai import Agent, RunContext
 import os
 import re
 import requests
 from typing import Optional
 
 from dto.general import ReviewResponse
+from core.config.llm_config import get_model_for_agent
 
 
 class DataviewReviewerContext:
@@ -374,12 +374,12 @@ def get_validation_file_content(context: 'DataviewReviewerContext') -> str:
     return content if content else ""
 
 
-def dataview_reviewer_instructions(run_context: RunContextWrapper[DataviewReviewerContext], _agent: Agent[DataviewReviewerContext]):
-    content = run_context.context.content
-    diff = run_context.context.diff
-    model_file_content = run_context.context.model_file_content
-    entity_file_content = run_context.context.entity_file_content
-    validation_file_content = run_context.context.validation_file_content
+def dataview_reviewer_instructions(run_context: RunContext[DataviewReviewerContext]) -> str:
+    content = run_context.deps.content
+    diff = run_context.deps.diff
+    model_file_content = run_context.deps.model_file_content
+    entity_file_content = run_context.deps.entity_file_content
+    validation_file_content = run_context.deps.validation_file_content
     
     return f"""You are a senior Go engineer performing a comprehensive semantic and technical code review for dataview code.
 
@@ -444,15 +444,8 @@ Git Diff:
 
 
 dataview_reviewer = Agent(
-    name="dataview reviewer",
-    instructions=dataview_reviewer_instructions,
-    model="gpt-5-nano",
-    output_type=ReviewResponse,
-    model_settings=ModelSettings(
-        parallel_tool_calls=True,
-        store=True,
-        reasoning=Reasoning(
-            effort="medium"
-        )
-    )
+    model=get_model_for_agent("gpt-4o"),
+    result_type=ReviewResponse,
+    system_prompt=dataview_reviewer_instructions,
+    deps_type=DataviewReviewerContext
 )

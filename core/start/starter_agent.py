@@ -1,6 +1,6 @@
-from agents import Agent, ModelSettings, trace
 from pydantic import BaseModel
-from openai.types.shared.reasoning import Reasoning
+from pydantic_ai import Agent
+from core.config.llm_config import get_model_for_agent
 
 
 class StarterResponse(BaseModel):
@@ -155,15 +155,8 @@ Analyze carefully and classify correctly!
 
 
 starter_agent = Agent(
-    name="Starter",
-    instructions=starter_agent_instructions(),
-    model="gpt-5-nano",
-    output_type=StarterResponse,
-    model_settings=ModelSettings(
-        store=True,
-        reasoning=Reasoning(
-            effort="low"
-        )
-    )
+    model=get_model_for_agent("gpt-4o-mini"),
+    result_type=StarterResponse,
+    system_prompt=starter_agent_instructions()
 )
 

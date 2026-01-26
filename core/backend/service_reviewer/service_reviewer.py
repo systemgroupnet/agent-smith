@@ -18,9 +18,8 @@ and combine their results.
 
 from __future__ import annotations
 
-from agents import Agent, ModelSettings, RunContextWrapper, Runner, RunConfig
+from pydantic_ai import Agent, RunContext
 from openai import OpenAI
-from openai.types.shared.reasoning import Reasoning
 import os
 import re
 import requests
@@ -31,6 +30,7 @@ import json
 import traceback
 
 from dto.general import ReviewResponse
+from core.config.llm_config import get_model_for_agent
 
 # Import Atlassian MCP client
 from core.MCP.atlassian_mcp_client import (
@@ -585,10 +585,10 @@ def get_package_context(context: 'ServiceReviewerContext') -> str:
     return result
 
 
-def semantic_reviewer_instructions(run_context: RunContextWrapper[ServiceReviewerContext], _agent: Agent[ServiceReviewerContext]):
-    content = run_context.context.content
-    diff = run_context.context.diff
-    package_context = run_context.context.package_context
+def semantic_reviewer_instructions(run_context: RunContext[ServiceReviewerContext]) -> str:
+    content = run_context.deps.content
+    diff = run_context.deps.diff
+    package_context = run_context.deps.package_context
     
     return f"""You are a senior Go engineer performing technical code review. Focus ONLY on code quality, correctness, and Go best practices. DO NOT review business logic.
 
@@ -636,12 +636,12 @@ Git Diff:
 ```"""
 
 
-def business_logic_reviewer_instructions(run_context: RunContextWrapper[ServiceReviewerContext], _agent: Agent[ServiceReviewerContext]):
-    content = run_context.context.content
-    diff = run_context.context.diff
-    task_description = run_context.context.task_description
-    related_documents = run_context.context.related_documents
-    package_context = run_context.context.package_context
+def business_logic_reviewer_instructions(run_context: RunContext[ServiceReviewerContext]) -> str:
+    content = run_context.deps.content
+    diff = run_context.deps.diff
+    task_description = run_context.deps.task_description
+    related_documents = run_context.deps.related_documents
+    package_context = run_context.deps.package_context
     
     return f"""You are a senior software architect reviewing business logic implementation. Focus ONLY on whether code correctly implements business requirements. DO NOT review code quality or technical aspects.
 
@@ -697,33 +697,19 @@ Git Diff:
 
 # Semantic Code Reviewer - Focuses on technical code quality
 semantic_reviewer = Agent(
-    name="semantic code reviewer",
-    instructions=semantic_reviewer_instructions,
-    model="gpt-5-nano",
-    output_type=ReviewResponse,
-    model_settings=ModelSettings(
-        parallel_tool_calls=True,
-        store=True,
-        reasoning=Reasoning(
-            effort="medium"
-        )
-    )
+    model=get_model_for_agent("gpt-4o"),
+    result_type=ReviewResponse,
+    system_prompt=semantic_reviewer_instructions,
+    deps_type=ServiceReviewerContext
 )
 
 
 # Business Logic Reviewer - Focuses on business requirements
 business_logic_reviewer = Agent(
-    name="business logic reviewer",
-    instructions=business_logic_reviewer_instructions,
-    model="gpt-5-nano",
-    output_type=ReviewResponse,
-    model_settings=ModelSettings(
-        parallel_tool_calls=True,
-        store=True,
-        reasoning=Reasoning(
-            effort="high"
-        )
-    )
+    model=get_model_for_agent("gpt-4o"),
+    result_type=ReviewResponse,
+    system_prompt=business_logic_reviewer_instructions,
+    deps_type=ServiceReviewerContext
 )
 
 
@@ -740,24 +726,16 @@ async def run_combined_review(context: ServiceReviewerContext) -> ReviewResponse
     print("    🔍 LEVEL 1: Semantic & Technical Code Review")
     print("    " + "="*50)
     try:
-        semantic_result = await Runner.run(
-            semantic_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "Review the code for semantic and technical issues."
-                }]
-            }],
-            context=context,
-            run_config=RunConfig()
+        semantic_result = await semantic_reviewer.run(
+            "Review the code for semantic and technical issues.",
+            deps=context
         )
-        if semantic_result.final_output and semantic_result.final_output.issues:
-            issues.extend(semantic_result.final_output.issues)
-            print(f"    ✅ Found {len(semantic_result.final_output.issues)} semantic/technical issue(s)")
+        if semantic_result.data and semantic_result.data.issues:
+            issues.extend(semantic_result.data.issues)
+            print(f"    ✅ Found {len(semantic_result.data.issues)} semantic/technical issue(s)")
             
             # Print each issue
-            for i, issue in enumerate(semantic_result.final_output.issues, 1):
+            for i, issue in enumerate(semantic_result.data.issues, 1):
                 print(f"\n    Issue #{i}:")
                 print(f"      📍 Line {issue.line} - [{issue.severity.upper()}]")
                 print(f"      ❌ Problem: {issue.problem}")
@@ -773,24 +751,16 @@ async def run_combined_review(context: ServiceReviewerContext) -> ReviewResponse
     print("    🔍 LEVEL 2: Business Logic Review")
     print("    " + "="*50)
     try:
-        business_result = await Runner.run(
-            business_logic_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "Review the code for business logic issues."
-                }]
-            }],
-            context=context,
-            run_config=RunConfig()
+        business_result = await business_logic_reviewer.run(
+            "Review the code for business logic issues.",
+            deps=context
         )
-        if business_result.final_output and business_result.final_output.issues:
-            issues.extend(business_result.final_output.issues)
-            print(f"    ✅ Found {len(business_result.final_output.issues)} business logic issue(s)")
+        if business_result.data and business_result.data.issues:
+            issues.extend(business_result.data.issues)
+            print(f"    ✅ Found {len(business_result.data.issues)} business logic issue(s)")
             
             # Print each issue
-            for i, issue in enumerate(business_result.final_output.issues, 1):
+            for i, issue in enumerate(business_result.data.issues, 1):
                 print(f"\n    Issue #{i}:")
                 print(f"      📍 Line {issue.line} - [{issue.severity.upper()}]")
                 print(f"      ❌ Problem: {issue.problem}")

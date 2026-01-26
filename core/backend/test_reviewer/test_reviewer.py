@@ -1,22 +1,22 @@
-from agents import Agent, ModelSettings, RunContextWrapper
-from openai.types.shared.reasoning import Reasoning
+from pydantic_ai import Agent, RunContext
+from pydantic import BaseModel
 
 from dto.general import ReviewResponse
+from core.config.llm_config import get_model_for_agent
 
 
-class TestReviewerContext:
-    def __init__(self, workflow_input_as_text: str, content: str, diff: str, file_name: str = ""):
-        self.workflow_input_as_text = workflow_input_as_text
-        self.content = content
-        self.diff = diff
-        self.file_name = file_name
+class TestReviewerContext(BaseModel):
+    workflow_input_as_text: str
+    content: str
+    diff: str
+    file_name: str = ""
 
 
-def test_reviewer_instructions(run_context: RunContextWrapper[TestReviewerContext], _agent: Agent[TestReviewerContext]):
-    workflow_input_as_text = run_context.context.workflow_input_as_text
-    content = run_context.context.content
-    diff = run_context.context.diff
-    file_name = run_context.context.file_name
+def test_reviewer_instructions(run_context: RunContext[TestReviewerContext]) -> str:
+    workflow_input_as_text = run_context.deps.workflow_input_as_text
+    content = run_context.deps.content
+    diff = run_context.deps.diff
+    file_name = run_context.deps.file_name
     
     return f"""You are a senior Go engineer specialized in reviewing BDD/Gherkin test implementation code. 
 Review the **Go code that executes Gherkin scenarios** (step definitions, test runners, fixtures), NOT the Gherkin feature files.
@@ -189,14 +189,8 @@ Please review this Go BDD test implementation code and provide thorough semantic
 
 
 test_reviewer = Agent(
-    name="test reviewer",
-    instructions=test_reviewer_instructions,
-    model="gpt-5-nano",
-    output_type=ReviewResponse,
-    model_settings=ModelSettings(
-        store=True,
-        reasoning=Reasoning(
-            effort="medium"
-        )
-    )
+    model=get_model_for_agent("gpt-4o"),
+    result_type=ReviewResponse,
+    system_prompt=test_reviewer_instructions,
+    deps_type=TestReviewerContext
 )
