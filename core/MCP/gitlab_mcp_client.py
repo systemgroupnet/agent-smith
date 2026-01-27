@@ -2,7 +2,7 @@
 GitLab MCP Client - Integration with GitLab MCP Server
 
 This module provides functions to interact with GitLab via the MCP (Model Context Protocol) server.
-It follows the same pattern as the Atlassian MCP integration.
+Uses HTTP/SSE transport for streaming communication and maintains persistent connections.
 
 Usage:
     from core.MCP.gitlab_mcp_client import get_gitlab_mr_info_via_mcp, get_gitlab_mr_changes_via_mcp
@@ -17,8 +17,14 @@ import os
 import json
 import traceback
 from typing import Optional
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+import httpx
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
+
+# Singleton session management
+_gitlab_mcp_session: Optional[ClientSession] = None
+_gitlab_mcp_client_context = None
 
 
 def is_mcp_gitlab_enabled() -> bool:
@@ -26,61 +32,101 @@ def is_mcp_gitlab_enabled() -> bool:
     return os.getenv("MCP_GITLAB_ENABLED", "true").lower() == "true"
 
 
-def get_mcp_gitlab_server_params():
+def get_mcp_gitlab_url() -> str:
     """
-    Get GitLab MCP server parameters.
-    
-    Supports two modes:
-    1. Local Docker: Connects to local container via docker exec (MCP_GITLAB_HOST=localhost)
-    2. Remote: Connects to remote MCP server via SSH tunnel or direct connection
-    
-    The MCP server is expected to expose MCP over stdio.
+    Get GitLab MCP server URL for HTTP/SSE transport.
     
     Returns:
-        StdioServerParameters for connecting to the MCP server
+        Base URL for the MCP server (e.g., http://mcp-gitlab:8888)
     """
-    mcp_host = os.getenv("MCP_GITLAB_HOST", "localhost")
-    container_name = os.getenv("MCP_GITLAB_CONTAINER", "mcp-gitlab")
+    mcp_host = os.getenv("MCP_GITLAB_HOST", "mcp-gitlab")
+    mcp_port = os.getenv("MCP_GITLAB_PORT", "8888")
     
-    print(f"  🔌 [GitLab MCP] Creating transport connection...")
-    print(f"     - Host: {mcp_host}")
-    print(f"     - Container: {container_name}")
-    
-    # Local Docker mode: Use docker exec
-    if mcp_host in ["localhost", "127.0.0.1"]:
-        print(f"     - Mode: Local Docker")
-        # GitLab MCP server entry point
-        # Adjust the command based on how gitlab-mcp is installed/run
-        # Common patterns:
-        # - node /app/build/index.js (if built from source)
-        # - npx gitlab-mcp (if installed via npm)
-        # - gitlab-mcp (if installed globally)
-        server_params = StdioServerParameters(
-            command="docker",
-            args=["exec", "-i", container_name, "node", "/app/build/index.js"],
-            env=None
-        )
+    # If running in Docker, use container name; otherwise use localhost
+    if mcp_host == "localhost":
+        return f"http://localhost:{mcp_port}"
     else:
-        # Remote mode: Use SSH to connect to remote Docker container
-        remote_user = os.getenv("MCP_GITLAB_SSH_USER", "root")
-        print(f"     - Mode: Remote via SSH ({remote_user}@{mcp_host})")
-        server_params = StdioServerParameters(
-            command="ssh",
-            args=[
-                f"{remote_user}@{mcp_host}",
-                "docker", "exec", "-i", container_name,
-                "node", "/app/build/index.js"
-            ],
-            env=None
-        )
+        return f"http://{mcp_host}:{mcp_port}"
+
+
+async def get_gitlab_mcp_session() -> ClientSession:
+    """
+    Get or create a persistent MCP session for GitLab.
     
-    print(f"     - Command: {server_params.command} {' '.join(server_params.args)}")
-    return server_params
+    This implements the singleton pattern to reuse the same session
+    across multiple tool calls, which is the correct way to use MCP.
+    
+    Returns:
+        Active ClientSession instance
+    """
+    global _gitlab_mcp_session, _gitlab_mcp_client_context
+    
+    # Return existing session if available
+    if _gitlab_mcp_session is not None:
+        return _gitlab_mcp_session
+    
+    # Create new session
+    try:
+        mcp_url = get_mcp_gitlab_url()
+        print(f"  🔌 [GitLab MCP] Connecting to MCP server at {mcp_url}")
+        print(f"     - Transport: HTTP with SSE (Server-Sent Events)")
+        
+        # Create SSE client with the MCP endpoint
+        _gitlab_mcp_client_context = sse_client(
+            url=f"{mcp_url}/sse",
+            timeout=httpx.Timeout(timeout=60.0, connect=10.0)
+        )
+        
+        # Enter the context and create session
+        read_stream, write_stream = await _gitlab_mcp_client_context.__aenter__()
+        
+        _gitlab_mcp_session = ClientSession(read_stream, write_stream)
+        await _gitlab_mcp_session.__aenter__()
+        
+        print(f"  🔄 [GitLab MCP] Initializing session...")
+        await _gitlab_mcp_session.initialize()
+        print(f"  ✅ [GitLab MCP] Session initialized and ready")
+        
+        return _gitlab_mcp_session
+        
+    except Exception as e:
+        print(f"  ❌ [GitLab MCP] Failed to create session: {e}")
+        print(f"     Traceback: {traceback.format_exc()}")
+        _gitlab_mcp_session = None
+        _gitlab_mcp_client_context = None
+        raise
+
+
+async def close_gitlab_mcp_session():
+    """
+    Close the GitLab MCP session.
+    
+    Should be called when shutting down the application or when
+    you want to force a session refresh.
+    """
+    global _gitlab_mcp_session, _gitlab_mcp_client_context
+    
+    if _gitlab_mcp_session is not None:
+        try:
+            await _gitlab_mcp_session.__aexit__(None, None, None)
+            print(f"  🔌 [GitLab MCP] Session closed")
+        except Exception as e:
+            print(f"  ⚠️  [GitLab MCP] Error closing session: {e}")
+        finally:
+            _gitlab_mcp_session = None
+    
+    if _gitlab_mcp_client_context is not None:
+        try:
+            await _gitlab_mcp_client_context.__aexit__(None, None, None)
+        except Exception as e:
+            print(f"  ⚠️  [GitLab MCP] Error closing client context: {e}")
+        finally:
+            _gitlab_mcp_client_context = None
 
 
 async def call_gitlab_mcp_tool(tool_name: str, arguments: dict) -> Optional[dict]:
     """
-    Call a tool on the GitLab MCP server.
+    Call a tool on the GitLab MCP server using persistent session.
     
     Args:
         tool_name: Name of the MCP tool to call
@@ -93,50 +139,46 @@ async def call_gitlab_mcp_tool(tool_name: str, arguments: dict) -> Optional[dict
     print(f"     - Arguments: {json.dumps(arguments, indent=2)}")
     
     try:
-        server_params = get_mcp_gitlab_server_params()
+        # Get or create persistent session
+        session = await get_gitlab_mcp_session()
         
-        print(f"  🔄 [GitLab MCP] Establishing connection...")
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            print(f"  ✅ [GitLab MCP] Transport connection established")
-            print(f"  🔄 [GitLab MCP] Creating session for {tool_name}...")
-            
-            async with ClientSession(read_stream, write_stream) as session:
-                print(f"  🔄 [GitLab MCP] Initializing session...")
-                await session.initialize()
-                print(f"  ✅ [GitLab MCP] Session initialized, calling tool...")
-                
-                result = await session.call_tool(tool_name, arguments)
-                print(f"  📥 [GitLab MCP] Tool {tool_name} returned response")
-                
-                # Parse the result
-                if result:
-                    print(f"     - Response has {len(result.content) if result.content else 0} content item(s)")
-                    if result.content and len(result.content) > 0:
-                        content = result.content[0]
-                        if hasattr(content, 'text'):
-                            try:
-                                parsed = json.loads(content.text)
-                                print(f"  ✅ [GitLab MCP] Tool {tool_name} succeeded")
-                                return parsed
-                            except json.JSONDecodeError as e:
-                                print(f"  ⚠️  [GitLab MCP] Failed to parse JSON response: {e}")
-                                print(f"     - Raw response: {content.text[:200]}...")
-                                # Sometimes the response might be plain text, return as dict
-                                return {"text": content.text}
-                        else:
-                            print(f"  ⚠️  [GitLab MCP] Response content has no 'text' attribute")
-                            print(f"     - Content type: {type(content)}")
-                            return None
-                    else:
-                        print(f"  ⚠️  [GitLab MCP] Tool {tool_name} returned empty content")
-                        return None
+        print(f"  📤 [GitLab MCP] Sending request to tool: {tool_name}")
+        result = await session.call_tool(tool_name, arguments)
+        print(f"  📥 [GitLab MCP] Tool {tool_name} returned response")
+        
+        # Parse the result
+        if result:
+            print(f"     - Response has {len(result.content) if result.content else 0} content item(s)")
+            if result.content and len(result.content) > 0:
+                content = result.content[0]
+                if hasattr(content, 'text'):
+                    try:
+                        parsed = json.loads(content.text)
+                        print(f"  ✅ [GitLab MCP] Tool {tool_name} succeeded")
+                        return parsed
+                    except json.JSONDecodeError as e:
+                        print(f"  ⚠️  [GitLab MCP] Failed to parse JSON response: {e}")
+                        print(f"     - Raw response: {content.text[:200]}...")
+                        # Sometimes the response might be plain text, return as dict
+                        return {"text": content.text}
                 else:
-                    print(f"  ⚠️  [GitLab MCP] Tool {tool_name} returned None")
+                    print(f"  ⚠️  [GitLab MCP] Response content has no 'text' attribute")
+                    print(f"     - Content type: {type(content)}")
                     return None
+            else:
+                print(f"  ⚠️  [GitLab MCP] Tool {tool_name} returned empty content")
+                return None
+        else:
+            print(f"  ⚠️  [GitLab MCP] Tool {tool_name} returned None")
+            return None
             
     except Exception as e:
         print(f"  ❌ [GitLab MCP] Error calling tool {tool_name}: {e}")
         print(f"     Traceback: {traceback.format_exc()}")
+        
+        # On error, reset session to force reconnect on next call
+        print(f"  🔄 [GitLab MCP] Resetting session due to error")
+        await close_gitlab_mcp_session()
         return None
 
 

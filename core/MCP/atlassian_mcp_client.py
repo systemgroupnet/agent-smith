@@ -2,6 +2,7 @@
 Atlassian MCP Client - Integration with Atlassian MCP Server
 
 This module provides functions to interact with Jira and Confluence via the MCP (Model Context Protocol) server.
+Uses HTTP/SSE transport for streaming communication and maintains persistent connections.
 
 Usage:
     from core.MCP.atlassian_mcp_client import get_jira_issue_via_mcp, get_confluence_page_via_mcp
@@ -16,8 +17,14 @@ import os
 import json
 import traceback
 from typing import Optional
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+import httpx
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
+
+# Singleton session management
+_atlassian_mcp_session: Optional[ClientSession] = None
+_atlassian_mcp_client_context = None
 
 
 def is_mcp_atlassian_enabled() -> bool:
@@ -25,58 +32,101 @@ def is_mcp_atlassian_enabled() -> bool:
     return os.getenv("MCP_ATLASSIAN_ENABLED", "false").lower() == "true"
 
 
-def get_mcp_atlassian_server_params():
+def get_mcp_atlassian_url() -> str:
     """
-    Get Atlassian MCP server parameters.
-    
-    Supports two modes:
-    1. Local Docker: Connects to local container via docker exec (MCP_ATLASSIAN_HOST=localhost)
-    2. Remote: Connects to remote MCP server via SSH tunnel or direct connection
-    
-    The MCP server is expected to expose MCP over stdio.
+    Get Atlassian MCP server URL for HTTP/SSE transport.
     
     Returns:
-        StdioServerParameters for connecting to the MCP server
+        Base URL for the MCP server (e.g., http://mcp-atlassian:8080)
     """
-    mcp_host = os.getenv("MCP_ATLASSIAN_HOST", "localhost")
-    mcp_port = os.getenv("MCP_ATLASSIAN_PORT", "3000")
-    container_name = os.getenv("MCP_ATLASSIAN_CONTAINER", "mcp-atlassian")
+    mcp_host = os.getenv("MCP_ATLASSIAN_HOST", "mcp-atlassian")
+    mcp_port = os.getenv("MCP_ATLASSIAN_PORT", "8080")
     
-    print(f"  🔌 [Atlassian MCP] Creating transport connection...")
-    print(f"     - Host: {mcp_host}")
-    print(f"     - Container: {container_name}")
-    
-    # Local Docker mode: Use docker exec
-    if mcp_host in ["localhost", "127.0.0.1"]:
-        print(f"     - Mode: Local Docker")
-        server_params = StdioServerParameters(
-            command="docker",
-            args=["exec", "-i", container_name, "node", "/app/build/index.js"],
-            env=None
-        )
+    # If running in Docker, use container name; otherwise use localhost
+    if mcp_host == "localhost":
+        return f"http://localhost:{mcp_port}"
     else:
-        # Remote mode: Use SSH to connect to remote Docker container
-        # Assumes SSH access to the remote host
-        # Format: ssh user@host docker exec -i container_name command
-        remote_user = os.getenv("MCP_ATLASSIAN_SSH_USER", "root")
-        print(f"     - Mode: Remote via SSH ({remote_user}@{mcp_host})")
-        server_params = StdioServerParameters(
-            command="ssh",
-            args=[
-                f"{remote_user}@{mcp_host}",
-                "docker", "exec", "-i", container_name,
-                "node", "/app/build/index.js"
-            ],
-            env=None
-        )
+        return f"http://{mcp_host}:{mcp_port}"
+
+
+async def get_atlassian_mcp_session() -> ClientSession:
+    """
+    Get or create a persistent MCP session for Atlassian.
     
-    print(f"     - Command: {server_params.command} {' '.join(server_params.args)}")
-    return server_params
+    This implements the singleton pattern to reuse the same session
+    across multiple tool calls, which is the correct way to use MCP.
+    
+    Returns:
+        Active ClientSession instance
+    """
+    global _atlassian_mcp_session, _atlassian_mcp_client_context
+    
+    # Return existing session if available
+    if _atlassian_mcp_session is not None:
+        return _atlassian_mcp_session
+    
+    # Create new session
+    try:
+        mcp_url = get_mcp_atlassian_url()
+        print(f"  🔌 [Atlassian MCP] Connecting to MCP server at {mcp_url}")
+        print(f"     - Transport: HTTP with SSE (Server-Sent Events)")
+        
+        # Create SSE client with the MCP endpoint
+        _atlassian_mcp_client_context = sse_client(
+            url=f"{mcp_url}/sse",
+            timeout=httpx.Timeout(timeout=60.0, connect=10.0)
+        )
+        
+        # Enter the context and create session
+        read_stream, write_stream = await _atlassian_mcp_client_context.__aenter__()
+        
+        _atlassian_mcp_session = ClientSession(read_stream, write_stream)
+        await _atlassian_mcp_session.__aenter__()
+        
+        print(f"  🔄 [Atlassian MCP] Initializing session...")
+        await _atlassian_mcp_session.initialize()
+        print(f"  ✅ [Atlassian MCP] Session initialized and ready")
+        
+        return _atlassian_mcp_session
+        
+    except Exception as e:
+        print(f"  ❌ [Atlassian MCP] Failed to create session: {e}")
+        print(f"     Traceback: {traceback.format_exc()}")
+        _atlassian_mcp_session = None
+        _atlassian_mcp_client_context = None
+        raise
+
+
+async def close_atlassian_mcp_session():
+    """
+    Close the Atlassian MCP session.
+    
+    Should be called when shutting down the application or when
+    you want to force a session refresh.
+    """
+    global _atlassian_mcp_session, _atlassian_mcp_client_context
+    
+    if _atlassian_mcp_session is not None:
+        try:
+            await _atlassian_mcp_session.__aexit__(None, None, None)
+            print(f"  🔌 [Atlassian MCP] Session closed")
+        except Exception as e:
+            print(f"  ⚠️  [Atlassian MCP] Error closing session: {e}")
+        finally:
+            _atlassian_mcp_session = None
+    
+    if _atlassian_mcp_client_context is not None:
+        try:
+            await _atlassian_mcp_client_context.__aexit__(None, None, None)
+        except Exception as e:
+            print(f"  ⚠️  [Atlassian MCP] Error closing client context: {e}")
+        finally:
+            _atlassian_mcp_client_context = None
 
 
 async def call_atlassian_mcp_tool(tool_name: str, arguments: dict) -> Optional[dict]:
     """
-    Call a tool on the MCP Atlassian server.
+    Call a tool on the MCP Atlassian server using persistent session.
     
     Args:
         tool_name: Name of the MCP tool to call
@@ -89,49 +139,45 @@ async def call_atlassian_mcp_tool(tool_name: str, arguments: dict) -> Optional[d
     print(f"     - Arguments: {json.dumps(arguments, indent=2)}")
     
     try:
-        server_params = get_mcp_atlassian_server_params()
+        # Get or create persistent session
+        session = await get_atlassian_mcp_session()
         
-        print(f"  🔄 [Atlassian MCP] Establishing connection...")
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            print(f"  ✅ [Atlassian MCP] Transport connection established")
-            print(f"  🔄 [Atlassian MCP] Creating session for {tool_name}...")
-            
-            async with ClientSession(read_stream, write_stream) as session:
-                print(f"  🔄 [Atlassian MCP] Initializing session...")
-                await session.initialize()
-                print(f"  ✅ [Atlassian MCP] Session initialized, calling tool...")
-                
-                result = await session.call_tool(tool_name, arguments)
-                print(f"  📥 [Atlassian MCP] Tool {tool_name} returned response")
-                
-                # Parse the result
-                if result:
-                    print(f"     - Response has {len(result.content) if result.content else 0} content item(s)")
-                    if result.content and len(result.content) > 0:
-                        content = result.content[0]
-                        if hasattr(content, 'text'):
-                            try:
-                                parsed = json.loads(content.text)
-                                print(f"  ✅ [Atlassian MCP] Tool {tool_name} succeeded")
-                                return parsed
-                            except json.JSONDecodeError as e:
-                                print(f"  ⚠️  [Atlassian MCP] Failed to parse JSON response: {e}")
-                                print(f"     - Raw response: {content.text[:200]}...")
-                                return None
-                        else:
-                            print(f"  ⚠️  [Atlassian MCP] Response content has no 'text' attribute")
-                            print(f"     - Content type: {type(content)}")
-                            return None
-                    else:
-                        print(f"  ⚠️  [Atlassian MCP] Tool {tool_name} returned empty content")
+        print(f"  📤 [Atlassian MCP] Sending request to tool: {tool_name}")
+        result = await session.call_tool(tool_name, arguments)
+        print(f"  📥 [Atlassian MCP] Tool {tool_name} returned response")
+        
+        # Parse the result
+        if result:
+            print(f"     - Response has {len(result.content) if result.content else 0} content item(s)")
+            if result.content and len(result.content) > 0:
+                content = result.content[0]
+                if hasattr(content, 'text'):
+                    try:
+                        parsed = json.loads(content.text)
+                        print(f"  ✅ [Atlassian MCP] Tool {tool_name} succeeded")
+                        return parsed
+                    except json.JSONDecodeError as e:
+                        print(f"  ⚠️  [Atlassian MCP] Failed to parse JSON response: {e}")
+                        print(f"     - Raw response: {content.text[:200]}...")
                         return None
                 else:
-                    print(f"  ⚠️  [Atlassian MCP] Tool {tool_name} returned None")
+                    print(f"  ⚠️  [Atlassian MCP] Response content has no 'text' attribute")
+                    print(f"     - Content type: {type(content)}")
                     return None
+            else:
+                print(f"  ⚠️  [Atlassian MCP] Tool {tool_name} returned empty content")
+                return None
+        else:
+            print(f"  ⚠️  [Atlassian MCP] Tool {tool_name} returned None")
+            return None
             
     except Exception as e:
         print(f"  ❌ [Atlassian MCP] Error calling tool {tool_name}: {e}")
         print(f"     Traceback: {traceback.format_exc()}")
+        
+        # On error, reset session to force reconnect on next call
+        print(f"  🔄 [Atlassian MCP] Resetting session due to error")
+        await close_atlassian_mcp_session()
         return None
 
 

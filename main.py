@@ -36,7 +36,13 @@ from core.MCP.gitlab_mcp_client import (
     get_gitlab_mr_info_via_mcp,
     get_gitlab_mr_changes_via_mcp,
     get_gitlab_file_content_via_mcp,
-    post_gitlab_comment_via_mcp
+    post_gitlab_comment_via_mcp,
+    close_gitlab_mcp_session
+)
+
+# Import Atlassian MCP client if needed
+from core.MCP.atlassian_mcp_client import (
+    close_atlassian_mcp_session
 )
 
 def parse_gitlab_mr_url(url: str) -> Optional[dict]:
@@ -392,6 +398,17 @@ async def process_mr(mr_url: str):
     print(f"{'=' * 60}\n")
 
 
+async def cleanup_mcp_sessions():
+    """Clean up MCP sessions on application shutdown."""
+    print("\n🔌 Cleaning up MCP sessions...")
+    try:
+        await close_gitlab_mcp_session()
+        await close_atlassian_mcp_session()
+        print("✅ MCP sessions closed successfully")
+    except Exception as e:
+        print(f"⚠️  Error closing MCP sessions: {e}")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -413,7 +430,14 @@ def main():
         sys.exit(1)
     
     # Run async main function
-    asyncio.run(process_mr(args.gitlab_mr))
+    try:
+        asyncio.run(process_mr(args.gitlab_mr))
+    finally:
+        # Clean up MCP sessions
+        try:
+            asyncio.run(cleanup_mcp_sessions())
+        except Exception as e:
+            print(f"Warning: Could not clean up MCP sessions: {e}")
 
 
 if __name__ == "__main__":
