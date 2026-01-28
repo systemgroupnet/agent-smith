@@ -31,18 +31,11 @@ setup_proxy()
 from core.workflow.graph import review_workflow
 from core.workflow.state import create_initial_state, StarterResponse
 
-# Import GitLab MCP client (MCP ONLY - No fallback to direct API)
-from core.MCP.gitlab_mcp_client import (
-    get_gitlab_mr_info_via_mcp,
-    get_gitlab_mr_changes_via_mcp,
-    get_gitlab_file_content_via_mcp,
-    post_gitlab_comment_via_mcp,
-    close_gitlab_mcp_session
-)
-
-# Import Atlassian MCP client if needed
-from core.MCP.atlassian_mcp_client import (
-    close_atlassian_mcp_session
+# Import MCP Toolkit Manager
+from core.MCP.toolkit_manager import (
+    initialize_mcp_toolkits,
+    close_mcp_toolkits,
+    get_mcp_toolkit_manager
 )
 
 def parse_gitlab_mr_url(url: str) -> Optional[dict]:
@@ -79,12 +72,45 @@ def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     }
 
 
+async def call_gitlab_tool(tool_name: str, arguments: dict) -> Optional[dict]:
+    """
+    Helper function to call a GitLab MCP tool by name.
+    
+    Args:
+        tool_name: Name of the GitLab tool to call
+        arguments: Tool arguments
+        
+    Returns:
+        Tool result or None if failed
+    """
+    try:
+        manager = get_mcp_toolkit_manager()
+        gitlab_tools = manager.get_gitlab_tools()
+        
+        # Find the tool
+        tool = next((t for t in gitlab_tools if t.name == tool_name), None)
+        if not tool:
+            print(f"  ❌ GitLab tool '{tool_name}' not found")
+            return None
+        
+        # Invoke the tool
+        result = await tool.ainvoke(arguments)
+        return result
+        
+    except Exception as e:
+        print(f"  ❌ Error calling GitLab tool {tool_name}: {e}")
+        return None
+
+
 async def get_gitlab_mr_info(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[dict]:
     """
     Fetch merge request information from GitLab using MCP.
     """
     print(f"  🔍 [GitLab] Using MCP to fetch MR info...")
-    return await get_gitlab_mr_info_via_mcp(project_path, mr_id)
+    return await call_gitlab_tool("get_merge_request", {
+        "project_id": project_path,
+        "merge_request_iid": mr_id
+    })
 
 
 async def get_gitlab_mr_changes(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[list]:
@@ -92,7 +118,20 @@ async def get_gitlab_mr_changes(gitlab_url: str, project_path: str, mr_id: str, 
     Fetch changed files and diffs from GitLab MR using MCP.
     """
     print(f"  🔍 [GitLab] Using MCP to fetch MR changes...")
-    return await get_gitlab_mr_changes_via_mcp(project_path, mr_id)
+    result = await call_gitlab_tool("get_merge_request_diffs", {
+        "project_id": project_path,
+        "merge_request_iid": mr_id
+    })
+    
+    if result:
+        # The result might be a dict with changes array or directly an array
+        if isinstance(result, dict):
+            changes = result.get("changes", result.get("diffs", []))
+        else:
+            changes = result if isinstance(result, list) else []
+        return changes
+    
+    return None
 
 
 async def get_file_content(gitlab_url: str, project_path: str, file_path: str, branch: str, token: str) -> Optional[str]:
@@ -100,7 +139,21 @@ async def get_file_content(gitlab_url: str, project_path: str, file_path: str, b
     Fetch file content from GitLab repository using MCP.
     """
     print(f"  🔍 [GitLab] Using MCP to fetch file content...")
-    return await get_gitlab_file_content_via_mcp(project_path, file_path, branch)
+    result = await call_gitlab_tool("get_file_contents", {
+        "project_id": project_path,
+        "file_path": file_path,
+        "ref": branch
+    })
+    
+    if result:
+        # The result might be a dict with content or directly the content
+        if isinstance(result, dict):
+            content = result.get("content", result.get("text", ""))
+        else:
+            content = str(result)
+        return content
+    
+    return None
 
 
 async def review_file_with_workflow(
@@ -226,14 +279,45 @@ async def post_gitlab_comment(
     Post a comment to GitLab MR using MCP.
     """
     print(f"  🔍 [GitLab] Using MCP to post comment...")
-    return await post_gitlab_comment_via_mcp(
-        project_path, mr_id, comment, file_path, line_number
-    )
+    
+    try:
+        if file_path and line_number:
+            # Create a thread/discussion on a specific line
+            result = await call_gitlab_tool("create_merge_request_thread", {
+                "project_id": project_path,
+                "merge_request_iid": mr_id,
+                "body": comment,
+                "position": {
+                    "new_path": file_path,
+                    "new_line": line_number
+                }
+            })
+        else:
+            # General comment
+            result = await call_gitlab_tool("create_merge_request_note", {
+                "project_id": project_path,
+                "merge_request_iid": mr_id,
+                "body": comment
+            })
+        
+        return result is not None
+        
+    except Exception as e:
+        print(f"  ❌ Failed to post comment: {e}")
+        return False
 
 
 async def process_mr(mr_url: str):
     """Main function to process a GitLab merge request."""
     print(f"🚀 Processing GitLab MR: {mr_url}\n")
+    
+    # Initialize MCP toolkits
+    print("🔌 Initializing MCP toolkits...")
+    try:
+        await initialize_mcp_toolkits()
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to initialize some MCP toolkits: {e}")
+        print("   Continuing with available tools...\n")
     
     # Parse MR URL
     mr_info = parse_gitlab_mr_url(mr_url)
@@ -402,8 +486,7 @@ async def cleanup_mcp_sessions():
     """Clean up MCP sessions on application shutdown."""
     print("\n🔌 Cleaning up MCP sessions...")
     try:
-        await close_gitlab_mcp_session()
-        await close_atlassian_mcp_session()
+        await close_mcp_toolkits()
         print("✅ MCP sessions closed successfully")
     except Exception as e:
         print(f"⚠️  Error closing MCP sessions: {e}")

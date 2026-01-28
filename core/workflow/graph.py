@@ -22,7 +22,7 @@ from dto.general import ReviewResponse
 
 # Import all agents
 from core.agents.starter_agent import starter_agent
-from core.agents.service_agents import (
+from core.agents.service_agents_with_tools import (
     ServiceContext,
     run_combined_service_review,
 )
@@ -126,6 +126,12 @@ async def review_sql_node(state: ReviewState) -> ReviewState:
             content=state["content"],
             diff=state["diff"],
             file_name=state["file_name"],
+            file_path=state.get("file_path"),
+            jira_task_number=state.get("jira_task_number"),
+            gitlab_token=state.get("gitlab_token"),
+            gitlab_url=state.get("gitlab_url"),
+            source_branch=state.get("source_branch"),
+            project_path=state.get("project_path"),
         )
         
         result = await run_sql_review(context)
@@ -150,6 +156,12 @@ async def review_test_node(state: ReviewState) -> ReviewState:
             content=state["content"],
             diff=state["diff"],
             file_name=state["file_name"],
+            file_path=state.get("file_path"),
+            jira_task_number=state.get("jira_task_number"),
+            gitlab_token=state.get("gitlab_token"),
+            gitlab_url=state.get("gitlab_url"),
+            source_branch=state.get("source_branch"),
+            project_path=state.get("project_path"),
         )
         
         result = await run_test_review(context)
@@ -174,6 +186,12 @@ async def review_pbook_node(state: ReviewState) -> ReviewState:
             content=state["content"],
             diff=state["diff"],
             file_name=state["file_name"],
+            file_path=state.get("file_path"),
+            jira_task_number=state.get("jira_task_number"),
+            gitlab_token=state.get("gitlab_token"),
+            gitlab_url=state.get("gitlab_url"),
+            source_branch=state.get("source_branch"),
+            project_path=state.get("project_path"),
         )
         
         result = await run_pbook_review(context)
@@ -230,6 +248,12 @@ async def review_typescript_node(state: ReviewState) -> ReviewState:
             content=state["content"],
             diff=state["diff"],
             file_name=state["file_name"],
+            file_path=state.get("file_path"),
+            jira_task_number=state.get("jira_task_number"),
+            gitlab_token=state.get("gitlab_token"),
+            gitlab_url=state.get("gitlab_url"),
+            source_branch=state.get("source_branch"),
+            project_path=state.get("project_path"),
         )
         
         result = await run_typescript_review(context)
@@ -254,6 +278,12 @@ async def review_html_node(state: ReviewState) -> ReviewState:
             content=state["content"],
             diff=state["diff"],
             file_name=state["file_name"],
+            file_path=state.get("file_path"),
+            jira_task_number=state.get("jira_task_number"),
+            gitlab_token=state.get("gitlab_token"),
+            gitlab_url=state.get("gitlab_url"),
+            source_branch=state.get("source_branch"),
+            project_path=state.get("project_path"),
         )
         
         result = await run_html_review(context)
@@ -278,6 +308,12 @@ async def review_scss_node(state: ReviewState) -> ReviewState:
             content=state["content"],
             diff=state["diff"],
             file_name=state["file_name"],
+            file_path=state.get("file_path"),
+            jira_task_number=state.get("jira_task_number"),
+            gitlab_token=state.get("gitlab_token"),
+            gitlab_url=state.get("gitlab_url"),
+            source_branch=state.get("source_branch"),
+            project_path=state.get("project_path"),
         )
         
         result = await run_scss_review(context)

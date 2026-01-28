@@ -1,30 +1,31 @@
 """
-Atlassian MCP Client - Integration with Atlassian MCP Server
+Atlassian MCP Client - Direct Tool Exposure
 
-This module provides functions to interact with Jira and Confluence via the MCP (Model Context Protocol) server.
-Uses HTTP/SSE transport for streaming communication and maintains persistent connections.
+This module provides direct access to Atlassian MCP tools through langchain-mcp.
+No wrapper methods - tools are exposed directly to LangChain agents for
+the LLM to choose and use.
 
 Usage:
-    from core.MCP.atlassian_mcp_client import get_jira_issue_via_mcp, get_confluence_page_via_mcp
+    # Use the centralized toolkit manager instead:
+    from core.MCP.toolkit_manager import get_mcp_toolkit_manager
     
-    issue = await get_jira_issue_via_mcp("PROJ-123")
-    page = await get_confluence_page_via_mcp("12345")
+    manager = get_mcp_toolkit_manager()
+    await manager.initialize()
+    atlassian_tools = manager.get_atlassian_tools()
+    
+    # Use tools with LangChain agents
 """
 
 from __future__ import annotations
 
 import os
-import json
-import traceback
-from typing import Optional
-import httpx
-from mcp import ClientSession
-from mcp.client.sse import sse_client
+from typing import Optional, List
+from langchain_core.tools import BaseTool
+from langchain_mcp import MCPToolkit
 
 
-# Singleton session management
-_atlassian_mcp_session: Optional[ClientSession] = None
-_atlassian_mcp_client_context = None
+# Singleton toolkit management (deprecated - use toolkit_manager instead)
+_atlassian_mcp_toolkit: Optional[MCPToolkit] = None
 
 
 def is_mcp_atlassian_enabled() -> bool:
@@ -37,202 +38,95 @@ def get_mcp_atlassian_url() -> str:
     Get Atlassian MCP server URL for HTTP/SSE transport.
     
     Returns:
-        Base URL for the MCP server (e.g., http://mcp-atlassian:8080)
+        SSE endpoint URL for the MCP server (e.g., http://mcp-atlassian:8080/sse)
     """
     mcp_host = os.getenv("MCP_ATLASSIAN_HOST", "mcp-atlassian")
     mcp_port = os.getenv("MCP_ATLASSIAN_PORT", "8080")
     
     # If running in Docker, use container name; otherwise use localhost
     if mcp_host == "localhost":
-        return f"http://localhost:{mcp_port}"
+        return f"http://localhost:{mcp_port}/sse"
     else:
-        return f"http://{mcp_host}:{mcp_port}"
+        return f"http://{mcp_host}:{mcp_port}/sse"
 
 
-async def get_atlassian_mcp_session() -> ClientSession:
+async def get_atlassian_mcp_tools() -> List[BaseTool]:
     """
-    Get or create a persistent MCP session for Atlassian.
+    Get or create LangChain tools from Atlassian MCP server.
     
-    This implements the singleton pattern to reuse the same session
-    across multiple tool calls, which is the correct way to use MCP.
+    This function creates a toolkit that exposes all Atlassian MCP tools
+    (Jira, Confluence) as LangChain tools. The toolkit manages the MCP
+    connection and session automatically using HTTP/SSE transport.
+    
+    DEPRECATED: Use toolkit_manager.get_atlassian_tools() instead for
+    better centralized management.
     
     Returns:
-        Active ClientSession instance
+        List of LangChain tools that can be used with agents/chains
+        
+    Raises:
+        Exception: If toolkit creation fails
     """
-    global _atlassian_mcp_session, _atlassian_mcp_client_context
+    global _atlassian_mcp_toolkit
     
-    # Return existing session if available
-    if _atlassian_mcp_session is not None:
-        return _atlassian_mcp_session
+    # Return existing toolkit if available
+    if _atlassian_mcp_toolkit is not None:
+        return _atlassian_mcp_toolkit.get_tools()
     
-    # Create new session
+    # Create new toolkit
     try:
-        mcp_url = get_mcp_atlassian_url()
-        print(f"  🔌 [Atlassian MCP] Connecting to MCP server at {mcp_url}")
+        sse_url = get_mcp_atlassian_url()
+        print(f"  🔌 [Atlassian MCP] Creating toolkit with SSE endpoint: {sse_url}")
         print(f"     - Transport: HTTP with SSE (Server-Sent Events)")
         
-        # Create SSE client with the MCP endpoint
-        _atlassian_mcp_client_context = sse_client(
-            url=f"{mcp_url}/sse",
-            timeout=httpx.Timeout(timeout=60.0, connect=10.0)
+        # Create MCPToolkit with SSE transport
+        _atlassian_mcp_toolkit = MCPToolkit(
+            server_url=sse_url,
+            transport="sse"
         )
         
-        # Enter the context and create session
-        read_stream, write_stream = await _atlassian_mcp_client_context.__aenter__()
+        print(f"  🔄 [Atlassian MCP] Initializing toolkit...")
+        await _atlassian_mcp_toolkit.initialize()
         
-        _atlassian_mcp_session = ClientSession(read_stream, write_stream)
-        await _atlassian_mcp_session.__aenter__()
+        tools = _atlassian_mcp_toolkit.get_tools()
+        print(f"  ✅ [Atlassian MCP] Toolkit initialized with {len(tools)} tool(s)")
         
-        print(f"  🔄 [Atlassian MCP] Initializing session...")
-        await _atlassian_mcp_session.initialize()
-        print(f"  ✅ [Atlassian MCP] Session initialized and ready")
+        # Print available tools
+        for tool in tools:
+            print(f"     - {tool.name}: {tool.description}")
         
-        return _atlassian_mcp_session
+        return tools
         
     except Exception as e:
-        print(f"  ❌ [Atlassian MCP] Failed to create session: {e}")
+        print(f"  ❌ [Atlassian MCP] Failed to create toolkit: {e}")
+        import traceback
         print(f"     Traceback: {traceback.format_exc()}")
-        _atlassian_mcp_session = None
-        _atlassian_mcp_client_context = None
+        _atlassian_mcp_toolkit = None
         raise
 
 
-async def close_atlassian_mcp_session():
+async def close_atlassian_mcp_toolkit():
     """
-    Close the Atlassian MCP session.
+    Close the Atlassian MCP toolkit and cleanup resources.
+    
+    DEPRECATED: Use toolkit_manager.close() instead.
     
     Should be called when shutting down the application or when
-    you want to force a session refresh.
+    you want to force a toolkit refresh.
     """
-    global _atlassian_mcp_session, _atlassian_mcp_client_context
+    global _atlassian_mcp_toolkit
     
-    if _atlassian_mcp_session is not None:
+    if _atlassian_mcp_toolkit is not None:
         try:
-            await _atlassian_mcp_session.__aexit__(None, None, None)
-            print(f"  🔌 [Atlassian MCP] Session closed")
+            await _atlassian_mcp_toolkit.close()
+            print(f"  🔌 [Atlassian MCP] Toolkit closed")
         except Exception as e:
-            print(f"  ⚠️  [Atlassian MCP] Error closing session: {e}")
+            print(f"  ⚠️  [Atlassian MCP] Error closing toolkit: {e}")
         finally:
-            _atlassian_mcp_session = None
-    
-    if _atlassian_mcp_client_context is not None:
-        try:
-            await _atlassian_mcp_client_context.__aexit__(None, None, None)
-        except Exception as e:
-            print(f"  ⚠️  [Atlassian MCP] Error closing client context: {e}")
-        finally:
-            _atlassian_mcp_client_context = None
+            _atlassian_mcp_toolkit = None
 
 
-async def call_atlassian_mcp_tool(tool_name: str, arguments: dict) -> Optional[dict]:
-    """
-    Call a tool on the MCP Atlassian server using persistent session.
-    
-    Args:
-        tool_name: Name of the MCP tool to call
-        arguments: Tool arguments as a dictionary
-        
-    Returns:
-        Tool result as a dictionary or None if failed
-    """
-    print(f"  🔧 [Atlassian MCP] Calling tool: {tool_name}")
-    print(f"     - Arguments: {json.dumps(arguments, indent=2)}")
-    
-    try:
-        # Get or create persistent session
-        session = await get_atlassian_mcp_session()
-        
-        print(f"  📤 [Atlassian MCP] Sending request to tool: {tool_name}")
-        result = await session.call_tool(tool_name, arguments)
-        print(f"  📥 [Atlassian MCP] Tool {tool_name} returned response")
-        
-        # Parse the result
-        if result:
-            print(f"     - Response has {len(result.content) if result.content else 0} content item(s)")
-            if result.content and len(result.content) > 0:
-                content = result.content[0]
-                if hasattr(content, 'text'):
-                    try:
-                        parsed = json.loads(content.text)
-                        print(f"  ✅ [Atlassian MCP] Tool {tool_name} succeeded")
-                        return parsed
-                    except json.JSONDecodeError as e:
-                        print(f"  ⚠️  [Atlassian MCP] Failed to parse JSON response: {e}")
-                        print(f"     - Raw response: {content.text[:200]}...")
-                        return None
-                else:
-                    print(f"  ⚠️  [Atlassian MCP] Response content has no 'text' attribute")
-                    print(f"     - Content type: {type(content)}")
-                    return None
-            else:
-                print(f"  ⚠️  [Atlassian MCP] Tool {tool_name} returned empty content")
-                return None
-        else:
-            print(f"  ⚠️  [Atlassian MCP] Tool {tool_name} returned None")
-            return None
-            
-    except Exception as e:
-        print(f"  ❌ [Atlassian MCP] Error calling tool {tool_name}: {e}")
-        print(f"     Traceback: {traceback.format_exc()}")
-        
-        # On error, reset session to force reconnect on next call
-        print(f"  🔄 [Atlassian MCP] Resetting session due to error")
-        await close_atlassian_mcp_session()
-        return None
-
-
-async def get_jira_issue_via_mcp(issue_key: str) -> Optional[dict]:
-    """
-    Get Jira issue information via Atlassian MCP.
-    
-    Args:
-        issue_key: Jira issue key (e.g., "PROJ-123")
-        
-    Returns:
-        Jira issue data as dict or None if failed
-    """
-    if not issue_key:
-        print(f"  ⚠️  [Atlassian MCP] No issue key provided, skipping Jira fetch")
-        return None
-    
-    print(f"  🔌 [Atlassian MCP] Fetching Jira issue: {issue_key}")
-    
-    result = await call_atlassian_mcp_tool("jira_get_issue", {"issue_key": issue_key})
-    
-    if result:
-        fields = result.get("fields", {})
-        summary = fields.get("summary", "N/A")
-        print(f"  ✅ [Atlassian MCP] Jira issue fetched: {issue_key} - {summary}")
-    else:
-        print(f"  ❌ [Atlassian MCP] Failed to fetch Jira issue: {issue_key}")
-    
-    return result
-
-
-async def get_confluence_page_via_mcp(page_id: str) -> Optional[dict]:
-    """
-    Get Confluence page information via Atlassian MCP.
-    
-    Args:
-        page_id: Confluence page ID
-        
-    Returns:
-        Confluence page data as dict or None if failed
-    """
-    if not page_id:
-        print(f"  ⚠️  [Atlassian MCP] No page ID provided, skipping Confluence fetch")
-        return None
-    
-    print(f"  🔌 [Atlassian MCP] Fetching Confluence page: {page_id}")
-    
-    result = await call_atlassian_mcp_tool("confluence_get_page", {"page_id": page_id})
-    
-    if result:
-        title = result.get("title", "N/A")
-        body_length = len(result.get("body", {}).get("storage", {}).get("value", ""))
-        print(f"  ✅ [Atlassian MCP] Confluence page fetched: {title} ({body_length} chars)")
-    else:
-        print(f"  ❌ [Atlassian MCP] Failed to fetch Confluence page: {page_id}")
-    
-    return result
-
+# Backward compatibility alias
+async def close_atlassian_mcp_session():
+    """Backward compatibility alias for close_atlassian_mcp_toolkit()."""
+    await close_atlassian_mcp_toolkit()

@@ -1,9 +1,14 @@
 """
-Pbook Reviewer Agent - Review error message definition files (pbook)
+Pbook Reviewer Agent - Review error message definition files with MCP Tools
+
+This module provides pbook review agent with MCP tool integration for fetching
+external data (GitLab, Jira, Confluence) as needed during the review process.
 """
 
+from typing import Optional
 from pydantic import BaseModel
-from core.agents.base_agent import create_review_agent
+
+from core.agents.tool_agent import create_review_agent_with_tools
 from dto.general import ReviewResponse
 
 
@@ -12,10 +17,26 @@ class PbookContext(BaseModel):
     content: str
     diff: str
     file_name: str
+    file_path: Optional[str] = None
+    jira_task_number: Optional[str] = None
+    gitlab_token: Optional[str] = None
+    gitlab_url: Optional[str] = None
+    source_branch: Optional[str] = None
+    project_path: Optional[str] = None
 
 
 def get_pbook_reviewer_prompt(context: PbookContext) -> str:
-    """Get pbook reviewer system prompt."""
+    """Get pbook reviewer system prompt with tool usage instructions."""
+    
+    # Build additional context information
+    context_info = []
+    if context.file_path:
+        context_info.append(f"File Path: {context.file_path}")
+    if context.jira_task_number:
+        context_info.append(f"Jira Task: {context.jira_task_number}")
+    
+    context_section = "\n".join(context_info) if context_info else "No additional context"
+    
     return f"""You are an expert reviewer for pbook (error message) files in the application.
 
 ## Critical Review Areas
@@ -45,28 +66,79 @@ def get_pbook_reviewer_prompt(context: PbookContext) -> str:
 - **medium**: Unclear messages, inconsistent formatting
 - **low**: Minor wording improvements, style issues
 
-File Name: {context.file_name}
+**CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
 
-File Content:
+## TOOLS AVAILABLE
+You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
+- Fetch related error message files from the repository to check for duplicates
+- Look up Jira issues to understand the context of error messages
+- View Confluence documentation about error message standards
+- Understand the broader error handling strategy
+
+Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
+
+=== Context Information ===
+{context_section}
+
+=== File Content ===
 ```
 {context.content}
 ```
 
-Git Diff:
+=== Git Diff ===
 ```
 {context.diff}
 ```"""
 
 
-pbook_reviewer = create_review_agent(
-    system_prompt="",
-    model_name="gpt-4o-mini",
-    temperature=0.0
-)
+async def create_pbook_reviewer_agent():
+    """
+    Create pbook reviewer agent with MCP tools.
+    
+    The agent can use GitLab, Jira, and Confluence tools to fetch additional context.
+    """
+    return await create_review_agent_with_tools(
+        system_prompt="",  # Will be replaced with context-specific prompt
+        tools=["gitlab", "atlassian"],  # GitLab + Atlassian (Jira/Confluence) tools
+        model_name="gpt-4o-mini",
+        temperature=0.0,
+        max_iterations=10,
+        verbose=False,
+    )
 
 
 async def run_pbook_review(context: PbookContext) -> ReviewResponse:
-    """Run pbook review."""
-    prompt = get_pbook_reviewer_prompt(context)
-    return await pbook_reviewer.run(prompt)
+    """
+    Run pbook review with MCP tools.
+    
+    The agent will automatically use MCP tools if it needs additional
+    context about error messages.
+    
+    Args:
+        context: Pbook context with file information
+        
+    Returns:
+        ReviewResponse with identified issues
+    """
+    print(f"  🔍 Running pbook review...")
+    
+    try:
+        # Create agent with tools
+        agent = await create_pbook_reviewer_agent()
+        
+        # Build input with context
+        input_text = get_pbook_reviewer_prompt(context)
+        
+        # Run agent
+        result = await agent.run(input_text)
+        
+        print(f"  ✅ Pbook review complete: {len(result.issues)} issues found")
+        return result
+        
+    except Exception as e:
+        print(f"  ❌ Pbook review failed: {e}")
+        import traceback
+        print(f"     Traceback: {traceback.format_exc()}")
+        # Return empty response on error
+        return ReviewResponse(issues=[])
 
