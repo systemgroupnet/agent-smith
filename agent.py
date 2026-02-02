@@ -1,6 +1,8 @@
-from agents import TResponseInputItem, Runner, RunConfig, trace
 from pydantic import BaseModel
 import os
+import re
+from typing import Optional
+from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv
 
 # Load environment variables and setup proxy
@@ -8,167 +10,121 @@ load_dotenv()
 from core.config import setup_proxy
 setup_proxy()
 
-from core.start import starter_agent
-from core.backend.pbook_reviewer import pbook_reviewer, PbookReviewerContext
-from core.backend.sql_reviewer import sql_reviewer, SqlReviewerContext
-from core.backend.service_reviewer import run_combined_review, ServiceReviewerContext
-from core.backend.test_reviewer import test_reviewer, TestReviewerContext
-from core.backend.dataview_reviewer import dataview_reviewer, DataviewReviewerContext
+# Import LangGraph workflow
+from core.workflow.graph import review_workflow
+from core.workflow.state import create_initial_state
+
+
+def parse_gitlab_mr_url(url: str) -> Optional[dict]:
+    """
+    Parse GitLab MR URL to extract project path and MR ID.
+    
+    Examples:
+        https://gitlab.example.com/group/project/-/merge_requests/123
+        https://gitlab.example.com/group/project/-/merge_requests/123/diffs
+    
+    Returns:
+        Dictionary with 'domain', 'project_path', and 'mr_id' or None if parsing fails
+    """
+    # Decode URL-encoded characters (e.g., %2F -> /) to handle Windows/encoded URLs
+    decoded_url = unquote(url)
+    
+    # Extract domain and path separately
+    parsed = urlparse(decoded_url)
+    domain = f"{parsed.scheme}://{parsed.netloc}"
+    path = parsed.path
+    
+    # Extract project path and MR ID from the path
+    # Path format: /group/project/-/merge_requests/123
+    match = re.search(r'^/(.+?)/-/merge_requests/(\d+)', path)
+    if not match:
+        return None
+    
+    project_path = match.group(1)  # group/project (without leading /)
+    mr_id = match.group(2)
+    
+    return {
+        "domain": domain,
+        "project_path": project_path,
+        "mr_id": mr_id
+    }
+
 
 class WorkflowInput(BaseModel):
-  input_as_text: str
+    """Input model for the review workflow."""
+    input_as_text: str
 
 
 async def run_workflow(workflow_input: WorkflowInput):
-  with trace("CRASG"):
-    state = {
-
-    }
-    workflow = workflow_input.model_dump()
-    conversation_history: list[TResponseInputItem] = [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "input_text",
-            "text": workflow["input_as_text"]
-          }
-        ]
-      }
-    ]
-    agent_result_temp = await Runner.run(
-      starter_agent,
-      input=[
-        *conversation_history
-      ],
-      run_config=RunConfig(trace_metadata={
-        "__trace_source__": "agent-builder",
-        "workflow_id": "wf_68e5e4144d2881909eeb7d90b7b8d77408a3a1d85b9ede4c"
-      })
-    )
-
-    conversation_history.extend([item.to_input_item() for item in agent_result_temp.new_items])
-
-    agent_result = {
-      "output_text": agent_result_temp.final_output.json(),
-      "output_parsed": agent_result_temp.final_output.model_dump()
-    }
-    if agent_result["output_parsed"]["file_type"] == "pbook":
-      pbook_reviewer_result_temp = await Runner.run(
-        pbook_reviewer,
-        input=[
-          *conversation_history
-        ],
-        run_config=RunConfig(trace_metadata={
-          "__trace_source__": "agent-builder",
-          "workflow_id": "wf_68e5e4144d2881909eeb7d90b7b8d77408a3a1d85b9ede4c"
-        }),
-        context=PbookReviewerContext(
-          workflow_input_as_text=workflow["input_as_text"],
-          content=agent_result["output_parsed"]["content"],
-          diff=agent_result["output_parsed"]["diff"]
-        )
-      )
-
-      conversation_history.extend([item.to_input_item() for item in pbook_reviewer_result_temp.new_items])
-
-      pbook_reviewer_result = {
-        "output_text": pbook_reviewer_result_temp.final_output_as(str)
-      }
-    elif agent_result["output_parsed"]["file_type"] in ["service", "validation"]:
-      # Call run_combined_review to orchestrate both semantic and business logic reviewers
-      combined_review_result = await run_combined_review(
-        ServiceReviewerContext(
-          workflow_input_as_text=workflow["input_as_text"],
-          content=agent_result["output_parsed"]["content"],
-          diff=agent_result["output_parsed"]["diff"],
-          jira_task_number=agent_result["output_parsed"].get("jira_task_number"),
-          package_name=agent_result["output_parsed"].get("package_name"),
-          module_name=agent_result["output_parsed"].get("module_name"),
-          file_name=agent_result["output_parsed"].get("file_name"),
-          gitlab_token=os.getenv("GITLAB_TOKEN"),
-          gitlab_domain=os.getenv("GITLAB_DOMAIN", "gitlab.example.com"),
-          source_branch=agent_result["output_parsed"].get("source_branch"),
-          project_path=os.getenv("GITLAB_PROJECT_PATH")
-        )
-      )
-
-      service_reviewer_result = {
-        "output_text": combined_review_result.model_dump_json()
-      }
-    elif agent_result["output_parsed"]["file_type"] == "test":
-      test_reviewer_result_temp = await Runner.run(
-        test_reviewer,
-        input=[
-          *conversation_history
-        ],
-        run_config=RunConfig(trace_metadata={
-          "__trace_source__": "agent-builder",
-          "workflow_id": "wf_68e5e4144d2881909eeb7d90b7b8d77408a3a1d85b9ede4c"
-        }),
-        context=TestReviewerContext(
-          workflow_input_as_text=workflow["input_as_text"],
-          content=agent_result["output_parsed"]["content"],
-          diff=agent_result["output_parsed"]["diff"]
-        )
-      )
-
-      conversation_history.extend([item.to_input_item() for item in test_reviewer_result_temp.new_items])
-
-      test_reviewer_result = {
-        "output_text": test_reviewer_result_temp.final_output_as(str)
-      }
-    elif agent_result["output_parsed"]["file_type"] == "sql":
-      sql_reviewer_result_temp = await Runner.run(
-        sql_reviewer,
-        input=[
-          *conversation_history
-        ],
-        run_config=RunConfig(trace_metadata={
-          "__trace_source__": "agent-builder",
-          "workflow_id": "wf_68e5e4144d2881909eeb7d90b7b8d77408a3a1d85b9ede4c"
-        }),
-        context=SqlReviewerContext(
-          workflow_input_as_text=workflow["input_as_text"],
-          content=agent_result["output_parsed"]["content"],
-          diff=agent_result["output_parsed"]["diff"]
-        )
-      )
-
-      conversation_history.extend([item.to_input_item() for item in sql_reviewer_result_temp.new_items])
-
-      sql_reviewer_result = {
-        "output_text": sql_reviewer_result_temp.final_output_as(str)
-      }
-    elif agent_result["output_parsed"]["file_type"] == "dataview":
-      dataview_reviewer_result_temp = await Runner.run(
-        dataview_reviewer,
-        input=[
-          *conversation_history
-        ],
-        run_config=RunConfig(trace_metadata={
-          "__trace_source__": "agent-builder",
-          "workflow_id": "wf_68e5e4144d2881909eeb7d90b7b8d77408a3a1d85b9ede4c"
-        }),
-        context=DataviewReviewerContext(
-          workflow_input_as_text=workflow["input_as_text"],
-          content=agent_result["output_parsed"]["content"],
-          diff=agent_result["output_parsed"]["diff"],
-          jira_task_number=agent_result["output_parsed"].get("jira_task_number"),
-          package_name=agent_result["output_parsed"].get("package_name"),
-          module_name=agent_result["output_parsed"].get("module_name"),
-          file_name=agent_result["output_parsed"].get("file_name"),
-          gitlab_token=os.getenv("GITLAB_TOKEN"),
-          gitlab_domain=os.getenv("GITLAB_DOMAIN", "gitlab.example.com"),
-          source_branch=agent_result["output_parsed"].get("source_branch"),
-          project_path=os.getenv("GITLAB_PROJECT_PATH")
-        )
-      )
-
-      conversation_history.extend([item.to_input_item() for item in dataview_reviewer_result_temp.new_items])
-
-      dataview_reviewer_result = {
-        "output_text": dataview_reviewer_result_temp.final_output.json()
-      }
+    """
+    Run the code review workflow using LangGraph.
+    
+    Args:
+        workflow_input: Input containing file information or GitLab MR URL
+        
+    Returns:
+        Review result with issues found
+    """
+    # Try to extract project_path and gitlab_url from GitLab MR URL if input_as_text is a URL
+    project_path: Optional[str] = None
+    gitlab_url: Optional[str] = os.getenv("GITLAB_URL")
+    
+    # Check if input_as_text is a GitLab MR URL
+    mr_info = parse_gitlab_mr_url(workflow_input.input_as_text)
+    if mr_info:
+        project_path = mr_info["project_path"]
+        gitlab_url = mr_info["domain"]  # Full URL with protocol
+        print(f"📦 Extracted project path from URL: {project_path}")
+        print(f"🌐 Extracted GitLab URL: {gitlab_url}")
     else:
-      return agent_result
+        # Fallback to environment variables if URL parsing fails
+        project_path = os.getenv("GITLAB_PROJECT_PATH")
+        if not gitlab_url:
+            # If GITLAB_URL not set, try to construct from GITLAB_DOMAIN for backward compatibility
+            gitlab_domain = os.getenv("GITLAB_DOMAIN")
+            if gitlab_domain:
+                gitlab_url = f"https://{gitlab_domain}"
+                print(f"⚠️  Using GITLAB_DOMAIN (deprecated) - please use GITLAB_URL instead")
+        
+        if project_path:
+            print(f"📦 Using project path from environment: {project_path}")
+        if gitlab_url:
+            print(f"🌐 Using GitLab URL from environment: {gitlab_url}")
+        if not project_path and not gitlab_url:
+            print("⚠️  Warning: No project path or GitLab URL found in URL or environment")
+    
+    # Create initial state
+    initial_state = create_initial_state(
+        input_text=workflow_input.input_as_text,
+        gitlab_token=os.getenv("GITLAB_TOKEN"),
+        gitlab_url=gitlab_url,
+        project_path=project_path
+    )
+    
+    # Run the workflow
+    print("\n" + "="*60)
+    print("🚀 Starting LangGraph Code Review Workflow")
+    print("="*60)
+    
+    final_state = await review_workflow.ainvoke(initial_state)
+    
+    print("\n" + "="*60)
+    print("✨ Workflow Complete")
+    print("="*60 + "\n")
+    
+    # Return the output
+    if final_state.get("error"):
+        return {
+            "error": final_state["error"]
+        }
+    
+    output = final_state.get("output")
+    if output:
+        return {
+            "output_text": output
+        }
+    
+    # Fallback - return classification if no review was done
+    return {
+        "output_text": final_state.get("classification", {})
+    }

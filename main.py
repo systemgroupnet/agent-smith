@@ -14,6 +14,7 @@ import asyncio
 import os
 import re
 import sys
+import json
 from typing import Optional
 from urllib.parse import quote, unquote, urlparse
 
@@ -24,28 +25,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Setup proxy configuration for OpenAI API calls
-from core.config import setup_proxy
-setup_proxy()
+# from core.config import setup_proxy
+# setup_proxy()
 
-# Import reviewers
-from core.frontend.html_reviewer.html_reviewer import HtmlReviewerContext, html_reviewer
-from core.start.starter_agent import starter_agent, StarterResponse
-from core.backend.service_reviewer.service_reviewer import ServiceReviewerContext, run_combined_review
-from core.backend.sql_reviewer.sql_reviewer import SqlReviewerContext, sql_reviewer
-from core.backend.dataview_reviewer.dataview_reviewer import DataviewReviewerContext, dataview_reviewer
-from core.backend.test_reviewer.test_reviewer import TestReviewerContext, test_reviewer
-from core.backend.pbook_reviewer.pbook_reviewer import PbookReviewerContext, pbook_reviewer
-from core.frontend.scss_reviewer.scss_reviewer import ScssReviewerContext, scss_reviewer
-from core.frontend.ts_reviewer.typescript_reviewer import TypescriptReviewerContext, typescript_reviewer
-from agents import Runner, RunConfig
+# Import LangGraph workflow
+from core.workflow.graph import review_workflow
+from core.workflow.state import create_initial_state, StarterResponse
 
-# Import GitLab MCP client (MCP ONLY - No fallback to direct API)
-from core.MCP.gitlab_mcp_client import (
-    get_gitlab_mr_info_via_mcp,
-    get_gitlab_mr_changes_via_mcp,
-    get_gitlab_file_content_via_mcp,
-    post_gitlab_comment_via_mcp
+# Import MCP Toolkit Manager
+from core.MCP.toolkit_manager import (
+    initialize_mcp_toolkits,
+    close_mcp_toolkits,
+    get_mcp_toolkit_manager
 )
+from core.gitlab_api_client import get_gitlab_api_client
+
 
 def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     """
@@ -81,40 +75,157 @@ def parse_gitlab_mr_url(url: str) -> Optional[dict]:
     }
 
 
+async def call_gitlab_tool(tool_name: str, arguments: dict) -> Optional[dict]:
+    """
+    Helper function to call a GitLab MCP tool by name.
+    
+    Args:
+        tool_name: Name of the GitLab tool to call
+        arguments: Tool arguments
+        
+    Returns:
+        Tool result or None if failed
+    """
+    try:
+        manager = get_mcp_toolkit_manager()
+        gitlab_tools = manager.get_gitlab_tools()
+        
+        # Find the tool
+        tool = next((t for t in gitlab_tools if t.name == tool_name), None)
+        if not tool:
+            print(f"  ❌ GitLab tool '{tool_name}' not found")
+            return None
+        
+        # Invoke the tool
+        result = await tool.ainvoke(arguments)
+        return result
+        
+    except asyncio.CancelledError as e:
+        task = asyncio.current_task()
+        if task is not None:
+            task.uncancel()
+        print(f"  ❌ Error calling GitLab tool {tool_name}: {e}")
+        return None
+    except Exception as e:
+        print(f"  ❌ Error calling GitLab tool {tool_name}: {e}")
+        return None
+
+
+def _normalize_mcp_json_payload(result: object) -> Optional[dict]:
+    """Normalize MCP responses that wrap JSON in text fields or strings."""
+    if isinstance(result, list) and result:
+        first = result[0]
+        if isinstance(first, dict) and isinstance(first.get("text"), str):
+            try:
+                return json.loads(first["text"])
+            except json.JSONDecodeError:
+                return None
+    if isinstance(result, str):
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError:
+            return None
+    return result if isinstance(result, dict) else None
+
+
 async def get_gitlab_mr_info(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[dict]:
     """
-    Fetch merge request information from GitLab using MCP.
+    Fetch merge request information from GitLab using MCP or REST API fallback.
     """
-    print(f"  🔍 [GitLab] Using MCP to fetch MR info...")
-    return await get_gitlab_mr_info_via_mcp(project_path, mr_id)
+    # Try MCP first
+    manager = get_mcp_toolkit_manager()
+    if manager.is_initialized and manager.get_gitlab_tools():
+        print(f"  🔍 [GitLab] Using MCP to fetch MR info...")
+        result = await call_gitlab_tool("get_merge_request", {
+            "project_id": project_path,
+            "merge_request_iid": mr_id
+        })
+        if result:
+            normalized = _normalize_mcp_json_payload(result)
+            if normalized:
+                return normalized
+        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
+    
+    # Fallback to REST API
+    print(f"  🔍 [GitLab] Using REST API to fetch MR info...")
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    return api_client.get_merge_request(project_path, mr_id)
 
 
 async def get_gitlab_mr_changes(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[list]:
     """
-    Fetch changed files and diffs from GitLab MR using MCP.
+    Fetch changed files and diffs from GitLab MR using MCP or REST API fallback.
     """
-    print(f"  🔍 [GitLab] Using MCP to fetch MR changes...")
-    return await get_gitlab_mr_changes_via_mcp(project_path, mr_id)
+    # Try MCP first
+    manager = get_mcp_toolkit_manager()
+    if manager.is_initialized and manager.get_gitlab_tools():
+        print(f"  🔍 [GitLab] Using MCP to fetch MR changes...")
+        result = await call_gitlab_tool("get_merge_request_diffs", {
+            "project_id": project_path,
+            "merge_request_iid": mr_id
+        })
+        
+        if result:
+            # The result might be a dict with changes array or directly an array
+            if isinstance(result, dict):
+                changes = result.get("changes", result.get("diffs", []))
+            else:
+                changes = result if isinstance(result, list) else []
+            if changes:
+                return changes
+        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
+    
+    # Fallback to REST API
+    print(f"  🔍 [GitLab] Using REST API to fetch MR changes...")
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    return api_client.get_merge_request_changes(project_path, mr_id)
 
 
 async def get_file_content(gitlab_url: str, project_path: str, file_path: str, branch: str, token: str) -> Optional[str]:
     """
-    Fetch file content from GitLab repository using MCP.
+    Fetch file content from GitLab repository using MCP or REST API fallback.
     """
-    print(f"  🔍 [GitLab] Using MCP to fetch file content...")
-    return await get_gitlab_file_content_via_mcp(project_path, file_path, branch)
+    # Try MCP first
+    manager = get_mcp_toolkit_manager()
+    if manager.is_initialized and manager.get_gitlab_tools():
+        print(f"  🔍 [GitLab] Using MCP to fetch file content...")
+        result = await call_gitlab_tool("get_file_contents", {
+            "project_id": project_path,
+            "file_path": file_path,
+            "ref": branch
+        })
+        
+        if result:
+            # The result might be a dict with content or directly the content
+            if isinstance(result, dict):
+                content = result.get("content", result.get("text", ""))
+            else:
+                content = str(result)
+            if content:
+                return content
+        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
+    
+    # Fallback to REST API
+    print(f"  🔍 [GitLab] Using REST API to fetch file content...")
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    return api_client.get_file_content(project_path, file_path, branch)
 
 
-async def classify_file(
+async def review_file_with_workflow(
     file_path: str,
     content: str,
     diff: str,
     merge_request_title: str,
     target_branch: str,
-    source_branch: str
-) -> Optional[StarterResponse]:
-    """Classify a file using the starter agent."""
-    try:
+    source_branch: str,
+    gitlab_token: Optional[str],
+    gitlab_url: Optional[str],
+    project_path: Optional[str]
+) -> Optional[list]:
+    """Review a file using LangGraph workflow."""
+    
+    async def _run_workflow() -> Optional[list]:
+        """Inner function to run the workflow in isolation."""
         input_text = f"""
 file_path: {file_path}
 content:
@@ -126,258 +237,66 @@ target_branch: {target_branch}
 source_branch: {source_branch}
 """
         
-        result = await Runner.run(
-            starter_agent,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": input_text}]
-            }],
-            context=None,
-            run_config=RunConfig()
-        )
-        
-        if result.final_output:
-            return result.final_output
-        return None
-    except Exception as e:
-        print(f"Error classifying file {file_path}: {e}")
-        return None
-
-
-async def review_service_file(
-    classification: StarterResponse,
-    diff: str,
-    gitlab_token: Optional[str],
-    gitlab_domain: Optional[str],
-    project_path: Optional[str],
-    source_branch: Optional[str]
-) -> Optional[list]:
-    """Review a service file."""
-    try:
-        context = ServiceReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            jira_task_number=classification.jira_task_number if classification.jira_task_number != "UNKNOWN" else None,
-            package_name=classification.package_name,
-            module_name=classification.module_name,
-            file_name=classification.file_name,
-            file_path=None,  # Can be extracted from classification if needed
-            gitlab_token=gitlab_token,
-            gitlab_domain=gitlab_domain.replace("https://", "").replace("http://", "") if gitlab_domain else None,
+        # Create initial state
+        initial_state = create_initial_state(
+            input_text=input_text,
+            file_path=file_path,
+            content=content,
+            diff=diff,
+            merge_request_title=merge_request_title,
+            target_branch=target_branch,
             source_branch=source_branch,
+            gitlab_token=gitlab_token,
+            gitlab_url=gitlab_url,
             project_path=project_path
         )
         
-        result = await run_combined_review(context)
-        return result.issues if result else []
-    except Exception as e:
-        print(f"Error reviewing service file {classification.file_name}: {e}")
+        # Run workflow
+        final_state = await review_workflow.ainvoke(initial_state)
+        
+        # Extract issues from output
+        if final_state.get("error"):
+            print(f"  ❌ Workflow error: {final_state['error']}")
+            return []
+        
+        output = final_state.get("output")
+        if output and isinstance(output, dict):
+            issues = output.get("issues", [])
+            return issues
+        
         return []
-
-
-async def review_scss_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
-    """Review a scss file."""
+    
+    # Run workflow in a shielded task to isolate from MCP cancel scopes
+    task = asyncio.create_task(_run_workflow())
     try:
-        context = ScssReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name,
-        )
-        result = await Runner.run(
-            scss_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this scss file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
-        )
-        if result.final_output:
-            return result.final_output.issues
-        return []
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as e:
+        # If cancelled (e.g., by lingering MCP cancel scope), wait for task and clear cancellation
+        cancel_msg = str(e)
+        try:
+            # Wait for the task to complete anyway
+            result = await task
+            # Clear cancellation state so the main loop can continue
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                current_task.uncancel()
+            return result
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                current_task.uncancel()
+            print(f"  ⚠️  Workflow cancelled while reviewing {file_path}: {cancel_msg}")
+            return None
+        except Exception as inner_e:
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                current_task.uncancel()
+            print(f"  ⚠️  Workflow error after cancel for {file_path}: {inner_e}")
+            return None
     except Exception as e:
-        print(f"Error reviewing scss file {classification.file_name}: {e}")
-        return []
+        print(f"Error reviewing file {file_path}: {e}")
+        return None
 
-
-async def review_html_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
-    """Review a html file."""
-    try:
-        context = HtmlReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        result = await Runner.run(
-            html_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this html file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
-        )
-        if result.final_output:
-            return result.final_output.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing html file {classification.file_name}: {e}")
-        return []
-
-
-async def review_typescript_file(classification: StarterResponse, diff: str, gitlab_token: Optional[str], gitlab_domain: Optional[str], project_path: Optional[str], source_branch: Optional[str]) -> Optional[list]:
-    """Review a typescript file."""
-    try:
-        context = TypescriptReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        result = await Runner.run(
-            typescript_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this typescript file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
-        )
-        if result.final_output:
-            return result.final_output.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing typescript file {classification.file_name}: {e}")
-        return []
-
-
-async def review_sql_file(classification: StarterResponse, diff: str) -> Optional[list]:
-    """Review a SQL file."""
-    try:
-        context = SqlReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        
-        result = await Runner.run(
-            sql_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this SQL file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
-        )
-        
-        if result.final_output:
-            return result.final_output.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing SQL file {classification.file_name}: {e}")
-        return []
-
-
-async def review_dataview_file(
-    classification: StarterResponse,
-    diff: str,
-    gitlab_token: Optional[str],
-    gitlab_domain: Optional[str],
-    project_path: Optional[str],
-    source_branch: Optional[str]
-) -> Optional[list]:
-    """Review a dataview file."""
-    try:
-        context = DataviewReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            jira_task_number=classification.jira_task_number if classification.jira_task_number != "UNKNOWN" else None,
-            package_name=classification.package_name,
-            module_name=classification.module_name,
-            file_name=classification.file_name,
-            gitlab_token=gitlab_token,
-            gitlab_domain=gitlab_domain.replace("https://", "").replace("http://", "") if gitlab_domain else None,
-            source_branch=source_branch,
-            project_path=project_path
-        )
-        
-        result = await Runner.run(
-            dataview_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this dataview file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
-        )
-        
-        if result.final_output:
-            return result.final_output.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing dataview file {classification.file_name}: {e}")
-        return []
-
-
-async def review_test_file(classification: StarterResponse, diff: str) -> Optional[list]:
-    """Review a test file."""
-    try:
-        context = TestReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        
-        result = await Runner.run(
-            test_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this test file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
-        )
-        
-        if result.final_output:
-            return result.final_output.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing test file {classification.file_name}: {e}")
-        return []
-
-
-async def review_pbook_file(classification: StarterResponse, diff: str) -> Optional[list]:
-    """Review a pbook file."""
-    try:
-        context = PbookReviewerContext(
-            workflow_input_as_text=f"Review {classification.file_name}",
-            content=classification.content,
-            diff=diff or "",
-            file_name=classification.file_name
-        )
-        
-        result = await Runner.run(
-            pbook_reviewer,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Review this pbook file"}]
-            }],
-            context=context,
-            run_config=RunConfig()
-        )
-        
-        if result.final_output:
-            return result.final_output.issues
-        return []
-    except Exception as e:
-        print(f"Error reviewing pbook file {classification.file_name}: {e}")
-        return []
 
 
 def format_comment(issues: list, file_name: str, file_path: str) -> str:
@@ -388,31 +307,43 @@ def format_comment(issues: list, file_name: str, file_path: str) -> str:
     comment = f"## 📝 Review for `{file_path}`\n\n"
     comment += f"Found **{len(issues)}** issue(s):\n\n"
     
-    # Group by severity
-    high_issues = [i for i in issues if i.severity == "high"]
-    medium_issues = [i for i in issues if i.severity == "medium"]
-    low_issues = [i for i in issues if i.severity == "low"]
+    # Group by severity (handle both dict and object formats)
+    def get_severity(issue):
+        return issue.get("severity", "low") if isinstance(issue, dict) else issue.severity
+    
+    def get_line(issue):
+        return issue.get("line", 1) if isinstance(issue, dict) else issue.line
+    
+    def get_problem(issue):
+        return issue.get("problem", "") if isinstance(issue, dict) else issue.problem
+    
+    def get_suggestion(issue):
+        return issue.get("suggestion", "") if isinstance(issue, dict) else issue.suggestion
+    
+    high_issues = [i for i in issues if get_severity(i) == "high"]
+    medium_issues = [i for i in issues if get_severity(i) == "medium"]
+    low_issues = [i for i in issues if get_severity(i) == "low"]
     
     if high_issues:
         comment += "### 🔴 High Priority Issues\n\n"
         for i, issue in enumerate(high_issues, 1):
-            comment += f"**{i}. Line {issue.line}**\n"
-            comment += f"- **Problem**: {issue.problem}\n"
-            comment += f"- **Suggestion**: {issue.suggestion}\n\n"
+            comment += f"**{i}. Line {get_line(issue)}**\n"
+            comment += f"- **Problem**: {get_problem(issue)}\n"
+            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
     
     if medium_issues:
         comment += "### 🟡 Medium Priority Issues\n\n"
         for i, issue in enumerate(medium_issues, 1):
-            comment += f"**{i}. Line {issue.line}**\n"
-            comment += f"- **Problem**: {issue.problem}\n"
-            comment += f"- **Suggestion**: {issue.suggestion}\n\n"
+            comment += f"**{i}. Line {get_line(issue)}**\n"
+            comment += f"- **Problem**: {get_problem(issue)}\n"
+            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
     
     if low_issues:
         comment += "### 🟢 Low Priority Issues\n\n"
         for i, issue in enumerate(low_issues, 1):
-            comment += f"**{i}. Line {issue.line}**\n"
-            comment += f"- **Problem**: {issue.problem}\n"
-            comment += f"- **Suggestion**: {issue.suggestion}\n\n"
+            comment += f"**{i}. Line {get_line(issue)}**\n"
+            comment += f"- **Problem**: {get_problem(issue)}\n"
+            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
     
     return comment
 
@@ -430,17 +361,80 @@ async def post_gitlab_comment(
     head_sha: Optional[str] = None
 ) -> bool:
     """
-    Post a comment to GitLab MR using MCP.
+    Post a comment to GitLab MR using MCP or REST API fallback.
     """
-    print(f"  🔍 [GitLab] Using MCP to post comment...")
-    return await post_gitlab_comment_via_mcp(
-        project_path, mr_id, comment, file_path, line_number
-    )
+    # Try MCP first
+    manager = get_mcp_toolkit_manager()
+    if manager.is_initialized and manager.get_gitlab_tools():
+        print(f"  🔍 [GitLab] Using MCP to post comment...")
+        
+        try:
+            if file_path and line_number:
+                # Create a thread/discussion on a specific line
+                result = await call_gitlab_tool("create_merge_request_thread", {
+                    "project_id": project_path,
+                    "merge_request_iid": mr_id,
+                    "body": comment,
+                    "position": {
+                        "new_path": file_path,
+                        "new_line": line_number
+                    }
+                })
+            else:
+                # General comment
+                result = await call_gitlab_tool("create_merge_request_note", {
+                    "project_id": project_path,
+                    "merge_request_iid": mr_id,
+                    "body": comment
+                })
+            
+            if result:
+                return True
+            print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
+        except Exception as e:
+            print(f"  ⚠️  [GitLab] MCP error: {e}, falling back to REST API...")
+    
+    # Fallback to REST API
+    print(f"  🔍 [GitLab] Using REST API to post comment...")
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    
+    try:
+        if file_path and line_number:
+            # Create a discussion with position (inline comment)
+            position = {
+                "base_sha": base_sha,
+                "start_sha": start_sha,
+                "head_sha": head_sha,
+                "position_type": "text",
+                "new_path": file_path,
+                "new_line": line_number
+            }
+            result = api_client.create_merge_request_discussion(
+                project_path, mr_id, comment, position
+            )
+        else:
+            # General note
+            result = api_client.create_merge_request_note(
+                project_path, mr_id, comment
+            )
+        
+        return result is not None
+    except Exception as e:
+        print(f"  ❌ Failed to post comment: {e}")
+        return False
 
 
 async def process_mr(mr_url: str):
     """Main function to process a GitLab merge request."""
     print(f"🚀 Processing GitLab MR: {mr_url}\n")
+    
+    # Initialize MCP toolkits
+    print("🔌 Initializing MCP toolkits...")
+    try:
+        await initialize_mcp_toolkits()
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to initialize some MCP toolkits: {e}")
+        print("   Continuing with available tools...\n")
     
     # Parse MR URL
     mr_info = parse_gitlab_mr_url(mr_url)
@@ -468,12 +462,33 @@ async def process_mr(mr_url: str):
         print("Error: Could not fetch MR information.")
         sys.exit(1)
     
-    mr_title = mr_data.get("title", "")
-    source_branch = mr_data.get("source_branch", "")
-    target_branch = mr_data.get("target_branch", "")
+    print(f"mr_data --->>>> {mr_data}")
+
+    # Normalize MCP responses that may wrap JSON or return a list
+    normalized_mr = _normalize_mcp_json_payload(mr_data)
+    if not normalized_mr and isinstance(mr_data, list):
+        for item in mr_data:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                try:
+                    normalized_mr = json.loads(item["text"])
+                    break
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(item, dict) and ("title" in item or "source_branch" in item):
+                normalized_mr = item
+                break
+    if not normalized_mr and isinstance(mr_data, dict):
+        normalized_mr = mr_data
+    if not normalized_mr:
+        print("Error: Could not parse MR information.")
+        sys.exit(1)
+
+    mr_title = normalized_mr.get("title", "")
+    source_branch = normalized_mr.get("source_branch", "")
+    target_branch = normalized_mr.get("target_branch", "")
     
     # Get commit SHAs for posting line comments
-    diff_refs = mr_data.get("diff_refs", {})
+    diff_refs = normalized_mr.get("diff_refs", {})
     base_sha = diff_refs.get("base_sha")
     start_sha = diff_refs.get("start_sha")
     head_sha = diff_refs.get("head_sha")
@@ -492,7 +507,6 @@ async def process_mr(mr_url: str):
     print(f"Found {len(changes)} changed file(s)\n")
     
     # Process each file
-    gitlab_domain = gitlab_url.replace("https://", "").replace("http://", "")
     all_comments = []
     
     for change in changes:
@@ -517,79 +531,23 @@ async def process_mr(mr_url: str):
         
         # Get diff
         diff = change.get("diff", "")
-
-
-        classification = StarterResponse(
-            file_name=file_path,
-            file_type="unknown",
-            package_name="unknown",
-            module_name="unknown",
+        
+        # Review file using LangGraph workflow
+        print(f"🔍 Reviewing file...")
+        issues = await review_file_with_workflow(
+            file_path=file_path,
             content=file_content,
             diff=diff,
+            merge_request_title=mr_title,
             target_branch=target_branch,
             source_branch=source_branch,
-            jira_task_number="unknown")
+            gitlab_token=gitlab_token,
+            gitlab_url=gitlab_url,
+            project_path=project_path
+        )
         
-        # Classify file
-        print(f"🔍 Classifying file...")
-        if file_path.endswith(".ts"):
-            classification.file_type = "typescript"
-        elif file_path.endswith(".html"):
-            classification.file_type = "html"
-        elif file_path.endswith(".scss"):
-            print(f"🔍 Scss file detected: {file_path}")
-            classification.file_type = "scss"
-        else:
-            classification = await classify_file(
-                file_path,
-                file_content,
-                diff,
-                mr_title,
-                target_branch,
-                source_branch
-            )
-            
-        if not classification:
-            print(f"⚠️  Could not classify {file_path}, skipping...")
-            continue
-        
-        print(f"✅ Classified as: {classification.file_type}")
-        print(f"   Module: {classification.module_name}, Package: {classification.package_name}")
-        
-        # Review file based on type
-        issues = []
-        print(f"🔍 Reviewing file...")
-
-        if classification.file_type == "service":
-            issues = await review_service_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        elif classification.file_type == "sql":
-            issues = await review_sql_file(classification, diff)
-        elif classification.file_type == "dataview":
-            issues = await review_dataview_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        elif classification.file_type == "test":
-            issues = await review_test_file(classification, diff)
-        elif classification.file_type == "pbook":
-            issues = await review_pbook_file(classification, diff)
-        elif classification.file_type == "typescript":
-            # Handle TypeScript files with starter agent
-              issues = await review_typescript_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        elif classification.file_type == "html":  
-            # Handle HTML files with starter agent
-            issues = await review_html_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        elif classification.file_type == "scss":
-            issues = await review_scss_file(
-                classification, diff, gitlab_token, gitlab_url, project_path, source_branch
-            )
-        else:
-            print(f"⚠️  Unknown file type: {classification.file_type}, skipping review...")
+        if issues is None:
+            print(f"⚠️  Could not review {file_path}, skipping...")
             continue
         
         print(f"✅ Found {len(issues)} issue(s)")
@@ -620,13 +578,19 @@ async def process_mr(mr_url: str):
             # Post individual comments for each issue on the specific line
             print(f"💬 Posting {len(issues)} comment(s) for {file_path}...")
             for issue in issues:
+                # Handle both dict and object formats
+                severity = issue.get("severity", "low") if isinstance(issue, dict) else issue.severity
+                line = issue.get("line", 1) if isinstance(issue, dict) else issue.line
+                problem = issue.get("problem", "") if isinstance(issue, dict) else issue.problem
+                suggestion = issue.get("suggestion", "") if isinstance(issue, dict) else issue.suggestion
+                
                 # Format severity emoji
-                severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(issue.severity, "⚪")
+                severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
                 
                 # Format the comment for this specific issue
-                comment = f"{severity_emoji} **{issue.severity.upper()}** - Line {issue.line}\n\n"
-                comment += f"**Problem:** {issue.problem}\n\n"
-                comment += f"**Suggestion:** {issue.suggestion}"
+                comment = f"{severity_emoji} **{severity.upper()}** - Line {line}\n\n"
+                comment += f"**Problem:** {problem}\n\n"
+                comment += f"**Suggestion:** {suggestion}"
                 
                 # Post comment on the specific line
                 if await post_gitlab_comment(
@@ -636,15 +600,15 @@ async def process_mr(mr_url: str):
                     gitlab_token, 
                     comment,
                     file_path=file_path,
-                    line_number=issue.line,
+                    line_number=line,
                     base_sha=base_sha,
                     start_sha=start_sha,
                     head_sha=head_sha
                 ):
-                    print(f"  ✅ Posted comment for line {issue.line}")
+                    print(f"  ✅ Posted comment for line {line}")
                     total_posted += 1
                 else:
-                    print(f"  ❌ Failed to post comment for line {issue.line}")
+                    print(f"  ❌ Failed to post comment for line {line}")
                     total_failed += 1
     
     print(f"\n{'=' * 60}")
@@ -654,6 +618,20 @@ async def process_mr(mr_url: str):
     print(f"📤 Comments posted: {total_posted}")
     print(f"❌ Failed comments: {total_failed}")
     print(f"{'=' * 60}\n")
+
+
+async def run_with_cleanup(mr_url: str):
+    """Run the MR processing with proper cleanup in the same event loop."""
+    try:
+        await process_mr(mr_url)
+    finally:
+        # Clean up MCP sessions in the SAME event loop
+        print("\n🔌 Cleaning up MCP sessions...")
+        try:
+            await close_mcp_toolkits()
+            print("✅ MCP sessions closed successfully")
+        except Exception as e:
+            print(f"⚠️  Error closing MCP sessions: {e}")
 
 
 def main():
@@ -671,13 +649,13 @@ def main():
     args = parser.parse_args()
     
     # Check for OpenAI API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY not found in environment variables.")
-        print("Please set OPENAI_API_KEY in your .env file.")
+    if not os.getenv("OPENROUTER_API_KEY"):
+        print("Error: OPENROUTER_API_KEY not found in environment variables.")
+        print("Please set OPENROUTER_API_KEY in your .env file.")
         sys.exit(1)
     
-    # Run async main function
-    asyncio.run(process_mr(args.gitlab_mr))
+    # Run async main function with cleanup in the same event loop
+    asyncio.run(run_with_cleanup(args.gitlab_mr))
 
 
 if __name__ == "__main__":

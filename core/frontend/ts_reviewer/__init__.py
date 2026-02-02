@@ -1,1 +1,0 @@
-from .typescript_reviewer import *

@@ -1,24 +1,33 @@
 """
-GitLab MCP Client - Integration with GitLab MCP Server
+GitLab MCP Client - Direct Tool Exposure
 
-This module provides functions to interact with GitLab via the MCP (Model Context Protocol) server.
-It follows the same pattern as the Atlassian MCP integration.
+This module provides direct access to GitLab MCP tools through langchain-mcp.
+No wrapper methods - tools are exposed directly to LangChain agents for
+the LLM to choose and use.
 
 Usage:
-    from core.MCP.gitlab_mcp_client import get_gitlab_mr_info_via_mcp, get_gitlab_mr_changes_via_mcp
+    # Use the centralized toolkit manager instead:
+    from core.MCP.toolkit_manager import get_mcp_toolkit_manager
     
-    mr_info = await get_gitlab_mr_info_via_mcp(project_path, mr_id)
-    changes = await get_gitlab_mr_changes_via_mcp(project_path, mr_id)
+    manager = get_mcp_toolkit_manager()
+    await manager.initialize()
+    gitlab_tools = manager.get_gitlab_tools()
+    
+    # Use tools with LangChain agents
 """
 
 from __future__ import annotations
 
 import os
-import json
-import traceback
-from typing import Optional
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from typing import Optional, List
+from langchain_core.tools import BaseTool
+from langchain_mcp import MCPToolkit
+from mcp.client.session import ClientSession
+from mcp.client.sse import sse_client
+
+
+# Singleton toolkit management (deprecated - use toolkit_manager instead)
+_gitlab_mcp_toolkit: Optional[MCPToolkit] = None
 
 
 def is_mcp_gitlab_enabled() -> bool:
@@ -26,258 +35,102 @@ def is_mcp_gitlab_enabled() -> bool:
     return os.getenv("MCP_GITLAB_ENABLED", "true").lower() == "true"
 
 
-def get_mcp_gitlab_server_params():
+def get_mcp_gitlab_url() -> str:
     """
-    Get GitLab MCP server parameters.
-    
-    Supports two modes:
-    1. Local Docker: Connects to local container via docker exec (MCP_GITLAB_HOST=localhost)
-    2. Remote: Connects to remote MCP server via SSH tunnel or direct connection
-    
-    The MCP server is expected to expose MCP over stdio.
+    Get GitLab MCP server URL for HTTP/SSE transport.
     
     Returns:
-        StdioServerParameters for connecting to the MCP server
+        SSE endpoint URL for the MCP server (e.g., http://mcp-gitlab:8888/sse)
     """
-    mcp_host = os.getenv("MCP_GITLAB_HOST", "localhost")
-    container_name = os.getenv("MCP_GITLAB_CONTAINER", "mcp-gitlab")
+    mcp_host = os.getenv("MCP_GITLAB_HOST", "mcp-gitlab")
+    mcp_port = os.getenv("MCP_GITLAB_PORT", "8888")
     
-    print(f"  🔌 [GitLab MCP] Creating transport connection...")
-    print(f"     - Host: {mcp_host}")
-    print(f"     - Container: {container_name}")
-    
-    # Local Docker mode: Use docker exec
-    if mcp_host in ["localhost", "127.0.0.1"]:
-        print(f"     - Mode: Local Docker")
-        # GitLab MCP server entry point
-        # Adjust the command based on how gitlab-mcp is installed/run
-        # Common patterns:
-        # - node /app/build/index.js (if built from source)
-        # - npx gitlab-mcp (if installed via npm)
-        # - gitlab-mcp (if installed globally)
-        server_params = StdioServerParameters(
-            command="docker",
-            args=["exec", "-i", container_name, "node", "/app/build/index.js"],
-            env=None
-        )
+    # If running in Docker, use container name; otherwise use localhost
+    if mcp_host == "localhost":
+        return f"http://localhost:{mcp_port}/sse"
     else:
-        # Remote mode: Use SSH to connect to remote Docker container
-        remote_user = os.getenv("MCP_GITLAB_SSH_USER", "root")
-        print(f"     - Mode: Remote via SSH ({remote_user}@{mcp_host})")
-        server_params = StdioServerParameters(
-            command="ssh",
-            args=[
-                f"{remote_user}@{mcp_host}",
-                "docker", "exec", "-i", container_name,
-                "node", "/app/build/index.js"
-            ],
-            env=None
-        )
-    
-    print(f"     - Command: {server_params.command} {' '.join(server_params.args)}")
-    return server_params
+        return f"http://{mcp_host}:{mcp_port}/sse"
 
 
-async def call_gitlab_mcp_tool(tool_name: str, arguments: dict) -> Optional[dict]:
+async def get_gitlab_mcp_tools() -> List[BaseTool]:
     """
-    Call a tool on the GitLab MCP server.
+    Get or create LangChain tools from GitLab MCP server.
     
-    Args:
-        tool_name: Name of the MCP tool to call
-        arguments: Tool arguments as a dictionary
-        
+    This function creates a toolkit that exposes all GitLab MCP tools
+    as LangChain tools. The toolkit manages the MCP connection and
+    session automatically using HTTP/SSE transport.
+    
+    DEPRECATED: Use toolkit_manager.get_gitlab_tools() instead for
+    better centralized management.
+    
     Returns:
-        Tool result as a dictionary or None if failed
+        List of LangChain tools that can be used with agents/chains
+        
+    Raises:
+        Exception: If toolkit creation fails
     """
-    print(f"  🔧 [GitLab MCP] Calling tool: {tool_name}")
-    print(f"     - Arguments: {json.dumps(arguments, indent=2)}")
+    global _gitlab_mcp_toolkit
     
+    # Return existing toolkit if available
+    if _gitlab_mcp_toolkit is not None:
+        return _gitlab_mcp_toolkit.get_tools()
+    
+    # Create new toolkit
     try:
-        server_params = get_mcp_gitlab_server_params()
+        sse_url = get_mcp_gitlab_url()
+        print(f"  🔌 [GitLab MCP] Creating toolkit with SSE endpoint: {sse_url}")
+        print(f"     - Transport: HTTP with SSE (Server-Sent Events)")
         
-        print(f"  🔄 [GitLab MCP] Establishing connection...")
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            print(f"  ✅ [GitLab MCP] Transport connection established")
-            print(f"  🔄 [GitLab MCP] Creating session for {tool_name}...")
+        # Create SSE client and get streams
+        async with sse_client(sse_url) as (read_stream, write_stream):
+            # Create ClientSession with the streams
+            session = ClientSession(read_stream, write_stream)
             
-            async with ClientSession(read_stream, write_stream) as session:
-                print(f"  🔄 [GitLab MCP] Initializing session...")
-                await session.initialize()
-                print(f"  ✅ [GitLab MCP] Session initialized, calling tool...")
-                
-                result = await session.call_tool(tool_name, arguments)
-                print(f"  📥 [GitLab MCP] Tool {tool_name} returned response")
-                
-                # Parse the result
-                if result:
-                    print(f"     - Response has {len(result.content) if result.content else 0} content item(s)")
-                    if result.content and len(result.content) > 0:
-                        content = result.content[0]
-                        if hasattr(content, 'text'):
-                            try:
-                                parsed = json.loads(content.text)
-                                print(f"  ✅ [GitLab MCP] Tool {tool_name} succeeded")
-                                return parsed
-                            except json.JSONDecodeError as e:
-                                print(f"  ⚠️  [GitLab MCP] Failed to parse JSON response: {e}")
-                                print(f"     - Raw response: {content.text[:200]}...")
-                                # Sometimes the response might be plain text, return as dict
-                                return {"text": content.text}
-                        else:
-                            print(f"  ⚠️  [GitLab MCP] Response content has no 'text' attribute")
-                            print(f"     - Content type: {type(content)}")
-                            return None
-                    else:
-                        print(f"  ⚠️  [GitLab MCP] Tool {tool_name} returned empty content")
-                        return None
-                else:
-                    print(f"  ⚠️  [GitLab MCP] Tool {tool_name} returned None")
-                    return None
+            # Create MCPToolkit with the session
+            _gitlab_mcp_toolkit = MCPToolkit(session=session)
             
+            print(f"  🔄 [GitLab MCP] Initializing toolkit...")
+            await _gitlab_mcp_toolkit.initialize()
+            
+            tools = _gitlab_mcp_toolkit.get_tools()
+            print(f"  ✅ [GitLab MCP] Toolkit initialized with {len(tools)} tool(s)")
+            
+            # Print available tools
+            for tool in tools:
+                print(f"     - {tool.name}: {tool.description}")
+            
+            return tools
+        
     except Exception as e:
-        print(f"  ❌ [GitLab MCP] Error calling tool {tool_name}: {e}")
+        print(f"  ❌ [GitLab MCP] Failed to create toolkit: {e}")
+        import traceback
         print(f"     Traceback: {traceback.format_exc()}")
-        return None
+        _gitlab_mcp_toolkit = None
+        raise
 
 
-async def get_gitlab_mr_info_via_mcp(project_path: str, mr_id: str) -> Optional[dict]:
+async def close_gitlab_mcp_toolkit():
     """
-    Get merge request information via GitLab MCP.
+    Close the GitLab MCP toolkit and cleanup resources.
     
-    Args:
-        project_path: GitLab project path (e.g., "group/project")
-        mr_id: Merge request IID or ID
-        
-    Returns:
-        Merge request data as dict or None if failed
+    DEPRECATED: Use toolkit_manager.close() instead.
+    
+    Should be called when shutting down the application or when
+    you want to force a toolkit refresh.
     """
-    print(f"  🔌 [GitLab MCP] Fetching MR info: {project_path} !{mr_id}")
+    global _gitlab_mcp_toolkit
     
-    result = await call_gitlab_mcp_tool("get_merge_request", {
-        "project_id": project_path,
-        "merge_request_iid": mr_id
-    })
-    
-    if result:
-        title = result.get("title", "N/A")
-        print(f"  ✅ [GitLab MCP] MR info fetched: {title}")
-    else:
-        print(f"  ❌ [GitLab MCP] Failed to fetch MR info")
-    
-    return result
+    if _gitlab_mcp_toolkit is not None:
+        try:
+            await _gitlab_mcp_toolkit.close()
+            print(f"  🔌 [GitLab MCP] Toolkit closed")
+        except Exception as e:
+            print(f"  ⚠️  [GitLab MCP] Error closing toolkit: {e}")
+        finally:
+            _gitlab_mcp_toolkit = None
 
 
-async def get_gitlab_mr_changes_via_mcp(project_path: str, mr_id: str) -> Optional[list]:
-    """
-    Get merge request changes/diffs via GitLab MCP.
-    
-    Args:
-        project_path: GitLab project path (e.g., "group/project")
-        mr_id: Merge request IID or ID
-        
-    Returns:
-        List of changes or None if failed
-    """
-    print(f"  🔌 [GitLab MCP] Fetching MR changes: {project_path} !{mr_id}")
-    
-    result = await call_gitlab_mcp_tool("get_merge_request_diffs", {
-        "project_id": project_path,
-        "merge_request_iid": mr_id
-    })
-    
-    if result:
-        # The result might be a dict with changes array or directly an array
-        if isinstance(result, dict):
-            changes = result.get("changes", result.get("diffs", []))
-        else:
-            changes = result if isinstance(result, list) else []
-        
-        print(f"  ✅ [GitLab MCP] MR changes fetched: {len(changes)} file(s)")
-        return changes
-    else:
-        print(f"  ❌ [GitLab MCP] Failed to fetch MR changes")
-        return None
-
-
-async def get_gitlab_file_content_via_mcp(project_path: str, file_path: str, branch: str) -> Optional[str]:
-    """
-    Get file content from GitLab repository via MCP.
-    
-    Args:
-        project_path: GitLab project path (e.g., "group/project")
-        file_path: Path to the file in the repository
-        branch: Branch name or commit SHA
-        
-    Returns:
-        File content as string or None if failed
-    """
-    print(f"  🔌 [GitLab MCP] Fetching file: {project_path}/{file_path}@{branch}")
-    
-    result = await call_gitlab_mcp_tool("get_file_contents", {
-        "project_id": project_path,
-        "file_path": file_path,
-        "ref": branch
-    })
-    
-    if result:
-        # The result might be a dict with content or directly the content
-        if isinstance(result, dict):
-            content = result.get("content", result.get("text", ""))
-        else:
-            content = str(result)
-        
-        print(f"  ✅ [GitLab MCP] File content fetched: {len(content)} chars")
-        return content
-    else:
-        print(f"  ❌ [GitLab MCP] Failed to fetch file content")
-        return None
-
-
-async def post_gitlab_comment_via_mcp(
-    project_path: str,
-    mr_id: str,
-    comment: str,
-    file_path: Optional[str] = None,
-    line_number: Optional[int] = None
-) -> bool:
-    """
-    Post a comment to GitLab MR via MCP.
-    
-    Args:
-        project_path: GitLab project path (e.g., "group/project")
-        mr_id: Merge request IID or ID
-        comment: Comment text
-        file_path: Optional file path for line-specific comment
-        line_number: Optional line number for line-specific comment
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    print(f"  🔌 [GitLab MCP] Posting comment to MR: {project_path} !{mr_id}")
-    
-    if file_path and line_number:
-        # Create a thread/discussion on a specific line
-        result = await call_gitlab_mcp_tool("create_merge_request_thread", {
-            "project_id": project_path,
-            "merge_request_iid": mr_id,
-            "body": comment,
-            "position": {
-                "new_path": file_path,
-                "new_line": line_number
-            }
-        })
-    else:
-        # General comment (note: use create_merge_request_note, not create_note)
-        result = await call_gitlab_mcp_tool("create_merge_request_note", {
-            "project_id": project_path,
-            "merge_request_iid": mr_id,
-            "body": comment
-        })
-    
-    if result:
-        print(f"  ✅ [GitLab MCP] Comment posted successfully")
-        return True
-    else:
-        print(f"  ❌ [GitLab MCP] Failed to post comment")
-        return False
-
+# Backward compatibility alias
+async def close_gitlab_mcp_session():
+    """Backward compatibility alias for close_gitlab_mcp_toolkit()."""
+    await close_gitlab_mcp_toolkit()
