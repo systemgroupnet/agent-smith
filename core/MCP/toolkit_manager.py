@@ -17,9 +17,17 @@ Usage:
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Literal, Awaitable, Callable
+import asyncio
 from langchain_core.tools import BaseTool
 from langchain_mcp import MCPToolkit
+from mcp.client.session import ClientSession
+from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamablehttp_client
+from contextlib import AsyncExitStack
+
+# Transport types
+TransportType = Literal["sse", "streamable-http"]
 
 
 class MCPToolkitManager:
@@ -35,6 +43,7 @@ class MCPToolkitManager:
         """Initialize the toolkit manager."""
         self._gitlab_toolkit: Optional[MCPToolkit] = None
         self._atlassian_toolkit: Optional[MCPToolkit] = None
+        self._exit_stack: Optional[AsyncExitStack] = None
         self._initialized = False
     
     @property
@@ -50,23 +59,39 @@ class MCPToolkitManager:
         """Check if Atlassian MCP integration is enabled."""
         return os.getenv("MCP_ATLASSIAN_ENABLED", "false").lower() == "true"
     
-    def _get_gitlab_sse_url(self) -> str:
-        """Get GitLab MCP server SSE endpoint URL."""
-        mcp_host = os.getenv("MCP_GITLAB_HOST", "mcp-gitlab")
-        mcp_port = os.getenv("MCP_GITLAB_PORT", "8888")
-        
-        if mcp_host == "localhost":
-            return f"http://localhost:{mcp_port}/sse"
-        return f"http://{mcp_host}:{mcp_port}/sse"
+    def _get_gitlab_transport(self) -> TransportType:
+        """Get GitLab MCP transport type from environment."""
+        transport = os.getenv("MCP_GITLAB_TRANSPORT", "streamable-http").lower()
+        if transport in ("sse", "streamable-http"):
+            return transport  # type: ignore
+        return "streamable-http"  # default to streamable-http
     
-    def _get_atlassian_sse_url(self) -> str:
-        """Get Atlassian MCP server SSE endpoint URL."""
-        mcp_host = os.getenv("MCP_ATLASSIAN_HOST", "mcp-atlassian")
-        mcp_port = os.getenv("MCP_ATLASSIAN_PORT", "8080")
+    def _get_atlassian_transport(self) -> TransportType:
+        """Get Atlassian MCP transport type from environment."""
+        transport = os.getenv("MCP_ATLASSIAN_TRANSPORT", "streamable-http").lower()
+        if transport in ("sse", "streamable-http"):
+            return transport  # type: ignore
+        return "streamable-http"  # default to streamable-http
+    
+    def _get_gitlab_url(self) -> str:
+        """Get GitLab MCP server endpoint URL."""
+        mcp_host = os.getenv("MCP_GITLAB_HOST", "mcp-gitlab")
+        mcp_port = os.getenv("MCP_GITLAB_PORT", "3002")
+        transport = self._get_gitlab_transport()
         
-        if mcp_host == "localhost":
-            return f"http://localhost:{mcp_port}/sse"
-        return f"http://{mcp_host}:{mcp_port}/sse"
+        # SSE uses /sse endpoint, streamable-http uses /mcp endpoint
+        endpoint = "/sse" if transport == "sse" else "/mcp"
+        return f"http://{mcp_host}:{mcp_port}{endpoint}"
+    
+    def _get_atlassian_url(self) -> str:
+        """Get Atlassian MCP server endpoint URL."""
+        mcp_host = os.getenv("MCP_ATLASSIAN_HOST", "mcp-atlassian")
+        mcp_port = os.getenv("MCP_ATLASSIAN_PORT", "9000")
+        transport = self._get_atlassian_transport()
+        
+        # SSE uses /sse endpoint, streamable-http uses /mcp endpoint
+        endpoint = "/sse" if transport == "sse" else "/mcp"
+        return f"http://{mcp_host}:{mcp_port}{endpoint}"
     
     async def initialize(self) -> None:
         """
@@ -86,15 +111,25 @@ class MCPToolkitManager:
         print("🔌 Initializing MCP Toolkits")
         print("="*60)
         
-        # Initialize GitLab toolkit
+        # Create exit stack for managing async context managers
+        self._exit_stack = AsyncExitStack()
+        await self._exit_stack.__aenter__()
+        
+        # Initialize GitLab toolkit (isolated to prevent cancel scope leakage)
         if self.is_gitlab_enabled():
-            await self._initialize_gitlab_toolkit()
+            await self._initialize_toolkit_isolated(
+                self._initialize_gitlab_toolkit,
+                "GitLab MCP"
+            )
         else:
             print("  ⏭️  [GitLab MCP] Disabled, skipping...")
         
-        # Initialize Atlassian toolkit
+        # Initialize Atlassian toolkit (isolated to prevent cancel scope leakage)
         if self.is_atlassian_enabled():
-            await self._initialize_atlassian_toolkit()
+            await self._initialize_toolkit_isolated(
+                self._initialize_atlassian_toolkit,
+                "Atlassian MCP"
+            )
         else:
             print("  ⏭️  [Atlassian MCP] Disabled, skipping...")
         
@@ -104,14 +139,32 @@ class MCPToolkitManager:
     async def _initialize_gitlab_toolkit(self) -> None:
         """Initialize GitLab MCP toolkit."""
         try:
-            sse_url = self._get_gitlab_sse_url()
-            print(f"  🔌 [GitLab MCP] Connecting to: {sse_url}")
-            print(f"     - Transport: HTTP with SSE (Server-Sent Events)")
+            url = self._get_gitlab_url()
+            transport = self._get_gitlab_transport()
+            transport_name = "SSE (Server-Sent Events)" if transport == "sse" else "Streamable HTTP"
             
-            self._gitlab_toolkit = MCPToolkit(
-                server_url=sse_url,
-                transport="sse"
-            )
+            print(f"  🔌 [GitLab MCP] Connecting to: {url}")
+            print(f"     - Transport: {transport_name}")
+            
+            # Create client based on transport type
+            if transport == "sse":
+                read_stream, write_stream = await self._exit_stack.enter_async_context(
+                    sse_client(url)
+                )
+            else:
+                # streamable-http transport
+                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                    streamablehttp_client(url)
+                )
+            
+            # Create ClientSession with the streams
+            session = ClientSession(read_stream, write_stream)
+            
+            # Initialize the session
+            await self._exit_stack.enter_async_context(session)
+            
+            # Create MCPToolkit with the session
+            self._gitlab_toolkit = MCPToolkit(session=session)
             
             print(f"  🔄 [GitLab MCP] Initializing toolkit...")
             await self._gitlab_toolkit.initialize()
@@ -123,6 +176,13 @@ class MCPToolkitManager:
             for tool in tools:
                 print(f"     - {tool.name}: {tool.description[:80]}...")
                 
+        except asyncio.CancelledError as e:
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            print(f"  ❌ [GitLab MCP] Initialization cancelled: {e}")
+            self._gitlab_toolkit = None
+            # Don't raise - allow partial initialization
         except Exception as e:
             print(f"  ❌ [GitLab MCP] Failed to initialize: {e}")
             import traceback
@@ -133,14 +193,32 @@ class MCPToolkitManager:
     async def _initialize_atlassian_toolkit(self) -> None:
         """Initialize Atlassian MCP toolkit."""
         try:
-            sse_url = self._get_atlassian_sse_url()
-            print(f"  🔌 [Atlassian MCP] Connecting to: {sse_url}")
-            print(f"     - Transport: HTTP with SSE (Server-Sent Events)")
+            url = self._get_atlassian_url()
+            transport = self._get_atlassian_transport()
+            transport_name = "SSE (Server-Sent Events)" if transport == "sse" else "Streamable HTTP"
             
-            self._atlassian_toolkit = MCPToolkit(
-                server_url=sse_url,
-                transport="sse"
-            )
+            print(f"  🔌 [Atlassian MCP] Connecting to: {url}")
+            print(f"     - Transport: {transport_name}")
+            
+            # Create client based on transport type
+            if transport == "sse":
+                read_stream, write_stream = await self._exit_stack.enter_async_context(
+                    sse_client(url)
+                )
+            else:
+                # streamable-http transport
+                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                    streamablehttp_client(url)
+                )
+            
+            # Create ClientSession with the streams
+            session = ClientSession(read_stream, write_stream)
+            
+            # Initialize the session
+            await self._exit_stack.enter_async_context(session)
+            
+            # Create MCPToolkit with the session
+            self._atlassian_toolkit = MCPToolkit(session=session)
             
             print(f"  🔄 [Atlassian MCP] Initializing toolkit...")
             await self._atlassian_toolkit.initialize()
@@ -152,12 +230,60 @@ class MCPToolkitManager:
             for tool in tools:
                 print(f"     - {tool.name}: {tool.description[:80]}...")
                 
+        except asyncio.CancelledError as e:
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            print(f"  ❌ [Atlassian MCP] Initialization cancelled: {e}")
+            self._atlassian_toolkit = None
+            # Don't raise - allow partial initialization
         except Exception as e:
             print(f"  ❌ [Atlassian MCP] Failed to initialize: {e}")
             import traceback
             print(f"     Traceback: {traceback.format_exc()}")
             self._atlassian_toolkit = None
             # Don't raise - allow partial initialization
+
+    async def _initialize_toolkit_isolated(
+        self,
+        initializer: Callable[[], Awaitable[None]],
+        toolkit_label: str,
+        timeout: float = 30.0
+    ) -> None:
+        """Run toolkit initialization in a child task to avoid cancel leakage.
+        
+        Uses asyncio.shield() and timeout to fully isolate MCP cancel scopes
+        from propagating to the main workflow.
+        """
+        async def _run_with_shield():
+            """Inner wrapper to fully isolate the initializer."""
+            try:
+                await asyncio.wait_for(initializer(), timeout=timeout)
+            except asyncio.TimeoutError:
+                print(f"  ❌ [{toolkit_label}] Initialization timed out after {timeout}s")
+            except asyncio.CancelledError as e:
+                # Suppress cancellation - don't let it propagate
+                print(f"  ❌ [{toolkit_label}] Initialization cancelled: {e}")
+            except Exception as e:
+                print(f"  ❌ [{toolkit_label}] Initialization failed: {e}")
+        
+        task = asyncio.create_task(_run_with_shield())
+        try:
+            # Shield prevents external cancellation from reaching the task
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # If we get cancelled while shielding, wait for task to finish anyway
+            # but don't propagate the cancellation
+            try:
+                await task
+            except Exception:
+                pass
+            # Clear any pending cancellation on current task
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                current_task.uncancel()
+        except Exception as e:
+            print(f"  ❌ [{toolkit_label}] Unexpected error: {e}")
     
     def get_gitlab_tools(self) -> List[BaseTool]:
         """
@@ -223,23 +349,47 @@ class MCPToolkitManager:
         """
         print("\n🔌 Closing MCP Toolkits...")
         
+        # Clear toolkit references first
         if self._gitlab_toolkit is not None:
-            try:
-                await self._gitlab_toolkit.close()
-                print("  ✅ [GitLab MCP] Toolkit closed")
-            except Exception as e:
-                print(f"  ⚠️  [GitLab MCP] Error closing toolkit: {e}")
-            finally:
-                self._gitlab_toolkit = None
+            print("  ✅ [GitLab MCP] Toolkit closed")
+            self._gitlab_toolkit = None
         
         if self._atlassian_toolkit is not None:
+            print("  ✅ [Atlassian MCP] Toolkit closed")
+            self._atlassian_toolkit = None
+        
+        # Close all async context managers (SSE/HTTP clients)
+        if self._exit_stack is not None:
             try:
-                await self._atlassian_toolkit.close()
-                print("  ✅ [Atlassian MCP] Toolkit closed")
+                await self._exit_stack.aclose()
+            except BaseExceptionGroup as eg:
+                # Handle ExceptionGroup from TaskGroup (Python 3.11+)
+                for exc in eg.exceptions:
+                    exc_str = str(exc)
+                    if "already running" in exc_str or "cancel scope" in exc_str or "TaskGroup" in exc_str:
+                        print(f"  ⚠️  [MCP Manager] Async cleanup warning (safe to ignore): {type(exc).__name__}")
+                    elif isinstance(exc, asyncio.CancelledError):
+                        print("  ⚠️  [MCP Manager] Suppressed cancellation during cleanup")
+                    else:
+                        print(f"  ⚠️  [MCP Manager] Cleanup error: {exc}")
+            except asyncio.CancelledError:
+                # Suppress cancellation errors during cleanup
+                print("  ⚠️  [MCP Manager] Suppressed cancellation during cleanup")
+            except RuntimeError as e:
+                # Handle "async generator already running" errors gracefully
+                if "already running" in str(e) or "cancel scope" in str(e):
+                    print(f"  ⚠️  [MCP Manager] Async cleanup warning (safe to ignore): {e}")
+                else:
+                    print(f"  ⚠️  [MCP Manager] Error closing exit stack: {e}")
             except Exception as e:
-                print(f"  ⚠️  [Atlassian MCP] Error closing toolkit: {e}")
+                # Catch-all for other exceptions
+                e_str = str(e)
+                if "TaskGroup" in e_str or "unhandled errors" in e_str:
+                    print(f"  ⚠️  [MCP Manager] TaskGroup cleanup warning (safe to ignore)")
+                else:
+                    print(f"  ⚠️  [MCP Manager] Error closing exit stack: {e}")
             finally:
-                self._atlassian_toolkit = None
+                self._exit_stack = None
         
         self._initialized = False
         print("✅ MCP Toolkit Manager closed\n")

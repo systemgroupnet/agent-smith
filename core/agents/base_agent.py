@@ -9,7 +9,6 @@ from abc import ABC, abstractmethod
 from typing import Optional, Type, TypeVar, Generic
 from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
 from langchain_openai import ChatOpenAI
 
 from core.config.langchain_config import get_model_for_agent
@@ -55,9 +54,6 @@ class BaseReviewAgent(ABC, Generic[T]):
             streaming=False
         )
         
-        # Initialize output parser
-        self.parser = PydanticOutputParser(pydantic_object=output_model)
-        
         # Build chain
         self._build_chain()
     
@@ -77,18 +73,18 @@ class BaseReviewAgent(ABC, Generic[T]):
         # Get system prompt from subclass
         system_prompt = self.get_system_prompt()
         
-        # Add format instructions to system prompt
-        format_instructions = self.parser.get_format_instructions()
-        full_system_prompt = f"{system_prompt}\n\n{format_instructions}"
+        # Use structured output with the LLM directly
+        # This is the modern approach that avoids prompt template variable issues
+        llm_with_structure = self.llm.with_structured_output(self.output_model)
         
-        # Create prompt template
+        # Create prompt template (no format instructions needed with structured output)
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", full_system_prompt),
+            ("system", system_prompt),
             ("human", "{input}")
         ])
         
-        # Create chain: prompt | llm | parser
-        self.chain = self.prompt | self.llm | self.parser
+        # Create chain: prompt | llm_with_structure
+        self.chain = self.prompt | llm_with_structure
     
     async def run(self, input_text: str, context: Optional[dict] = None) -> T:
         """

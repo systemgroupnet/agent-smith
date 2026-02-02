@@ -3,17 +3,28 @@ LangChain Configuration Module for OpenRouter Integration
 
 This module provides configuration for using LangChain with OpenRouter as the LLM provider.
 OpenRouter allows access to multiple LLM providers through a single API endpoint.
+
+Based on LangChain docs: https://docs.langchain.com/oss/python/langchain/models
+Uses init_chat_model for provider-agnostic model initialization.
 """
 
 import os
 from typing import Optional
-from langchain_openai import ChatOpenAI
+from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 
 
-def get_llm_model(model_name: str = "gpt-4o-mini", temperature: float = 0.0, streaming: bool = False) -> ChatOpenAI:
+def get_llm_model(
+    model_name: str = "gpt-4o-mini",
+    temperature: float = 0.0,
+    streaming: bool = False,
+    max_tokens: Optional[int] = None,
+) -> BaseChatModel:
     """
     Get a configured LLM model using OpenRouter.
+    
+    Uses init_chat_model for provider-agnostic initialization, allowing
+    seamless switching between different LLM providers via OpenRouter.
     
     Args:
         model_name: The model to use (default: gpt-4o-mini)
@@ -24,9 +35,10 @@ def get_llm_model(model_name: str = "gpt-4o-mini", temperature: float = 0.0, str
                    - "google/gemini-pro"
         temperature: Model temperature (0.0 = deterministic, 1.0 = creative)
         streaming: Enable streaming responses
+        max_tokens: Maximum tokens for response (optional)
     
     Returns:
-        Configured ChatOpenAI instance for LangChain
+        Configured BaseChatModel instance for LangChain
     
     Environment Variables:
         - OPENROUTER_API_KEY: OpenRouter API key (required)
@@ -53,20 +65,27 @@ def get_llm_model(model_name: str = "gpt-4o-mini", temperature: float = 0.0, str
         # If no provider specified, assume OpenAI
         model = f"openai/{model}"
     
-    # Create and return ChatOpenAI configured for OpenRouter
-    return ChatOpenAI(
+    # Build configuration kwargs
+    config_kwargs = {
+        "temperature": temperature,
+        "streaming": streaming,
+        "api_key": api_key,
+        "base_url": base_url,
+    }
+    
+    if max_tokens:
+        config_kwargs["max_tokens"] = max_tokens
+    
+    # Use init_chat_model for provider-agnostic initialization
+    # OpenRouter uses OpenAI-compatible API, so we use "openai" as the provider
+    return init_chat_model(
         model=model,
-        api_key=api_key,
-        base_url=base_url,
-        temperature=temperature,
-        streaming=streaming,
-        model_kwargs={
-            "response_format": {"type": "json_object"} if not streaming else {}
-        }
+        model_provider="openai",  # OpenRouter uses OpenAI-compatible API
+        **config_kwargs
     )
 
 
-def get_reasoning_model(effort: str = "medium", temperature: float = 0.0) -> ChatOpenAI:
+def get_reasoning_model(effort: str = "medium", temperature: float = 0.0) -> BaseChatModel:
     """
     Get a reasoning model (o1/o3 series) configured for OpenRouter.
     
@@ -75,7 +94,7 @@ def get_reasoning_model(effort: str = "medium", temperature: float = 0.0) -> Cha
         temperature: Model temperature
     
     Returns:
-        Configured ChatOpenAI for reasoning tasks
+        Configured BaseChatModel for reasoning tasks
     """
     # Map effort to appropriate model
     effort_to_model = {
@@ -88,7 +107,7 @@ def get_reasoning_model(effort: str = "medium", temperature: float = 0.0) -> Cha
     return get_llm_model(model, temperature=temperature)
 
 
-def get_fast_model(temperature: float = 0.0) -> ChatOpenAI:
+def get_fast_model(temperature: float = 0.0) -> BaseChatModel:
     """
     Get a fast, cost-effective model for simple tasks.
     
@@ -96,12 +115,12 @@ def get_fast_model(temperature: float = 0.0) -> ChatOpenAI:
         temperature: Model temperature
         
     Returns:
-        Configured ChatOpenAI for fast inference
+        Configured BaseChatModel for fast inference
     """
     return get_llm_model(os.getenv("FAST_LLM_MODEL", "openai/gpt-4o-mini"), temperature=temperature)
 
 
-def get_smart_model(temperature: float = 0.0) -> ChatOpenAI:
+def get_smart_model(temperature: float = 0.0) -> BaseChatModel:
     """
     Get a powerful model for complex reasoning tasks.
     
@@ -109,7 +128,7 @@ def get_smart_model(temperature: float = 0.0) -> ChatOpenAI:
         temperature: Model temperature
         
     Returns:
-        Configured ChatOpenAI for complex tasks
+        Configured BaseChatModel for complex tasks
     """
     return get_llm_model(os.getenv("SMART_LLM_MODEL", "openai/gpt-4o"), temperature=temperature)
 
@@ -124,7 +143,12 @@ MODEL_NAME_MAPPING = {
 }
 
 
-def get_model_for_agent(agent_model_name: str, temperature: float = 0.0, streaming: bool = False) -> ChatOpenAI:
+def get_model_for_agent(
+    agent_model_name: str,
+    temperature: float = 0.0,
+    streaming: bool = False,
+    max_tokens: Optional[int] = None,
+) -> BaseChatModel:
     """
     Get a model configured for a specific agent, handling legacy model names.
     
@@ -132,11 +156,11 @@ def get_model_for_agent(agent_model_name: str, temperature: float = 0.0, streami
         agent_model_name: The model name specified in the agent (e.g., "gpt-5-nano")
         temperature: Model temperature
         streaming: Enable streaming
+        max_tokens: Maximum tokens for response (optional)
     
     Returns:
-        Configured ChatOpenAI instance
+        Configured BaseChatModel instance
     """
     # Map legacy names to actual model names
     actual_model = MODEL_NAME_MAPPING.get(agent_model_name, agent_model_name)
-    return get_llm_model(actual_model, temperature=temperature, streaming=streaming)
-
+    return get_llm_model(actual_model, temperature=temperature, streaming=streaming, max_tokens=max_tokens)

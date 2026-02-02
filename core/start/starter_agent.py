@@ -1,18 +1,27 @@
-from pydantic import BaseModel
-from pydantic_ai import Agent
+"""
+Starter Agent - File Classification Agent using LangChain
+
+This agent classifies files from merge requests and extracts metadata
+to route them to the appropriate reviewer.
+"""
+
+from pydantic import BaseModel, Field
+from langchain_core.prompts import ChatPromptTemplate
+
 from core.config.llm_config import get_model_for_agent
 
 
 class StarterResponse(BaseModel):
-    file_name: str
-    file_type: str
-    package_name: str
-    module_name: str
-    content: str
-    diff: str
-    target_branch: str
-    source_branch: str
-    jira_task_number: str
+    """Response model for file classification."""
+    file_name: str = Field(description="The name of the file")
+    file_type: str = Field(description="One of: service, sql, test, pbook, dataview")
+    package_name: str = Field(description="The package/directory name")
+    module_name: str = Field(description="The module name from the path")
+    content: str = Field(description="The full file content")
+    diff: str = Field(description="The git diff")
+    target_branch: str = Field(description="The target branch")
+    source_branch: str = Field(description="The source branch")
+    jira_task_number: str = Field(description="The Jira task number from MR title")
 
 
 def starter_agent_instructions():
@@ -154,9 +163,70 @@ Analyze carefully and classify correctly!
 """
 
 
-starter_agent = Agent(
-    model=get_model_for_agent("gpt-4o-mini"),
-    result_type=StarterResponse,
-    system_prompt=starter_agent_instructions()
-)
+class StarterAgent:
+    """
+    File classification agent using LangChain.
+    
+    Analyzes files from merge requests and classifies them
+    to route to the appropriate reviewer.
+    """
+    
+    def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.0):
+        """
+        Initialize the starter agent.
+        
+        Args:
+            model_name: Name of the LLM model to use
+            temperature: Model temperature (0.0 = deterministic)
+        """
+        self.model_name = model_name
+        self.temperature = temperature
+        
+        # Initialize LLM with structured output
+        self.llm = get_model_for_agent(
+            model_name,
+            temperature=temperature,
+            streaming=False
+        )
+        
+        # Create LLM with structured output
+        self.llm_with_structure = self.llm.with_structured_output(StarterResponse)
+        
+        # Create prompt template
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", starter_agent_instructions()),
+            ("human", "{input}")
+        ])
+        
+        # Build chain: prompt | llm_with_structure
+        self.chain = self.prompt | self.llm_with_structure
+    
+    async def run(self, input_text: str) -> StarterResponse:
+        """
+        Run the agent with given input.
+        
+        Args:
+            input_text: Input text containing file information
+        
+        Returns:
+            StarterResponse with classification results
+        """
+        result = await self.chain.ainvoke({"input": input_text})
+        return result
+    
+    def run_sync(self, input_text: str) -> StarterResponse:
+        """
+        Run the agent synchronously.
+        
+        Args:
+            input_text: Input text containing file information
+        
+        Returns:
+            StarterResponse with classification results
+        """
+        result = self.chain.invoke({"input": input_text})
+        return result
 
+
+# Create default instance for backward compatibility
+starter_agent = StarterAgent()

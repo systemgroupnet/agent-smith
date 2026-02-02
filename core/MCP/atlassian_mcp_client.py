@@ -22,6 +22,8 @@ import os
 from typing import Optional, List
 from langchain_core.tools import BaseTool
 from langchain_mcp import MCPToolkit
+from mcp.client.session import ClientSession
+from mcp.client.sse import sse_client
 
 
 # Singleton toolkit management (deprecated - use toolkit_manager instead)
@@ -79,23 +81,25 @@ async def get_atlassian_mcp_tools() -> List[BaseTool]:
         print(f"  🔌 [Atlassian MCP] Creating toolkit with SSE endpoint: {sse_url}")
         print(f"     - Transport: HTTP with SSE (Server-Sent Events)")
         
-        # Create MCPToolkit with SSE transport
-        _atlassian_mcp_toolkit = MCPToolkit(
-            server_url=sse_url,
-            transport="sse"
-        )
-        
-        print(f"  🔄 [Atlassian MCP] Initializing toolkit...")
-        await _atlassian_mcp_toolkit.initialize()
-        
-        tools = _atlassian_mcp_toolkit.get_tools()
-        print(f"  ✅ [Atlassian MCP] Toolkit initialized with {len(tools)} tool(s)")
-        
-        # Print available tools
-        for tool in tools:
-            print(f"     - {tool.name}: {tool.description}")
-        
-        return tools
+        # Create SSE client and get streams
+        async with sse_client(sse_url) as (read_stream, write_stream):
+            # Create ClientSession with the streams
+            session = ClientSession(read_stream, write_stream)
+            
+            # Create MCPToolkit with the session
+            _atlassian_mcp_toolkit = MCPToolkit(session=session)
+            
+            print(f"  🔄 [Atlassian MCP] Initializing toolkit...")
+            await _atlassian_mcp_toolkit.initialize()
+            
+            tools = _atlassian_mcp_toolkit.get_tools()
+            print(f"  ✅ [Atlassian MCP] Toolkit initialized with {len(tools)} tool(s)")
+            
+            # Print available tools
+            for tool in tools:
+                print(f"     - {tool.name}: {tool.description}")
+            
+            return tools
         
     except Exception as e:
         print(f"  ❌ [Atlassian MCP] Failed to create toolkit: {e}")

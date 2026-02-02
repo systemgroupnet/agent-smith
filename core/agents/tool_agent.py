@@ -47,8 +47,8 @@ class ToolEnabledAgent:
         self,
         system_prompt: str,
         tools: List[BaseTool],
-        model_name: str = "gpt-4o",
-        temperature: float = 0.0,
+        model_name: str = "openai/gpt-5-mini",
+        temperature: float = 0.8,
         output_model: Optional[Type[T]] = None,
         max_iterations: int = 15,
         verbose: bool = True,
@@ -88,9 +88,13 @@ class ToolEnabledAgent:
         # Create prompt template
         if self.output_model:
             # Add structured output instructions
+            # Note: We escape the curly braces in format instructions to avoid
+            # ChatPromptTemplate treating them as variables
             parser = PydanticOutputParser(pydantic_object=self.output_model)
             format_instructions = parser.get_format_instructions()
-            full_system_prompt = f"{self.system_prompt}\n\n{format_instructions}"
+            # Escape curly braces by doubling them for ChatPromptTemplate
+            escaped_instructions = format_instructions.replace("{", "{{").replace("}", "}}")
+            full_system_prompt = f"{self.system_prompt}\n\n{escaped_instructions}"
         else:
             full_system_prompt = self.system_prompt
         

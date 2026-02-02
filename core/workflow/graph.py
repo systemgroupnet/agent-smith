@@ -22,7 +22,7 @@ from dto.general import ReviewResponse
 
 # Import all agents
 from core.agents.starter_agent import starter_agent
-from core.agents.service_agents_with_tools import (
+from core.agents.service_agents import (
     ServiceContext,
     run_combined_service_review,
 )

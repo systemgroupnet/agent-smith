@@ -63,7 +63,7 @@ Classify the file into one of these categories: **service**, **sql**, **test**, 
 
 ### 2. Module Name (module_name)
 - Extract the module name from the file path
-- Pattern: `general_market/{module_name}/...`
+- Pattern: `general_market/{{module_name}}/...`
 - Examples:
   - Path: `general_market/inventory/internal/service.go` → module_name: "inventory"
   - Path: `general_market/sales/domain/entity.go` → module_name: "sales"

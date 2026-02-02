@@ -1,67 +1,56 @@
 services:
   mcp-atlassian:
-    image: ghcr.io/sooperset/mcp-atlassian:latest # Replace with your actual MCP Atlassian image
-    container_name: mcp-atlassian
+    image: ghcr.io/sooperset/mcp-atlassian:latest
+    container_name: codereview-atlassian-mcp
     restart: unless-stopped
-    environment:
-      - JIRA_URL=${JIRA_URL}
-      - JIRA_PERSONAL_ACCESS_TOKEN=${JIRA_PERSONAL_ACCESS_TOKEN}
-      - CONFLUENCE_URL=${CONFLUENCE_URL}
-      - CONFLUENCE_PERSONAL_ACCESS_TOKEN=${CONFLUENCE_PERSONAL_ACCESS_TOKEN}
-      # Enable HTTP/SSE transport for MCP
-      - MCP_TRANSPORT=http
-      - MCP_HTTP_PORT=8080
+    env_file:
+      - .env.mcp.atlassian
     networks:
       - codereview-network
+    command: ["--transport", "streamable-http", "--port", "9000", "uv"]
     ports:
-      - "3000:8080" # Expose MCP HTTP endpoint
-    volumes:
-      - ./mcp-config:/app/config
+      - "3011:9000"
 
   mcp-gitlab:
     image: iwakitakuma/gitlab-mcp
-    container_name: mcp-gitlab
+    container_name: codereview-gitlab-mcp
     restart: unless-stopped
-    environment:
-      - GITLAB_API_URL=${GITLAB_URL}
-      - GITLAB_PERSONAL_ACCESS_TOKEN=${GITLAB_TOKEN}
-      # Enable HTTP/SSE transport for MCP (streamable HTTP)
-      - MCP_TRANSPORT=http
-      - MCP_HTTP_PORT=8888
+    env_file:
+      - .env.mcp.gitlab
     networks:
       - codereview-network
     ports:
-      - "3001:8888" # Expose MCP HTTP endpoint
-    volumes:
-      - ./mcp-gitlab-config:/app/config
+      - "3010:3002"
 
   codereviewagent:
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: registry.example.com/code-reviewer:v0.0.1
     container_name: codereviewagent
     restart: unless-stopped
     depends_on:
       - mcp-atlassian
       - mcp-gitlab
-    dns:
-      - 10.0.0.53
-      - 8.8.8.8
+    env_file:
+      - .env
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL}
+      - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL}
+      - LLM_PROVIDER=${LLM_PROVIDER}
       - JIRA_URL=${JIRA_URL}
       - JIRA_PERSONAL_ACCESS_TOKEN=${JIRA_PERSONAL_ACCESS_TOKEN}
       - CONFLUENCE_URL=${CONFLUENCE_URL}
       - CONFLUENCE_PERSONAL_ACCESS_TOKEN=${CONFLUENCE_PERSONAL_ACCESS_TOKEN}
-      # MCP Atlassian Configuration (HTTP/SSE Transport)
-      - MCP_ATLASSIAN_ENABLED=${MCP_ATLASSIAN_ENABLED:-true}
+      - MCP_ATLASSIAN_ENABLED=${MCP_ATLASSIAN_ENABLED:-false}
       - MCP_ATLASSIAN_HOST=${MCP_ATLASSIAN_HOST:-mcp-atlassian}
-      - MCP_ATLASSIAN_PORT=${MCP_ATLASSIAN_PORT:-8080}
-      # MCP GitLab Configuration (HTTP/SSE Transport)
-      - MCP_GITLAB_ENABLED=${MCP_GITLAB_ENABLED:-true}
+      - MCP_ATLASSIAN_PORT=${MCP_ATLASSIAN_PORT:-9000}
+      - MCP_ATLASSIAN_TRANSPORT=${MCP_ATLASSIAN_TRANSPORT:-streamable-http}
+      - MCP_GITLAB_ENABLED=true
       - MCP_GITLAB_HOST=${MCP_GITLAB_HOST:-mcp-gitlab}
-      - MCP_GITLAB_PORT=${MCP_GITLAB_PORT:-8888}
+      - MCP_GITLAB_PORT=${MCP_GITLAB_PORT:-3002}
+      - MCP_GITLAB_TRANSPORT=${MCP_GITLAB_TRANSPORT:-streamable-http}
       - GITLAB_URL=${GITLAB_URL}
       - GITLAB_TOKEN=${GITLAB_TOKEN}
     volumes:

@@ -1,5 +1,5 @@
 # Use Python 3.11 slim image as base
-FROM registry.example.com/python:3.11-slim
+FROM python:3.11-slim
  
 # Set working directory
 WORKDIR /app
@@ -49,4 +49,3 @@ USER root
 
 # Default command (can be overridden)
 CMD ["python", "main.py", "--help"]
-
