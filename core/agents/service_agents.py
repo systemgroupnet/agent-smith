@@ -14,6 +14,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from core.agents.tool_agent import create_review_agent_with_tools
+from core.utils.conventions_loader import load_conventions
 from dto.general import ReviewResponse
 
 
@@ -36,7 +37,7 @@ class ServiceContext(BaseModel):
 # Agent Prompts
 # =============================================================================
 
-def get_semantic_reviewer_prompt(context: ServiceContext) -> str:
+def get_semantic_reviewer_prompt(context: ServiceContext, conventions: str = "") -> str:
     """Get the system prompt for semantic reviewer with tool usage instructions."""
     
     # Build additional context information
@@ -86,6 +87,9 @@ CONSTRAINTS:
 DATABASE CONTEXT: Postgres + GORM
 
 RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (specific), suggestion (actionable with code), file_name, line (exact number), severity ("high"|"medium"|"low").
+
+=== Project Conventions ===
+{conventions if conventions else "No specific conventions defined for this file type."}
 
 === Context Information ===
 {context_section}
@@ -231,11 +235,29 @@ async def run_semantic_review(context: ServiceContext) -> ReviewResponse:
     print(f"  🔍 Running semantic code review...")
     
     try:
+        # Load conventions
+        conventions_text = ""
+        if (context.file_path and context.gitlab_url and context.project_path 
+            and context.source_branch and context.gitlab_token):
+            try:
+                conventions_text = await load_conventions(
+                    agent_type="service",
+                    file_path=context.file_path,
+                    module_name=context.module_name,
+                    gitlab_url=context.gitlab_url,
+                    project_path=context.project_path,
+                    source_branch=context.source_branch,
+                    gitlab_token=context.gitlab_token
+                )
+            except Exception as conv_error:
+                print(f"  ⚠️  Warning: Failed to load conventions: {conv_error}")
+                conventions_text = ""
+        
         # Create agent with tools
         agent = await create_semantic_reviewer_agent()
         
-        # Build input with context
-        input_text = get_semantic_reviewer_prompt(context)
+        # Build input with context and conventions
+        input_text = get_semantic_reviewer_prompt(context, conventions_text)
         
         # Run agent
         result = await agent.run(input_text)

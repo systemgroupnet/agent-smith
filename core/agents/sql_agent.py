@@ -9,6 +9,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from core.agents.tool_agent import create_review_agent_with_tools
+from core.utils.conventions_loader import load_conventions
 from dto.general import ReviewResponse
 
 
@@ -25,7 +26,7 @@ class SqlContext(BaseModel):
     project_path: Optional[str] = None
 
 
-def get_sql_reviewer_prompt(context: SqlContext) -> str:
+def get_sql_reviewer_prompt(context: SqlContext, conventions: str = "") -> str:
     """Get SQL reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -84,6 +85,9 @@ Use these tools if you need additional context to perform your review, but avoid
 - Focus ONLY on the 5 main rules above
 - DO NOT comment on indexes, documentation, or audit columns (created_by, updated_at, etc.)
 
+=== Project Conventions ===
+{conventions if conventions else "No specific conventions defined for this file type."}
+
 === Context Information ===
 {context_section}
 
@@ -130,11 +134,29 @@ async def run_sql_review(context: SqlContext) -> ReviewResponse:
     print(f"  🔍 Running SQL review...")
     
     try:
+        # Load conventions
+        conventions_text = ""
+        if (context.file_path and context.gitlab_url and context.project_path 
+            and context.source_branch and context.gitlab_token):
+            try:
+                conventions_text = await load_conventions(
+                    agent_type="sql",
+                    file_path=context.file_path,
+                    module_name=None,  # SQL files typically don't have module context
+                    gitlab_url=context.gitlab_url,
+                    project_path=context.project_path,
+                    source_branch=context.source_branch,
+                    gitlab_token=context.gitlab_token
+                )
+            except Exception as conv_error:
+                print(f"  ⚠️  Warning: Failed to load conventions: {conv_error}")
+                conventions_text = ""
+        
         # Create agent with tools
         agent = await create_sql_reviewer_agent()
         
-        # Build input with context
-        input_text = get_sql_reviewer_prompt(context)
+        # Build input with context and conventions
+        input_text = get_sql_reviewer_prompt(context, conventions_text)
         
         # Run agent
         result = await agent.run(input_text)
