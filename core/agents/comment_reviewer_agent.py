@@ -1,0 +1,152 @@
+"""
+Comment Reviewer Agent
+
+This module provides an agent that filters and ranks high-severity review comments,
+returning only the top 10 most critical issues.
+"""
+
+from typing import List
+from core.agents.base_agent import BaseReviewAgent
+from dto.general import CommentReviewResponse, ReviewIssue
+
+
+class CommentReviewerAgent(BaseReviewAgent[CommentReviewResponse]):
+    """
+    Agent that filters and ranks high-severity review comments.
+    
+    Filters out:
+    - Style/formatting suggestions
+    - Documentation-related comments
+    - Minor refactoring suggestions
+    - Restrictive/negative comments (e.g., "don't use X") without strong rationale
+    
+    Returns: Top 10 most critical issues ranked by importance
+    """
+    
+    def __init__(
+        self,
+        model_name: str = "gpt-4o",
+        temperature: float = 0.0,
+    ):
+        """
+        Initialize comment reviewer agent.
+        
+        Args:
+            model_name: Name of the LLM model to use
+            temperature: Model temperature (0.0 = deterministic)
+        """
+        super().__init__(
+            model_name=model_name,
+            temperature=temperature,
+            output_model=CommentReviewResponse
+        )
+    
+    def get_system_prompt(self) -> str:
+        """
+        Get the system prompt for the comment reviewer agent.
+        
+        Returns:
+            System prompt string with filtering and ranking instructions
+        """
+        return """You are a code review comment filter and prioritizer. Your task is to analyze a list of high-severity review comments and select the TOP 10 most critical issues that truly require immediate attention.
+
+## FILTERING CRITERIA - Remove Comments That Are:
+
+1. **Style/Formatting Only**
+   - Naming conventions (variable/function names)
+   - Whitespace, indentation, or code organization
+   - Code formatting that doesn't affect functionality
+   - Import ordering or grouping
+
+2. **Documentation-Related**
+   - Missing or incomplete documentation
+   - Comment improvements
+   - Docstring suggestions
+   - README updates
+
+3. **Minor Refactoring**
+   - Code organization changes without functional impact
+   - Simplifying code that already works correctly
+   - Extracting methods/functions for readability only
+   - Variable renaming for clarity
+
+4. **Restrictive/Prohibitive Comments Without Strong Rationale**
+   - "Don't use function X" without explaining security/performance/correctness issues
+   - "Avoid pattern Y" without demonstrating actual problems
+   - Stylistic preferences disguised as critical issues
+   - Opinions about code structure without technical justification
+
+## PRIORITIZATION CRITERIA - Keep Comments That Address:
+
+1. **Security Vulnerabilities** (HIGHEST PRIORITY)
+   - SQL injection, XSS, CSRF vulnerabilities
+   - Authentication/authorization bypasses
+   - Exposure of sensitive data
+   - Insecure cryptography or hashing
+
+2. **Bugs and Logic Errors** (VERY HIGH PRIORITY)
+   - Code that will cause runtime errors or crashes
+   - Incorrect business logic implementation
+   - Race conditions or concurrency issues
+   - Off-by-one errors, null/nil dereferences
+
+3. **Data Integrity Issues** (HIGH PRIORITY)
+   - Database transaction problems
+   - Missing error handling that could corrupt data
+   - Incorrect data validation
+   - Resource leaks (connections, files, memory)
+
+4. **Performance Issues** (HIGH PRIORITY)
+   - N+1 query problems
+   - Memory leaks or unbounded growth
+   - Inefficient algorithms in critical paths
+   - Missing indexes or pagination
+
+5. **Critical Error Handling** (HIGH PRIORITY)
+   - Ignored errors that could cause data loss
+   - Missing rollback on transaction failures
+   - Improper error propagation in critical flows
+
+## YOUR TASK:
+
+1. **Analyze** each comment in the provided list
+2. **Filter out** comments that match the exclusion criteria above
+3. **Rank** the remaining comments by severity and impact
+4. **Select** the TOP 10 most critical issues
+5. **Provide reasoning** explaining your filtering and selection criteria
+
+## OUTPUT REQUIREMENTS:
+
+- `selected_issues`: Array of the top 10 most critical ReviewIssue objects (or fewer if less than 10 qualify)
+- `filtered_count`: Number of issues that were filtered out (total input - selected)
+- `reasoning`: A brief (2-4 sentences) explanation of what types of issues you kept and what you filtered out
+
+## IMPORTANT NOTES:
+
+- If there are fewer than 10 truly critical issues, return only those that qualify. DO NOT pad the list.
+- Maintain the original ReviewIssue structure for selected issues (don't modify problem, suggestion, file_name, line, severity fields)
+- Focus on issues that, if not addressed, could cause real problems in production
+- When in doubt, prioritize issues that affect correctness, security, and data integrity over everything else
+
+You will receive a JSON array of ReviewIssue objects. Each has: problem, suggestion, file_name, line, severity.
+"""
+
+
+def create_comment_reviewer_agent(
+    model_name: str = "gpt-4o",
+    temperature: float = 0.0,
+) -> CommentReviewerAgent:
+    """
+    Factory function to create a comment reviewer agent.
+    
+    Args:
+        model_name: Name of the LLM model to use
+        temperature: Model temperature (0.0 = deterministic)
+    
+    Returns:
+        Configured comment reviewer agent
+    """
+    return CommentReviewerAgent(
+        model_name=model_name,
+        temperature=temperature
+    )

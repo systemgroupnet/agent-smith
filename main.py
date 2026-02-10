@@ -371,6 +371,91 @@ def format_comment(issues: list, file_name: str, file_path: str) -> str:
     return comment
 
 
+def get_severity(issue) -> str:
+    """
+    Extract severity from an issue (handles both dict and object formats).
+    
+    Args:
+        issue: Review issue (dict or object)
+    
+    Returns:
+        Severity string ("high", "medium", "low")
+    """
+    return issue.get("severity", "low") if isinstance(issue, dict) else issue.severity
+
+
+async def review_comments_with_agent(issues: list) -> list:
+    """
+    Filter and rank high-severity comments using the comment reviewer agent.
+    
+    Args:
+        issues: List of high-severity ReviewIssue objects/dicts
+    
+    Returns:
+        List of top 10 most critical issues
+    """
+    if not issues:
+        return []
+    
+    from core.agents.comment_reviewer_agent import create_comment_reviewer_agent
+    from dto.general import ReviewIssue
+    import json
+    
+    print(f"  🤖 Running comment reviewer agent on {len(issues)} high-severity issues...")
+    
+    try:
+        # Create the agent
+        agent = create_comment_reviewer_agent()
+        
+        # Convert issues to proper format if needed
+        issues_list = []
+        for issue in issues:
+            if isinstance(issue, dict):
+                issues_list.append(issue)
+            else:
+                issues_list.append(issue.model_dump())
+        
+        # Create input as JSON string
+        input_text = json.dumps({"issues": issues_list}, indent=2)
+        
+        # Run the agent
+        result = await agent.run(input_text)
+        
+        print(f"  ✅ Agent selected {len(result.selected_issues)} critical issues")
+        print(f"  📊 Filtered out {result.filtered_count} less critical issues")
+        print(f"  💡 Reasoning: {result.reasoning}")
+        
+        # Return selected issues as dicts
+        return [issue.model_dump() for issue in result.selected_issues]
+        
+    except Exception as e:
+        print(f"  ⚠️  Error running comment reviewer agent: {e}")
+        print(f"  ℹ️  Falling back to all {len(issues)} issues")
+        return issues
+
+
+def group_issues_by_file(issues: list) -> dict:
+    """
+    Group a flat list of issues by file_path.
+    
+    Args:
+        issues: List of ReviewIssue objects/dicts
+    
+    Returns:
+        Dictionary mapping file_path to list of issues: {file_path: [issues]}
+    """
+    grouped = {}
+    for issue in issues:
+        # Extract file_name (handles both dict and object formats)
+        file_name = issue.get("file_name") if isinstance(issue, dict) else issue.file_name
+        
+        if file_name not in grouped:
+            grouped[file_name] = []
+        grouped[file_name].append(issue)
+    
+    return grouped
+
+
 async def post_gitlab_comment(
     gitlab_url: str,
     project_path: str,
@@ -589,6 +674,29 @@ async def process_mr(mr_url: str):
         # Store issues with file path for later posting
         all_comments.append((file_path, issues))
     
+    # Filter high-severity issues using comment reviewer agent
+    print(f"\n{'=' * 60}")
+    print(f"🔍 Filtering high-severity comments...")
+    print(f"{'=' * 60}\n")
+    
+    # Collect all high-severity issues from all files
+    all_high_severity_issues = []
+    for file_path, issues in all_comments:
+        high_issues = [issue for issue in issues if get_severity(issue) == "high"]
+        all_high_severity_issues.extend(high_issues)
+    
+    print(f"📊 Found {len(all_high_severity_issues)} high-severity issues across all files")
+    
+    # Apply comment reviewer agent if there are high-severity issues
+    if all_high_severity_issues:
+        filtered_issues = await review_comments_with_agent(all_high_severity_issues)
+    else:
+        filtered_issues = all_high_severity_issues
+        print(f"ℹ️  No high-severity issues to filter")
+    
+    # Group filtered issues back by file_path for posting
+    filtered_comments_by_file = group_issues_by_file(filtered_issues)
+    
     # Post comments to GitLab
     print(f"\n{'=' * 60}")
     print(f"📤 Posting comments to GitLab MR...")
@@ -597,7 +705,7 @@ async def process_mr(mr_url: str):
     total_posted = 0
     total_failed = 0
     
-    for file_path, issues in all_comments:
+    for file_path, issues in filtered_comments_by_file.items():
         # Only post comments for files with issues
         if issues:
             # Post individual comments for each issue on the specific line
