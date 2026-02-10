@@ -314,6 +314,7 @@ codereviewagent/
 | `MCP_GITLAB_CONTAINER`             | No       | GitLab MCP container name (default: mcp-gitlab)        |
 | `GITLAB_URL`                       | Yes\*    | GitLab instance URL                                    |
 | `GITLAB_TOKEN`                     | Yes\*    | GitLab personal access token (required for MR reviews) |
+| `REVIEW_EXCLUDE_PATTERNS`          | No       | Comma-separated glob patterns to exclude files from review (e.g., `*.md,docs/*,test/fixtures/*`) |
 
 \* Required when using `main.py --gitlab-mr` command
 

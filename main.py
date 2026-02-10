@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import json
+from fnmatch import fnmatch
 from typing import Optional
 from urllib.parse import quote, unquote, urlparse
 
@@ -73,6 +74,28 @@ def parse_gitlab_mr_url(url: str) -> Optional[dict]:
         "project_path": project_path,
         "mr_id": mr_id
     }
+
+
+def should_exclude_file(file_path: str, exclusion_patterns: list) -> bool:
+    """
+    Check if a file should be excluded from review based on glob patterns.
+    
+    Args:
+        file_path: Path to the file
+        exclusion_patterns: List of glob patterns (e.g., ['*.md', 'docs/*', 'test/fixtures/*'])
+        
+    Returns:
+        True if file should be excluded, False otherwise
+    """
+    if not exclusion_patterns:
+        return False
+    
+    for pattern in exclusion_patterns:
+        # Match against full path and filename
+        if fnmatch(file_path, pattern) or fnmatch(file_path, f"*/{pattern}"):
+            return True
+    
+    return False
 
 
 async def call_gitlab_tool(tool_name: str, arguments: dict) -> Optional[dict]:
@@ -506,6 +529,12 @@ async def process_mr(mr_url: str):
     
     print(f"Found {len(changes)} changed file(s)\n")
     
+    # Get exclusion patterns from environment variable
+    exclusion_patterns_str = os.getenv("REVIEW_EXCLUDE_PATTERNS", "")
+    exclusion_patterns = [p.strip() for p in exclusion_patterns_str.split(",") if p.strip()]
+    if exclusion_patterns:
+        print(f"🚫 Exclusion patterns: {', '.join(exclusion_patterns)}\n")
+    
     # Process each file
     all_comments = []
     
@@ -517,6 +546,11 @@ async def process_mr(mr_url: str):
         # Skip deleted files
         if change.get("deleted_file", False):
             print(f"⏭️  Skipping deleted file: {file_path}")
+            continue
+        
+        # Skip excluded files based on patterns
+        if should_exclude_file(file_path, exclusion_patterns):
+            print(f"⏭️  Skipping excluded file: {file_path}")
             continue
         
         print(f"\n{'=' * 60}")
@@ -564,17 +598,8 @@ async def process_mr(mr_url: str):
     total_failed = 0
     
     for file_path, issues in all_comments:
-        if not issues:
-            # Post a general success comment for files with no issues
-            comment = f"✅ **{file_path}** - No issues found!"
-            print(f"💬 Posting summary for {file_path}...")
-            if await post_gitlab_comment(gitlab_url, project_path, mr_id, gitlab_token, comment):
-                print(f"✅ Comment posted successfully")
-                total_posted += 1
-            else:
-                print(f"❌ Failed to post comment")
-                total_failed += 1
-        else:
+        # Only post comments for files with issues
+        if issues:
             # Post individual comments for each issue on the specific line
             print(f"💬 Posting {len(issues)} comment(s) for {file_path}...")
             for issue in issues:
