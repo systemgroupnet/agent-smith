@@ -9,6 +9,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from core.agents.tool_agent import create_review_agent_with_tools
+from core.utils.conventions_loader import load_conventions
 from dto.general import ReviewResponse
 
 
@@ -25,7 +26,7 @@ class PbookContext(BaseModel):
     project_path: Optional[str] = None
 
 
-def get_pbook_reviewer_prompt(context: PbookContext) -> str:
+def get_pbook_reviewer_prompt(context: PbookContext, conventions: str = "") -> str:
     """Get pbook reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -77,6 +78,9 @@ You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 
+=== Project Conventions ===
+{conventions if conventions else "No specific conventions defined for this file type."}
+
 === Context Information ===
 {context_section}
 
@@ -123,11 +127,29 @@ async def run_pbook_review(context: PbookContext) -> ReviewResponse:
     print(f"  🔍 Running pbook review...")
     
     try:
+        # Load conventions
+        conventions_text = ""
+        if (context.file_path and context.gitlab_url and context.project_path 
+            and context.source_branch and context.gitlab_token):
+            try:
+                conventions_text = await load_conventions(
+                    agent_type="pbook",
+                    file_path=context.file_path,
+                    module_name=None,  # Pbook files typically don't have module context
+                    gitlab_url=context.gitlab_url,
+                    project_path=context.project_path,
+                    source_branch=context.source_branch,
+                    gitlab_token=context.gitlab_token
+                )
+            except Exception as conv_error:
+                print(f"  ⚠️  Warning: Failed to load conventions: {conv_error}")
+                conventions_text = ""
+        
         # Create agent with tools
         agent = await create_pbook_reviewer_agent()
         
-        # Build input with context
-        input_text = get_pbook_reviewer_prompt(context)
+        # Build input with context and conventions
+        input_text = get_pbook_reviewer_prompt(context, conventions_text)
         
         # Run agent
         result = await agent.run(input_text)

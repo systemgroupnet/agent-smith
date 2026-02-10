@@ -9,6 +9,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from core.agents.tool_agent import create_review_agent_with_tools
+from core.utils.conventions_loader import load_conventions
 from dto.general import ReviewResponse
 
 
@@ -27,7 +28,7 @@ class DataviewContext(BaseModel):
     project_path: Optional[str] = None
 
 
-def get_dataview_reviewer_prompt(context: DataviewContext) -> str:
+def get_dataview_reviewer_prompt(context: DataviewContext, conventions: str = "") -> str:
     """Get dataview reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -84,6 +85,9 @@ You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
 
 Use these tools if you need additional context to perform your review, especially for business logic alignment.
 
+=== Project Conventions ===
+{conventions if conventions else "No specific conventions defined for this file type."}
+
 === Context Information ===
 {context_section}
 
@@ -130,11 +134,29 @@ async def run_dataview_review(context: DataviewContext) -> ReviewResponse:
     print(f"  🔍 Running dataview review...")
     
     try:
+        # Load conventions
+        conventions_text = ""
+        if (context.file_path and context.gitlab_url and context.project_path 
+            and context.source_branch and context.gitlab_token):
+            try:
+                conventions_text = await load_conventions(
+                    agent_type="dataview",
+                    file_path=context.file_path,
+                    module_name=context.module_name,
+                    gitlab_url=context.gitlab_url,
+                    project_path=context.project_path,
+                    source_branch=context.source_branch,
+                    gitlab_token=context.gitlab_token
+                )
+            except Exception as conv_error:
+                print(f"  ⚠️  Warning: Failed to load conventions: {conv_error}")
+                conventions_text = ""
+        
         # Create agent with tools
         agent = await create_dataview_reviewer_agent()
         
-        # Build input with context
-        input_text = get_dataview_reviewer_prompt(context)
+        # Build input with context and conventions
+        input_text = get_dataview_reviewer_prompt(context, conventions_text)
         
         # Run agent
         result = await agent.run(input_text)
