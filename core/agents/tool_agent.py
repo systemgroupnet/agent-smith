@@ -283,8 +283,8 @@ async def create_tool_agent(
 async def create_review_agent_with_tools(
     system_prompt: str,
     tools: Optional[Union[List[str], List[BaseTool]]] = None,
-    model_name: str = "gpt-4o",
-    temperature: float = 0.0,
+    model_name: str = "openai/gpt-5-nano",
+    temperature: float = 0.3,
     max_iterations: int = 15,
     verbose: bool = False,
 ) -> ToolEnabledAgent:

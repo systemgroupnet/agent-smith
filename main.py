@@ -12,416 +12,29 @@ Usage:
 import argparse
 import asyncio
 import os
-import re
 import sys
 import json
 from typing import Optional
-from urllib.parse import quote, unquote, urlparse
 
-import requests
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Setup proxy configuration for OpenAI API calls
-# from core.config import setup_proxy
-# setup_proxy()
-
-# Import LangGraph workflow
-from core.workflow.graph import review_workflow
-from core.workflow.state import create_initial_state, StarterResponse
-
 # Import MCP Toolkit Manager
-from core.MCP.toolkit_manager import (
-    initialize_mcp_toolkits,
-    close_mcp_toolkits,
-    get_mcp_toolkit_manager
+from core.MCP.toolkit_manager import initialize_mcp_toolkits, close_mcp_toolkits
+
+# Import utility modules
+from core.utils.url_parser import parse_gitlab_mr_url, should_exclude_file
+from core.utils.gitlab_helpers import (
+    get_gitlab_mr_info,
+    get_gitlab_mr_changes,
+    get_file_content,
+    post_gitlab_comment,
+    _normalize_mcp_json_payload
 )
-from core.gitlab_api_client import get_gitlab_api_client
-
-
-def parse_gitlab_mr_url(url: str) -> Optional[dict]:
-    """
-    Parse GitLab MR URL to extract project path and MR ID.
-    
-    Examples:
-        https://gitlab.example.com/group/project/-/merge_requests/123
-        https://gitlab.example.com/group/project/-/merge_requests/123/diffs
-    """
-    # Decode URL-encoded characters (e.g., %2F -> /) to handle Windows/encoded URLs
-    decoded_url = unquote(url)
-    
-    # Extract domain and path separately
-    parsed = urlparse(decoded_url)
-    domain = f"{parsed.scheme}://{parsed.netloc}"
-    path = parsed.path
-    
-    # Extract project path and MR ID from the path
-    # Path format: /group/project/-/merge_requests/123
-    match = re.search(r'^/(.+?)/-/merge_requests/(\d+)', path)
-    if not match:
-        print(f"Error: Could not parse GitLab MR URL: {url}")
-        print("Expected format: https://gitlab.example.com/group/project/-/merge_requests/123")
-        return None
-    
-    project_path = match.group(1)  # group/project (without leading /)
-    mr_id = match.group(2)
-    
-    return {
-        "domain": domain,
-        "project_path": project_path,
-        "mr_id": mr_id
-    }
-
-
-async def call_gitlab_tool(tool_name: str, arguments: dict) -> Optional[dict]:
-    """
-    Helper function to call a GitLab MCP tool by name.
-    
-    Args:
-        tool_name: Name of the GitLab tool to call
-        arguments: Tool arguments
-        
-    Returns:
-        Tool result or None if failed
-    """
-    try:
-        manager = get_mcp_toolkit_manager()
-        gitlab_tools = manager.get_gitlab_tools()
-        
-        # Find the tool
-        tool = next((t for t in gitlab_tools if t.name == tool_name), None)
-        if not tool:
-            print(f"  ❌ GitLab tool '{tool_name}' not found")
-            return None
-        
-        # Invoke the tool
-        result = await tool.ainvoke(arguments)
-        return result
-        
-    except asyncio.CancelledError as e:
-        task = asyncio.current_task()
-        if task is not None:
-            task.uncancel()
-        print(f"  ❌ Error calling GitLab tool {tool_name}: {e}")
-        return None
-    except Exception as e:
-        print(f"  ❌ Error calling GitLab tool {tool_name}: {e}")
-        return None
-
-
-def _normalize_mcp_json_payload(result: object) -> Optional[dict]:
-    """Normalize MCP responses that wrap JSON in text fields or strings."""
-    if isinstance(result, list) and result:
-        first = result[0]
-        if isinstance(first, dict) and isinstance(first.get("text"), str):
-            try:
-                return json.loads(first["text"])
-            except json.JSONDecodeError:
-                return None
-    if isinstance(result, str):
-        try:
-            return json.loads(result)
-        except json.JSONDecodeError:
-            return None
-    return result if isinstance(result, dict) else None
-
-
-async def get_gitlab_mr_info(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[dict]:
-    """
-    Fetch merge request information from GitLab using MCP or REST API fallback.
-    """
-    # Try MCP first
-    manager = get_mcp_toolkit_manager()
-    if manager.is_initialized and manager.get_gitlab_tools():
-        print(f"  🔍 [GitLab] Using MCP to fetch MR info...")
-        result = await call_gitlab_tool("get_merge_request", {
-            "project_id": project_path,
-            "merge_request_iid": mr_id
-        })
-        if result:
-            normalized = _normalize_mcp_json_payload(result)
-            if normalized:
-                return normalized
-        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
-    
-    # Fallback to REST API
-    print(f"  🔍 [GitLab] Using REST API to fetch MR info...")
-    api_client = get_gitlab_api_client(gitlab_url, token)
-    return api_client.get_merge_request(project_path, mr_id)
-
-
-async def get_gitlab_mr_changes(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[list]:
-    """
-    Fetch changed files and diffs from GitLab MR using MCP or REST API fallback.
-    """
-    # Try MCP first
-    manager = get_mcp_toolkit_manager()
-    if manager.is_initialized and manager.get_gitlab_tools():
-        print(f"  🔍 [GitLab] Using MCP to fetch MR changes...")
-        result = await call_gitlab_tool("get_merge_request_diffs", {
-            "project_id": project_path,
-            "merge_request_iid": mr_id
-        })
-        
-        if result:
-            # The result might be a dict with changes array or directly an array
-            if isinstance(result, dict):
-                changes = result.get("changes", result.get("diffs", []))
-            else:
-                changes = result if isinstance(result, list) else []
-            if changes:
-                return changes
-        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
-    
-    # Fallback to REST API
-    print(f"  🔍 [GitLab] Using REST API to fetch MR changes...")
-    api_client = get_gitlab_api_client(gitlab_url, token)
-    return api_client.get_merge_request_changes(project_path, mr_id)
-
-
-async def get_file_content(gitlab_url: str, project_path: str, file_path: str, branch: str, token: str) -> Optional[str]:
-    """
-    Fetch file content from GitLab repository using MCP or REST API fallback.
-    """
-    # Try MCP first
-    manager = get_mcp_toolkit_manager()
-    if manager.is_initialized and manager.get_gitlab_tools():
-        print(f"  🔍 [GitLab] Using MCP to fetch file content...")
-        result = await call_gitlab_tool("get_file_contents", {
-            "project_id": project_path,
-            "file_path": file_path,
-            "ref": branch
-        })
-        
-        if result:
-            # The result might be a dict with content or directly the content
-            if isinstance(result, dict):
-                content = result.get("content", result.get("text", ""))
-            else:
-                content = str(result)
-            if content:
-                return content
-        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
-    
-    # Fallback to REST API
-    print(f"  🔍 [GitLab] Using REST API to fetch file content...")
-    api_client = get_gitlab_api_client(gitlab_url, token)
-    return api_client.get_file_content(project_path, file_path, branch)
-
-
-async def review_file_with_workflow(
-    file_path: str,
-    content: str,
-    diff: str,
-    merge_request_title: str,
-    target_branch: str,
-    source_branch: str,
-    gitlab_token: Optional[str],
-    gitlab_url: Optional[str],
-    project_path: Optional[str]
-) -> Optional[list]:
-    """Review a file using LangGraph workflow."""
-    
-    async def _run_workflow() -> Optional[list]:
-        """Inner function to run the workflow in isolation."""
-        input_text = f"""
-file_path: {file_path}
-content:
-{content}
-diff:
-{diff}
-merge_request_title: {merge_request_title}
-target_branch: {target_branch}
-source_branch: {source_branch}
-"""
-        
-        # Create initial state
-        initial_state = create_initial_state(
-            input_text=input_text,
-            file_path=file_path,
-            content=content,
-            diff=diff,
-            merge_request_title=merge_request_title,
-            target_branch=target_branch,
-            source_branch=source_branch,
-            gitlab_token=gitlab_token,
-            gitlab_url=gitlab_url,
-            project_path=project_path
-        )
-        
-        # Run workflow
-        final_state = await review_workflow.ainvoke(initial_state)
-        
-        # Extract issues from output
-        if final_state.get("error"):
-            print(f"  ❌ Workflow error: {final_state['error']}")
-            return []
-        
-        output = final_state.get("output")
-        if output and isinstance(output, dict):
-            issues = output.get("issues", [])
-            return issues
-        
-        return []
-    
-    # Run workflow in a shielded task to isolate from MCP cancel scopes
-    task = asyncio.create_task(_run_workflow())
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as e:
-        # If cancelled (e.g., by lingering MCP cancel scope), wait for task and clear cancellation
-        cancel_msg = str(e)
-        try:
-            # Wait for the task to complete anyway
-            result = await task
-            # Clear cancellation state so the main loop can continue
-            current_task = asyncio.current_task()
-            if current_task is not None:
-                current_task.uncancel()
-            return result
-        except asyncio.CancelledError:
-            current_task = asyncio.current_task()
-            if current_task is not None:
-                current_task.uncancel()
-            print(f"  ⚠️  Workflow cancelled while reviewing {file_path}: {cancel_msg}")
-            return None
-        except Exception as inner_e:
-            current_task = asyncio.current_task()
-            if current_task is not None:
-                current_task.uncancel()
-            print(f"  ⚠️  Workflow error after cancel for {file_path}: {inner_e}")
-            return None
-    except Exception as e:
-        print(f"Error reviewing file {file_path}: {e}")
-        return None
-
-
-
-def format_comment(issues: list, file_name: str, file_path: str) -> str:
-    """Format review issues as a GitLab comment."""
-    if not issues:
-        return f"✅ **{file_name}** - No issues found!\n\n"
-    
-    comment = f"## 📝 Review for `{file_path}`\n\n"
-    comment += f"Found **{len(issues)}** issue(s):\n\n"
-    
-    # Group by severity (handle both dict and object formats)
-    def get_severity(issue):
-        return issue.get("severity", "low") if isinstance(issue, dict) else issue.severity
-    
-    def get_line(issue):
-        return issue.get("line", 1) if isinstance(issue, dict) else issue.line
-    
-    def get_problem(issue):
-        return issue.get("problem", "") if isinstance(issue, dict) else issue.problem
-    
-    def get_suggestion(issue):
-        return issue.get("suggestion", "") if isinstance(issue, dict) else issue.suggestion
-    
-    high_issues = [i for i in issues if get_severity(i) == "high"]
-    medium_issues = [i for i in issues if get_severity(i) == "medium"]
-    low_issues = [i for i in issues if get_severity(i) == "low"]
-    
-    if high_issues:
-        comment += "### 🔴 High Priority Issues\n\n"
-        for i, issue in enumerate(high_issues, 1):
-            comment += f"**{i}. Line {get_line(issue)}**\n"
-            comment += f"- **Problem**: {get_problem(issue)}\n"
-            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
-    
-    if medium_issues:
-        comment += "### 🟡 Medium Priority Issues\n\n"
-        for i, issue in enumerate(medium_issues, 1):
-            comment += f"**{i}. Line {get_line(issue)}**\n"
-            comment += f"- **Problem**: {get_problem(issue)}\n"
-            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
-    
-    if low_issues:
-        comment += "### 🟢 Low Priority Issues\n\n"
-        for i, issue in enumerate(low_issues, 1):
-            comment += f"**{i}. Line {get_line(issue)}**\n"
-            comment += f"- **Problem**: {get_problem(issue)}\n"
-            comment += f"- **Suggestion**: {get_suggestion(issue)}\n\n"
-    
-    return comment
-
-
-async def post_gitlab_comment(
-    gitlab_url: str,
-    project_path: str,
-    mr_id: str,
-    token: str,
-    comment: str,
-    file_path: Optional[str] = None,
-    line_number: Optional[int] = None,
-    base_sha: Optional[str] = None,
-    start_sha: Optional[str] = None,
-    head_sha: Optional[str] = None
-) -> bool:
-    """
-    Post a comment to GitLab MR using MCP or REST API fallback.
-    """
-    # Try MCP first
-    manager = get_mcp_toolkit_manager()
-    if manager.is_initialized and manager.get_gitlab_tools():
-        print(f"  🔍 [GitLab] Using MCP to post comment...")
-        
-        try:
-            if file_path and line_number:
-                # Create a thread/discussion on a specific line
-                result = await call_gitlab_tool("create_merge_request_thread", {
-                    "project_id": project_path,
-                    "merge_request_iid": mr_id,
-                    "body": comment,
-                    "position": {
-                        "new_path": file_path,
-                        "new_line": line_number
-                    }
-                })
-            else:
-                # General comment
-                result = await call_gitlab_tool("create_merge_request_note", {
-                    "project_id": project_path,
-                    "merge_request_iid": mr_id,
-                    "body": comment
-                })
-            
-            if result:
-                return True
-            print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
-        except Exception as e:
-            print(f"  ⚠️  [GitLab] MCP error: {e}, falling back to REST API...")
-    
-    # Fallback to REST API
-    print(f"  🔍 [GitLab] Using REST API to post comment...")
-    api_client = get_gitlab_api_client(gitlab_url, token)
-    
-    try:
-        if file_path and line_number:
-            # Create a discussion with position (inline comment)
-            position = {
-                "base_sha": base_sha,
-                "start_sha": start_sha,
-                "head_sha": head_sha,
-                "position_type": "text",
-                "new_path": file_path,
-                "new_line": line_number
-            }
-            result = api_client.create_merge_request_discussion(
-                project_path, mr_id, comment, position
-            )
-        else:
-            # General note
-            result = api_client.create_merge_request_note(
-                project_path, mr_id, comment
-            )
-        
-        return result is not None
-    except Exception as e:
-        print(f"  ❌ Failed to post comment: {e}")
-        return False
+from core.utils.file_reviewer import review_file_with_workflow, review_comments_with_agent
+from core.utils.comment_formatter import get_severity, group_issues_by_file
 
 
 async def process_mr(mr_url: str):
@@ -506,6 +119,12 @@ async def process_mr(mr_url: str):
     
     print(f"Found {len(changes)} changed file(s)\n")
     
+    # Get exclusion patterns from environment variable
+    exclusion_patterns_str = os.getenv("REVIEW_EXCLUDE_PATTERNS", "")
+    exclusion_patterns = [p.strip() for p in exclusion_patterns_str.split(",") if p.strip()]
+    if exclusion_patterns:
+        print(f"🚫 Exclusion patterns: {', '.join(exclusion_patterns)}\n")
+    
     # Process each file
     all_comments = []
     
@@ -517,6 +136,11 @@ async def process_mr(mr_url: str):
         # Skip deleted files
         if change.get("deleted_file", False):
             print(f"⏭️  Skipping deleted file: {file_path}")
+            continue
+        
+        # Skip excluded files based on patterns
+        if should_exclude_file(file_path, exclusion_patterns):
+            print(f"⏭️  Skipping excluded file: {file_path}")
             continue
         
         print(f"\n{'=' * 60}")
@@ -555,6 +179,29 @@ async def process_mr(mr_url: str):
         # Store issues with file path for later posting
         all_comments.append((file_path, issues))
     
+    # Filter high-severity issues using comment reviewer agent
+    print(f"\n{'=' * 60}")
+    print(f"🔍 Filtering high-severity comments...")
+    print(f"{'=' * 60}\n")
+    
+    # Collect all high-severity issues from all files
+    all_high_severity_issues = []
+    for file_path, issues in all_comments:
+        high_issues = [issue for issue in issues if get_severity(issue) == "high"]
+        all_high_severity_issues.extend(high_issues)
+    
+    print(f"📊 Found {len(all_high_severity_issues)} high-severity issues across all files")
+    
+    # Apply comment reviewer agent if there are high-severity issues
+    if all_high_severity_issues:
+        filtered_issues = await review_comments_with_agent(all_high_severity_issues)
+    else:
+        filtered_issues = all_high_severity_issues
+        print(f"ℹ️  No high-severity issues to filter")
+    
+    # Group filtered issues back by file_path for posting
+    filtered_comments_by_file = group_issues_by_file(filtered_issues)
+    
     # Post comments to GitLab
     print(f"\n{'=' * 60}")
     print(f"📤 Posting comments to GitLab MR...")
@@ -563,18 +210,9 @@ async def process_mr(mr_url: str):
     total_posted = 0
     total_failed = 0
     
-    for file_path, issues in all_comments:
-        if not issues:
-            # Post a general success comment for files with no issues
-            comment = f"✅ **{file_path}** - No issues found!"
-            print(f"💬 Posting summary for {file_path}...")
-            if await post_gitlab_comment(gitlab_url, project_path, mr_id, gitlab_token, comment):
-                print(f"✅ Comment posted successfully")
-                total_posted += 1
-            else:
-                print(f"❌ Failed to post comment")
-                total_failed += 1
-        else:
+    for file_path, issues in filtered_comments_by_file.items():
+        # Only post comments for files with issues
+        if issues:
             # Post individual comments for each issue on the specific line
             print(f"💬 Posting {len(issues)} comment(s) for {file_path}...")
             for issue in issues:
@@ -660,4 +298,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
