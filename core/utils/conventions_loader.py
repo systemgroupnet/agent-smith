@@ -11,7 +11,7 @@ and merged with module conventions overriding root conventions.
 
 import yaml
 from typing import Optional, Dict, Any
-from core.gitlab_api_client import get_gitlab_api_client
+from core.utils.gitlab_helpers import get_gitlab_api_client
 
 
 def extract_root_directory(file_path: str) -> str:
