@@ -39,7 +39,7 @@ async def create_dataview_reviewer_agent():
         system_prompt="",  # Will be replaced with context-specific prompt
         tools=["gitlab", "atlassian"],  # GitLab + Atlassian (Jira/Confluence) tools
         model_name="gpt-4o",
-        temperature=0.0,
+        temperature=0.3,
         max_iterations=15,
         verbose=False,
     )
