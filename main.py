@@ -31,7 +31,6 @@ from core.utils.gitlab_helpers import (
     get_gitlab_mr_changes,
     get_file_content,
     post_gitlab_comment,
-    _normalize_mcp_json_payload
 )
 from core.utils.file_reviewer import review_file_with_workflow, review_comments_with_agent
 from core.utils.comment_formatter import get_severity, group_issues_by_file
@@ -78,30 +77,30 @@ async def process_mr(mr_url: str):
     print(f"mr_data --->>>> {mr_data}")
 
     # Normalize MCP responses that may wrap JSON or return a list
-    normalized_mr = _normalize_mcp_json_payload(mr_data)
-    if not normalized_mr and isinstance(mr_data, list):
-        for item in mr_data:
-            if isinstance(item, dict) and isinstance(item.get("text"), str):
-                try:
-                    normalized_mr = json.loads(item["text"])
-                    break
-                except json.JSONDecodeError:
-                    continue
-            if isinstance(item, dict) and ("title" in item or "source_branch" in item):
-                normalized_mr = item
-                break
-    if not normalized_mr and isinstance(mr_data, dict):
-        normalized_mr = mr_data
-    if not normalized_mr:
-        print("Error: Could not parse MR information.")
-        sys.exit(1)
+    # normalized_mr = _normalize_mcp_json_payload(mr_data)
+    # if not normalized_mr and isinstance(mr_data, list):
+    #     for item in mr_data:
+    #         if isinstance(item, dict) and isinstance(item.get("text"), str):
+    #             try:
+    #                 normalized_mr = json.loads(item["text"])
+    #                 break
+    #             except json.JSONDecodeError:
+    #                 continue
+    #         if isinstance(item, dict) and ("title" in item or "source_branch" in item):
+    #             normalized_mr = item
+    #             break
+    # if not normalized_mr and isinstance(mr_data, dict):
+    #     normalized_mr = mr_data
+    # if not normalized_mr:
+    #     print("Error: Could not parse MR information.")
+    #     sys.exit(1)
 
-    mr_title = normalized_mr.get("title", "")
-    source_branch = normalized_mr.get("source_branch", "")
-    target_branch = normalized_mr.get("target_branch", "")
+    mr_title = mr_data.get("title", "")
+    source_branch = mr_data.get("source_branch", "")
+    target_branch = mr_data.get("target_branch", "")
     
     # Get commit SHAs for posting line comments
-    diff_refs = normalized_mr.get("diff_refs", {})
+    diff_refs = mr_data.get("diff_refs", {})
     base_sha = diff_refs.get("base_sha")
     start_sha = diff_refs.get("start_sha")
     head_sha = diff_refs.get("head_sha")
