@@ -82,14 +82,19 @@ def get_comment_reviewer_prompt() -> str:
 
 ## OUTPUT REQUIREMENTS:
 
-- `selected_issues`: Array of the top 10 most critical ReviewIssue objects (or fewer if less than 10 qualify)
+- `selected_issues`: Array of the top 10 most critical FinalComment objects (or fewer if less than 10 qualify)
+  - `problem`: A clear summary of the issue found in the comments. Synthesize multiple related comments into a single, concise problem statement.
+  - `suggestion`: Code suggestion if one exists in the comments. If the comment contains actual code snippets or specific code changes, include them here. Leave empty if no concrete code suggestion was provided.
+  - `file_name`: The file where the issue was found that exist in the comment
+  - `line`: The line number where the issue occurs that exist in the comment
 - `filtered_count`: Number of issues that were filtered out (total input - selected)
 - `reasoning`: A brief (2-4 sentences) explanation of what types of issues you kept and what you filtered out
 
 ## IMPORTANT NOTES:
 
 - If there are fewer than 10 truly critical issues, return only those that qualify. DO NOT pad the list.
-- Maintain the original ReviewIssue structure for selected issues (don't modify problem, suggestion, file_name, line, severity fields)
+- For the `problem` field: Create a clear, concise summary of the issue. If multiple comments relate to the same problem, synthesize them into one coherent problem statement.
+- For the `suggestion` field: Only include actual code suggestions or code snippets if they exist in the comments. If the comment only describes the problem without providing code, leave the suggestion empty or provide a brief description of what should be done.
 - Focus on issues that, if not addressed, could cause real problems in production
 - When in doubt, prioritize issues that affect correctness, security, and data integrity over everything else
 

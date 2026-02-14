@@ -2,158 +2,250 @@
 GitLab Helper Functions
 
 This module provides utility functions for interacting with GitLab API
-using MCP tools or REST API fallback.
+using direct REST API calls, including the GitLab REST API client.
 """
 
-import json
-from typing import Optional
-from core.MCP.toolkit_manager import get_mcp_toolkit_manager
-from core.gitlab_api_client import get_gitlab_api_client
+from typing import Optional, Dict, List
+from urllib.parse import quote
+import requests
 
 
 __all__ = [
-    'call_gitlab_tool',
+    'GitLabAPIClient',
+    'get_gitlab_api_client',
     'get_gitlab_mr_info',
     'get_gitlab_mr_changes',
     'get_file_content',
-    'post_gitlab_comment',
-    '_normalize_mcp_json_payload'
+    'post_gitlab_comment'
 ]
 
 
-async def call_gitlab_tool(tool_name: str, arguments: dict) -> Optional[dict]:
+class GitLabAPIClient:
+    """GitLab REST API client for merge request operations."""
+    
+    def __init__(self, gitlab_url: str, token: str):
+        """
+        Initialize GitLab API client.
+        
+        Args:
+            gitlab_url: GitLab instance URL (e.g., https://gitlab.example.com)
+            token: Personal access token
+        """
+        self.gitlab_url = gitlab_url.rstrip("/")
+        self.token = token
+        self.headers = {
+            "PRIVATE-TOKEN": token,
+            "Content-Type": "application/json"
+        }
+    
+    def _build_api_url(self, endpoint: str) -> str:
+        """Build full API URL."""
+        return f"{self.gitlab_url}/api/v4/{endpoint.lstrip('/')}"
+    
+    def get_merge_request(self, project_path: str, mr_iid: str) -> Optional[Dict]:
+        """
+        Get merge request information.
+        
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+            
+        Returns:
+            MR data dictionary or None if failed
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}")
+            
+            response = requests.get(url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+            
+            return response.json()
+            
+        except Exception as e:
+            print(f"  ❌ [GitLab API] Error fetching MR: {e}")
+            return None
+    
+    def get_merge_request_changes(self, project_path: str, mr_iid: str) -> Optional[List[Dict]]:
+        """
+        Get merge request changes (diffs).
+        
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+            
+        Returns:
+            List of changed files with diffs or None if failed
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/changes")
+            
+            response = requests.get(url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            return data.get("changes", [])
+            
+        except Exception as e:
+            print(f"  ❌ [GitLab API] Error fetching MR changes: {e}")
+            return None
+    
+    def get_file_content(self, project_path: str, file_path: str, ref: str) -> Optional[str]:
+        """
+        Get file content from repository.
+        
+        Args:
+            project_path: Project path (e.g., "group/project")
+            file_path: Path to file in repository
+            ref: Branch, tag, or commit SHA
+            
+        Returns:
+            File content as string or None if failed
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            file_path_encoded = quote(file_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/repository/files/{file_path_encoded}/raw")
+            
+            params = {"ref": ref}
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            response.raise_for_status()
+            
+            return response.text
+            
+        except Exception as e:
+            print(f"  ❌ [GitLab API] Error fetching file content: {e}")
+            return None
+    
+    def create_merge_request_note(self, project_path: str, mr_iid: str, body: str) -> Optional[Dict]:
+        """
+        Create a general note/comment on the merge request.
+        
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+            body: Comment text (markdown supported)
+            
+        Returns:
+            Created note data or None if failed
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes")
+            
+            data = {"body": body}
+            response = requests.post(url, headers=self.headers, json=data, timeout=30)
+            response.raise_for_status()
+            
+            return response.json()
+            
+        except Exception as e:
+            print(f"  ❌ [GitLab API] Error creating note: {e}")
+            return None
+    
+    def create_merge_request_discussion(
+        self,
+        project_path: str,
+        mr_iid: str,
+        body: str,
+        position: Optional[Dict] = None
+    ) -> Optional[Dict]:
+        """
+        Create a discussion/thread on the merge request.
+        
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+            body: Comment text (markdown supported)
+            position: Position object for inline comments (optional)
+            
+        Returns:
+            Created discussion data or None if failed
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/discussions")
+            
+            data = {"body": body}
+            if position:
+                data["position"] = position
+            
+            response = requests.post(url, headers=self.headers, json=data, timeout=30)
+            response.raise_for_status()
+            
+            return response.json()
+            
+        except Exception as e:
+            print(f"  ❌ [GitLab API] Error creating discussion: {e}")
+            return None
+
+
+def get_gitlab_api_client(gitlab_url: str, token: str) -> GitLabAPIClient:
     """
-    Helper function to call a GitLab MCP tool by name.
+    Get GitLab API client instance.
     
     Args:
-        tool_name: Name of the GitLab tool to call
-        arguments: Tool arguments
+        gitlab_url: GitLab instance URL
+        token: Personal access token
         
     Returns:
-        Tool result or None if failed
+        GitLabAPIClient instance
     """
-    try:
-        import asyncio
-        manager = get_mcp_toolkit_manager()
-        gitlab_tools = manager.get_gitlab_tools()
-        
-        # Find the tool
-        tool = next((t for t in gitlab_tools if t.name == tool_name), None)
-        if not tool:
-            print(f"  ❌ GitLab tool '{tool_name}' not found")
-            return None
-        
-        # Invoke the tool
-        result = await tool.ainvoke(arguments)
-        return result
-        
-    except asyncio.CancelledError as e:
-        task = asyncio.current_task()
-        if task is not None:
-            task.uncancel()
-        print(f"  ❌ Error calling GitLab tool {tool_name}: {e}")
-        return None
-    except Exception as e:
-        print(f"  ❌ Error calling GitLab tool {tool_name}: {e}")
-        return None
-
-
-def _normalize_mcp_json_payload(result: object) -> Optional[dict]:
-    """Normalize MCP responses that wrap JSON in text fields or strings."""
-    if isinstance(result, list) and result:
-        first = result[0]
-        if isinstance(first, dict) and isinstance(first.get("text"), str):
-            try:
-                return json.loads(first["text"])
-            except json.JSONDecodeError:
-                return None
-    if isinstance(result, str):
-        try:
-            return json.loads(result)
-        except json.JSONDecodeError:
-            return None
-    return result if isinstance(result, dict) else None
+    return GitLabAPIClient(gitlab_url, token)
 
 
 async def get_gitlab_mr_info(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[dict]:
     """
-    Fetch merge request information from GitLab using MCP or REST API fallback.
-    """
-    # Try MCP first
-    manager = get_mcp_toolkit_manager()
-    if manager.is_initialized and manager.get_gitlab_tools():
-        print(f"  🔍 [GitLab] Using MCP to fetch MR info...")
-        result = await call_gitlab_tool("get_merge_request", {
-            "project_id": project_path,
-            "merge_request_iid": mr_id
-        })
-        if result:
-            normalized = _normalize_mcp_json_payload(result)
-            if normalized:
-                return normalized
-        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
+    Fetch merge request information from GitLab using REST API.
     
-    # Fallback to REST API
-    print(f"  🔍 [GitLab] Using REST API to fetch MR info...")
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        mr_id: Merge request IID
+        token: GitLab access token
+        
+    Returns:
+        MR data dictionary or None if failed
+    """
+    print(f"  🔍 [GitLab] Fetching MR info via REST API...")
     api_client = get_gitlab_api_client(gitlab_url, token)
     return api_client.get_merge_request(project_path, mr_id)
 
 
 async def get_gitlab_mr_changes(gitlab_url: str, project_path: str, mr_id: str, token: str) -> Optional[list]:
     """
-    Fetch changed files and diffs from GitLab MR using MCP or REST API fallback.
-    """
-    # Try MCP first
-    manager = get_mcp_toolkit_manager()
-    if manager.is_initialized and manager.get_gitlab_tools():
-        print(f"  🔍 [GitLab] Using MCP to fetch MR changes...")
-        result = await call_gitlab_tool("get_merge_request_diffs", {
-            "project_id": project_path,
-            "merge_request_iid": mr_id
-        })
-        
-        if result:
-            # The result might be a dict with changes array or directly an array
-            if isinstance(result, dict):
-                changes = result.get("changes", result.get("diffs", []))
-            else:
-                changes = result if isinstance(result, list) else []
-            if changes:
-                return changes
-        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
+    Fetch changed files and diffs from GitLab MR using REST API.
     
-    # Fallback to REST API
-    print(f"  🔍 [GitLab] Using REST API to fetch MR changes...")
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        mr_id: Merge request IID
+        token: GitLab access token
+        
+    Returns:
+        List of changed files with diffs or None if failed
+    """
+    print(f"  🔍 [GitLab] Fetching MR changes via REST API...")
     api_client = get_gitlab_api_client(gitlab_url, token)
     return api_client.get_merge_request_changes(project_path, mr_id)
 
 
 async def get_file_content(gitlab_url: str, project_path: str, file_path: str, branch: str, token: str) -> Optional[str]:
     """
-    Fetch file content from GitLab repository using MCP or REST API fallback.
-    """
-    # Try MCP first
-    manager = get_mcp_toolkit_manager()
-    if manager.is_initialized and manager.get_gitlab_tools():
-        print(f"  🔍 [GitLab] Using MCP to fetch file content...")
-        result = await call_gitlab_tool("get_file_contents", {
-            "project_id": project_path,
-            "file_path": file_path,
-            "ref": branch
-        })
-        
-        if result:
-            # The result might be a dict with content or directly the content
-            if isinstance(result, dict):
-                content = result.get("content", result.get("text", ""))
-            else:
-                content = str(result)
-            if content:
-                return content
-        print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
+    Fetch file content from GitLab repository using REST API.
     
-    # Fallback to REST API
-    print(f"  🔍 [GitLab] Using REST API to fetch file content...")
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        file_path: Path to file in repository
+        branch: Branch name or commit SHA
+        token: GitLab access token
+        
+    Returns:
+        File content as string or None if failed
+    """
+    print(f"  🔍 [GitLab] Fetching file content via REST API...")
     api_client = get_gitlab_api_client(gitlab_url, token)
     return api_client.get_file_content(project_path, file_path, branch)
 
@@ -171,41 +263,24 @@ async def post_gitlab_comment(
     head_sha: Optional[str] = None
 ) -> bool:
     """
-    Post a comment to GitLab MR using MCP or REST API fallback.
-    """
-    # Try MCP first
-    manager = get_mcp_toolkit_manager()
-    if manager.is_initialized and manager.get_gitlab_tools():
-        print(f"  🔍 [GitLab] Using MCP to post comment...")
-        
-        try:
-            if file_path and line_number:
-                # Create a thread/discussion on a specific line
-                result = await call_gitlab_tool("create_merge_request_thread", {
-                    "project_id": project_path,
-                    "merge_request_iid": mr_id,
-                    "body": comment,
-                    "position": {
-                        "new_path": file_path,
-                        "new_line": line_number
-                    }
-                })
-            else:
-                # General comment
-                result = await call_gitlab_tool("create_merge_request_note", {
-                    "project_id": project_path,
-                    "merge_request_iid": mr_id,
-                    "body": comment
-                })
-            
-            if result:
-                return True
-            print(f"  ⚠️  [GitLab] MCP call failed, falling back to REST API...")
-        except Exception as e:
-            print(f"  ⚠️  [GitLab] MCP error: {e}, falling back to REST API...")
+    Post a comment to GitLab MR using REST API.
     
-    # Fallback to REST API
-    print(f"  🔍 [GitLab] Using REST API to post comment...")
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        mr_id: Merge request IID
+        token: GitLab access token
+        comment: Comment text (markdown supported)
+        file_path: Optional file path for inline comments
+        line_number: Optional line number for inline comments
+        base_sha: Base commit SHA (required for inline comments)
+        start_sha: Start commit SHA (required for inline comments)
+        head_sha: Head commit SHA (required for inline comments)
+        
+    Returns:
+        True if comment posted successfully, False otherwise
+    """
+    print(f"  🔍 [GitLab] Posting comment via REST API...")
     api_client = get_gitlab_api_client(gitlab_url, token)
     
     try:
