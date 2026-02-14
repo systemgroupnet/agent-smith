@@ -36,7 +36,7 @@ async def create_pbook_reviewer_agent():
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
         tools=["gitlab", "atlassian"],  # GitLab + Atlassian (Jira/Confluence) tools
-        model_name="gpt-4o-mini",
+        model_name="openai/gpt-5-nano",
         temperature=0.3,
         max_iterations=10,
         verbose=False,

@@ -13,7 +13,7 @@ from core.workflow.state import StarterResponse
 # Create the starter agent instance
 starter_agent = StructuredOutputAgent(
     system_prompt=get_starter_agent_prompt(),
-    model_name="gpt-4o-mini",
+    model_name="z-ai/glm-5",
     temperature=0.0,
     output_model=StarterResponse
 )
