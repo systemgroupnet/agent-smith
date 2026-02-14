@@ -13,12 +13,9 @@ import argparse
 import asyncio
 import os
 import sys
-import json
-from typing import Optional
 
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 # Import MCP Toolkit Manager
@@ -33,7 +30,8 @@ from core.utils.gitlab_helpers import (
     post_gitlab_comment,
 )
 from core.utils.file_reviewer import review_file_with_workflow, review_comments_with_agent
-from core.utils.comment_formatter import get_severity, group_issues_by_file
+from core.utils.comment_formatter import format_single_issue, extract_high_severity_issues
+
 
 
 async def process_mr(mr_url: str):
@@ -74,27 +72,6 @@ async def process_mr(mr_url: str):
         print("Error: Could not fetch MR information.")
         sys.exit(1)
     
-    print(f"mr_data --->>>> {mr_data}")
-
-    # Normalize MCP responses that may wrap JSON or return a list
-    # normalized_mr = _normalize_mcp_json_payload(mr_data)
-    # if not normalized_mr and isinstance(mr_data, list):
-    #     for item in mr_data:
-    #         if isinstance(item, dict) and isinstance(item.get("text"), str):
-    #             try:
-    #                 normalized_mr = json.loads(item["text"])
-    #                 break
-    #             except json.JSONDecodeError:
-    #                 continue
-    #         if isinstance(item, dict) and ("title" in item or "source_branch" in item):
-    #             normalized_mr = item
-    #             break
-    # if not normalized_mr and isinstance(mr_data, dict):
-    #     normalized_mr = mr_data
-    # if not normalized_mr:
-    #     print("Error: Could not parse MR information.")
-    #     sys.exit(1)
-
     mr_title = mr_data.get("title", "")
     source_branch = mr_data.get("source_branch", "")
     target_branch = mr_data.get("target_branch", "")
@@ -183,11 +160,7 @@ async def process_mr(mr_url: str):
     print(f"🔍 Filtering high-severity comments...")
     print(f"{'=' * 60}\n")
     
-    # Collect all high-severity issues from all files
-    all_high_severity_issues = []
-    for file_path, issues in all_comments:
-        high_issues = [issue for issue in issues if get_severity(issue) == "high"]
-        all_high_severity_issues.extend(high_issues)
+    all_high_severity_issues = extract_high_severity_issues(all_comments)
     
     print(f"📊 Found {len(all_high_severity_issues)} high-severity issues across all files")
     
@@ -195,12 +168,9 @@ async def process_mr(mr_url: str):
     if all_high_severity_issues:
         filtered_issues = await review_comments_with_agent(all_high_severity_issues)
     else:
-        filtered_issues = all_high_severity_issues
         print(f"ℹ️  No high-severity issues to filter")
-    
-    # Group filtered issues back by file_path for posting
-    filtered_comments_by_file = group_issues_by_file(filtered_issues)
-    
+        return 
+
     # Post comments to GitLab
     print(f"\n{'=' * 60}")
     print(f"📤 Posting comments to GitLab MR...")
@@ -209,49 +179,30 @@ async def process_mr(mr_url: str):
     total_posted = 0
     total_failed = 0
     
-    for file_path, issues in filtered_comments_by_file.items():
-        # Only post comments for files with issues
-        if issues:
-            # Post individual comments for each issue on the specific line
-            print(f"💬 Posting {len(issues)} comment(s) for {file_path}...")
-            for issue in issues:
-                # Handle both dict and object formats
-                severity = issue.get("severity", "low") if isinstance(issue, dict) else issue.severity
-                line = issue.get("line", 1) if isinstance(issue, dict) else issue.line
-                problem = issue.get("problem", "") if isinstance(issue, dict) else issue.problem
-                suggestion = issue.get("suggestion", "") if isinstance(issue, dict) else issue.suggestion
+    for issue in filtered_issues:
+        print(f"💬 Posting {len(filtered_issues)} comment(s) for {issue.file_name}...")
+        comment = format_single_issue(issue)
                 
-                # Format severity emoji
-                severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
-                
-                # Format the comment for this specific issue
-                comment = f"{severity_emoji} **{severity.upper()}** - Line {line}\n\n"
-                comment += f"**Problem:** {problem}\n\n"
-                comment += f"**Suggestion:** {suggestion}"
-                
-                # Post comment on the specific line
-                if await post_gitlab_comment(
-                    gitlab_url, 
-                    project_path, 
-                    mr_id, 
-                    gitlab_token, 
-                    comment,
-                    file_path=file_path,
-                    line_number=line,
-                    base_sha=base_sha,
-                    start_sha=start_sha,
-                    head_sha=head_sha
-                ):
-                    print(f"  ✅ Posted comment for line {line}")
-                    total_posted += 1
-                else:
-                    print(f"  ❌ Failed to post comment for line {line}")
-                    total_failed += 1
+        if await post_gitlab_comment(
+            gitlab_url, 
+            project_path, 
+            mr_id, 
+            gitlab_token, 
+            comment,
+            file_path=issue.file_name,
+            line_number=issue.line,
+            base_sha=base_sha,
+            start_sha=start_sha,
+            head_sha=head_sha
+        ):
+            print(f"  ✅ Posted comment for line {issue.line}")
+            total_posted += 1
+        else:
+            print(f"  ❌ Failed to post comment for line {issue.line}")
+            total_failed += 1
     
     print(f"\n{'=' * 60}")
     print(f"✨ Review completed!")
-    total_issues = sum(len(issues) for _, issues in all_comments)
-    print(f"📊 Total issues found: {total_issues}")
     print(f"📤 Comments posted: {total_posted}")
     print(f"❌ Failed comments: {total_failed}")
     print(f"{'=' * 60}\n")
@@ -262,7 +213,6 @@ async def run_with_cleanup(mr_url: str):
     try:
         await process_mr(mr_url)
     finally:
-        # Clean up MCP sessions in the SAME event loop
         print("\n🔌 Cleaning up MCP sessions...")
         try:
             await close_mcp_toolkits()
