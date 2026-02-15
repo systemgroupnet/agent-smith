@@ -207,10 +207,13 @@ async def load_conventions(
     # Construct paths to conventions files
     root_conventions_path = f"{root_dir}/conventions.yml"
     module_conventions_path = None
-    if module_name:
+
+    if not(module_name) or "unknown" in module_name:
+        module_conventions_path = f"{root_dir}/context/conventions.yaml"
+    else: 
         module_conventions_path = f"{root_dir}/{module_name}/context/conventions.yaml"
-        print(f"  📁 Module directory: {root_dir}/{module_name}")
     
+    print(f"📁 Module convention path: {module_conventions_path}")
     # Fetch root conventions
     root_content = await fetch_yaml_file(
         root_conventions_path,
