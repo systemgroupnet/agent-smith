@@ -3,7 +3,7 @@ Conventions Loader Utility
 
 This module loads convention YAML files from GitLab repository:
 1. Root conventions.yml (project-wide conventions)
-2. Module-specific conventions.yml (module-specific conventions)
+2. Module-specific conventions.yaml (module-specific conventions in context/ folder)
 
 Conventions are organized by agent type (service, sql, dataview, etc.)
 and merged with module conventions overriding root conventions.
@@ -92,7 +92,7 @@ def merge_conventions(root_conventions: list, module_conventions: list) -> list:
     
     Args:
         root_conventions: Conventions from root conventions.yml
-        module_conventions: Conventions from module conventions.yml
+        module_conventions: Conventions from module conventions.yaml (from context/ folder)
         
     Returns:
         Combined list of conventions
@@ -178,7 +178,7 @@ async def load_conventions(
     This function:
     1. Extracts root directory from file_path
     2. Fetches root conventions.yml
-    3. Fetches module conventions.yml (if module_name provided)
+    3. Fetches module conventions.yaml from module_name/context/ (if module_name provided)
     4. Merges conventions (module overrides root)
     5. Returns formatted conventions text
     
@@ -208,7 +208,7 @@ async def load_conventions(
     root_conventions_path = f"{root_dir}/conventions.yml"
     module_conventions_path = None
     if module_name:
-        module_conventions_path = f"{root_dir}/{module_name}/conventions.yml"
+        module_conventions_path = f"{root_dir}/{module_name}/context/conventions.yaml"
         print(f"  📁 Module directory: {root_dir}/{module_name}")
     
     # Fetch root conventions
