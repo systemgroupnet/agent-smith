@@ -139,7 +139,7 @@ async def review_comments_with_agent(issues: list) -> list:
         print(f"  💡 Reasoning: {result.reasoning}")
         
         # Return selected issues as dicts
-        return [issue.model_dump() for issue in result.selected_issues]
+        return result.selected_issues
         
     except Exception as e:
         print(f"  ⚠️  Error running comment reviewer agent: {e}")

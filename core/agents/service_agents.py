@@ -10,6 +10,7 @@ as needed during the review process. The LLM chooses which tools to use.
 """
 
 import asyncio
+import os
 from typing import Optional
 from pydantic import BaseModel
 
@@ -175,6 +176,9 @@ async def run_combined_service_review(context: ServiceContext) -> ReviewResponse
     - Semantic reviewer: Uses GitLab tools for code context
     - Business logic reviewer: Uses Jira/Confluence/GitLab tools for requirements
     
+    Business logic review can be disabled by setting BUSINESS_LOGIC_REVIEW_ENABLED=false
+    in the environment variables.
+    
     Args:
         context: Service context with file information
         
@@ -184,33 +188,54 @@ async def run_combined_service_review(context: ServiceContext) -> ReviewResponse
     print(f"\n📝 Starting combined service review (parallel)")
     print(f"   File: {context.file_name}")
     
+    # Check if business logic review is enabled
+    business_logic_enabled = os.getenv("BUSINESS_LOGIC_REVIEW_ENABLED", "true").lower() == "true"
+    
     try:
-        # Run both reviews in parallel
+        # Always run semantic review
         semantic_task = run_semantic_review(context)
-        business_task = run_business_logic_review(context)
         
-        semantic_result, business_result = await asyncio.gather(
-            semantic_task,
-            business_task,
-            return_exceptions=True
-        )
-        
-        # Handle exceptions
-        if isinstance(semantic_result, Exception):
-            print(f"  ⚠️  Semantic review exception: {semantic_result}")
-            semantic_result = ReviewResponse(issues=[])
-        
-        if isinstance(business_result, Exception):
-            print(f"  ⚠️  Business logic review exception: {business_result}")
-            business_result = ReviewResponse(issues=[])
-        
-        # Combine results
-        all_issues = semantic_result.issues + business_result.issues
-        
-        print(f"\n✅ Combined review complete:")
-        print(f"   - Semantic issues: {len(semantic_result.issues)}")
-        print(f"   - Business logic issues: {len(business_result.issues)}")
-        print(f"   - Total issues: {len(all_issues)}")
+        # Conditionally run business logic review
+        if business_logic_enabled:
+            print(f"  ℹ️  Business logic review enabled")
+            business_task = run_business_logic_review(context)
+            
+            semantic_result, business_result = await asyncio.gather(
+                semantic_task,
+                business_task,
+                return_exceptions=True
+            )
+            
+            # Handle exceptions
+            if isinstance(semantic_result, Exception):
+                print(f"  ⚠️  Semantic review exception: {semantic_result}")
+                semantic_result = ReviewResponse(issues=[])
+            
+            if isinstance(business_result, Exception):
+                print(f"  ⚠️  Business logic review exception: {business_result}")
+                business_result = ReviewResponse(issues=[])
+            
+            # Combine results
+            all_issues = semantic_result.issues + business_result.issues
+            
+            print(f"\n✅ Combined review complete:")
+            print(f"   - Semantic issues: {len(semantic_result.issues)}")
+            print(f"   - Business logic issues: {len(business_result.issues)}")
+            print(f"   - Total issues: {len(all_issues)}")
+        else:
+            print(f"  ℹ️  Business logic review disabled")
+            semantic_result = await semantic_task
+            
+            # Handle exceptions
+            if isinstance(semantic_result, Exception):
+                print(f"  ⚠️  Semantic review exception: {semantic_result}")
+                semantic_result = ReviewResponse(issues=[])
+            
+            all_issues = semantic_result.issues
+            
+            print(f"\n✅ Review complete (semantic only):")
+            print(f"   - Semantic issues: {len(semantic_result.issues)}")
+            print(f"   - Total issues: {len(all_issues)}")
         
         return ReviewResponse(issues=all_issues)
         

@@ -179,8 +179,10 @@ async def process_mr(mr_url: str):
     total_posted = 0
     total_failed = 0
     
+    print(f"💬 Posting {len(filtered_issues)} comment(s) to GitLab...\n")
+    
     for issue in filtered_issues:
-        print(f"💬 Posting {len(filtered_issues)} comment(s) for {issue.file_name}...")
+        print(f"📝 Posting comment for {issue.file_name}:{issue.line}...")
         comment = format_single_issue(issue)
                 
         if await post_gitlab_comment(
