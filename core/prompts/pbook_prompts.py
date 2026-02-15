@@ -54,6 +54,9 @@ def get_pbook_reviewer_prompt(context: "PbookContext", conventions: str = "") ->
 
 **CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
 
+## SUGGESTION FIELD FORMAT
+**IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected error message definition code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
+
 ## TOOLS AVAILABLE
 You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
 - Fetch related error message files from the repository to check for duplicates

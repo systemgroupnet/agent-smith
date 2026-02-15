@@ -45,6 +45,9 @@ You MUST assign a severity level to each issue:
 
 **CRITICAL REQUIREMENT**: For EVERY issue marked as **high** severity, you MUST provide a clear explanation in your "problem" field explaining WHY this issue is critical.
 
+SUGGESTION FIELD FORMAT:
+**IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
+
 TOOLS AVAILABLE:
 You have access to MCP tools for GitLab that can help you:
 - Fetch file contents from the repository to understand context
@@ -115,6 +118,9 @@ You MUST assign a severity level to each issue:
 - **low**: Style issues, uncommon edge cases, optional features
 
 **CRITICAL REQUIREMENT**: For EVERY issue marked as **high** severity, you MUST provide a clear explanation in your "problem" field explaining WHY this issue is critical.
+
+SUGGESTION FIELD FORMAT:
+**IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
 
 TOOLS AVAILABLE:
 You have access to MCP tools for Jira and Confluence that can help you:

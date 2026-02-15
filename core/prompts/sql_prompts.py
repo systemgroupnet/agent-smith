@@ -55,6 +55,9 @@ def get_sql_reviewer_prompt(context: "SqlContext", conventions: str = "") -> str
 
 **CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
 
+## SUGGESTION FIELD FORMAT
+**IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected SQL code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual SQL code that should replace the problematic code.
+
 ## TOOLS AVAILABLE
 You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
 - Fetch related migration files from the repository
