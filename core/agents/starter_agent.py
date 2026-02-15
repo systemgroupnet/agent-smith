@@ -81,6 +81,22 @@ class FileClassifier:
         return ""
     
     @staticmethod
+    def extract_module_name(file_path: str) -> str:
+        """
+        Extract module name from file path by splitting on '/' and taking the second item.
+        
+        Args:
+            file_path: Path to the file (e.g., 'src/module_name/file.py')
+            
+        Returns:
+            Module name as string, or "N/A" if path doesn't have enough segments
+        """
+        parts = file_path.split('/')
+        if len(parts) >= 2:
+            return parts[0]
+        return "N/A"
+    
+    @staticmethod
     def classify_by_extension(input_text: str, file_path: str) -> Optional[StarterResponse]:
         """
         Classify file based on extension for frontend files (.ts, .html, .scss).
@@ -105,13 +121,14 @@ class FileClassifier:
         target_branch = FileClassifier.extract_field_from_input(input_text, 'target_branch')
         source_branch = FileClassifier.extract_field_from_input(input_text, 'source_branch')
         jira_task_number = FileClassifier.extract_jira_task_number(input_text)
+        module_name = FileClassifier.extract_module_name(file_path)
         
-        # For frontend files, package and module are not applicable
+        # For frontend files, package is not applicable
         return StarterResponse(
             file_name=file_name,
             file_type=file_type,
             package_name="N/A",
-            module_name="N/A",
+            module_name=module_name,
             content=content,
             diff=diff,
             target_branch=target_branch,
