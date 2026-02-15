@@ -54,8 +54,11 @@ async def classify_node(state: ReviewState) -> ReviewState:
     print("="*60)
     
     try:
-        # Run starter agent
-        result = await starter_agent.run(state["input_text"])
+        # Run starter agent with file_path for extension-based classification
+        result = await starter_agent.run(
+            state["input_text"], 
+            file_path=state.get("file_path")
+        )
         
         # Update state with classification
         state = update_state_with_classification(state, result)
