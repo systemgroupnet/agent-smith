@@ -59,6 +59,9 @@ def get_test_reviewer_prompt(context: "TestContext", conventions: str = "") -> s
 
 **CRITICAL**: For high severity issues, explain the impact on test reliability.
 
+## SUGGESTION FIELD FORMAT
+**IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
+
 ## TOOLS AVAILABLE
 You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
 - Fetch the source code being tested from the repository
