@@ -80,6 +80,68 @@ An AI-powered code review system for the application. This project provides spec
 
 ## Configuration
 
+### Agent-Specific Instructions (`.aid` Directory)
+
+The code review system supports agent-specific instructions and conventions through Markdown files stored in your GitLab repository. These files allow you to customize the behavior of each review agent per module.
+
+#### Directory Structure
+
+```
+{root_dir}/.aid/              # Root-level instructions (apply to all modules)
+├── service.md                # Instructions for service code reviewer
+├── sql.md                    # Instructions for SQL reviewer
+├── dataview.md               # Instructions for dataview reviewer
+├── test.md                   # Instructions for test reviewer
+├── typescript.md             # Instructions for TypeScript reviewer
+├── html.md                   # Instructions for HTML reviewer
+├── scss.md                   # Instructions for SCSS reviewer
+└── pbook.md                  # Instructions for pbook reviewer
+
+{root_dir}/{module_name}/.aid/  # Module-specific instructions (override root)
+├── service.md
+├── sql.md
+└── ...
+```
+
+#### How It Works
+
+1. **Root-level instructions**: Place `.aid/{agent_type}.md` at the root of your project to define project-wide instructions
+2. **Module-specific instructions**: Place `.aid/{agent_type}.md` within a module directory to add module-specific instructions
+3. **Merging**: Both root and module instructions are loaded and merged (module instructions are appended after root instructions)
+
+#### Example Markdown File
+
+Create `acme-shop/.aid/service.md`:
+
+```markdown
+## Project Conventions
+
+1. Always use dependency injection for database connections
+2. Never use hardcoded configuration values
+3. All service methods must return errors using custom error types
+
+## Security Guidelines
+
+- Validate all user inputs before processing
+- Use parameterized queries for all database operations
+- Log all authentication attempts
+
+## Module-Specific Notes
+
+This module handles financial transactions - extra care with decimal precision.
+```
+
+These instructions will be injected into the system prompt under the "Additional Instructions" section.
+
+#### Benefits
+
+- **Flexible formatting**: Use Markdown formatting, code blocks, lists, and links
+- **Project-specific rules**: Customize review criteria per project and module
+- **Version controlled**: Instructions are stored in your GitLab repository
+- **No code changes needed**: Update instructions without modifying the review system
+
+### Environment Configuration
+
 1. **Copy the environment template**:
 
    ```bash

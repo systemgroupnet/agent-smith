@@ -9,7 +9,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from core.agents.tool_agent import create_review_agent_with_tools
-from core.utils.conventions_loader import load_conventions
+from core.utils.md_loader import load_md_content
 from core.prompts import get_typescript_reviewer_prompt
 from dto.general import ReviewResponse
 
@@ -59,12 +59,12 @@ async def run_typescript_review(context: TypescriptContext) -> ReviewResponse:
     print(f"  🔍 Running TypeScript review...")
     
     try:
-        # Load conventions
-        conventions_text = ""
+        # Load additional content
+        additional_content = ""
         if (context.file_path and context.gitlab_url and context.project_path 
             and context.source_branch and context.gitlab_token):
             try:
-                conventions_text = await load_conventions(
+                additional_content = await load_md_content(
                     agent_type="typescript",
                     file_path=context.file_path,
                     module_name=None,  # TypeScript files typically don't have module context
@@ -74,14 +74,14 @@ async def run_typescript_review(context: TypescriptContext) -> ReviewResponse:
                     gitlab_token=context.gitlab_token
                 )
             except Exception as conv_error:
-                print(f"  ⚠️  Warning: Failed to load conventions: {conv_error}")
-                conventions_text = ""
+                print(f"  ⚠️  Warning: Failed to load additional content: {conv_error}")
+                additional_content = ""
         
         # Create agent with tools
         agent = await create_typescript_reviewer_agent()
         
-        # Build input with context and conventions
-        input_text = get_typescript_reviewer_prompt(context, conventions_text)
+        # Build input with context and additional content
+        input_text = get_typescript_reviewer_prompt(context, additional_content)
         
         # Run agent
         result = await agent.run(input_text)

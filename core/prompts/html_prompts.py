@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from core.agents.html_agent import HtmlContext
 
 
-def get_html_reviewer_prompt(context: "HtmlContext", conventions: str = "") -> str:
+def get_html_reviewer_prompt(context: "HtmlContext", additional_content: str = "") -> str:
     """Get HTML reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -67,8 +67,8 @@ You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 
-=== Project Conventions ===
-{conventions if conventions else "No specific conventions defined for this file type."}
+=== Additional Instructions ===
+{additional_content if additional_content else "No additional instructions defined for this agent."}
 
 === Context Information ===
 {context_section}

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from core.agents.service_agents import ServiceContext
 
 
-def get_semantic_reviewer_prompt(context: "ServiceContext", conventions: str = "") -> str:
+def get_semantic_reviewer_prompt(context: "ServiceContext", additional_content: str = "") -> str:
     """Get the system prompt for semantic reviewer with tool usage instructions."""
     
     # Build additional context information
@@ -66,8 +66,8 @@ DATABASE CONTEXT: Postgres + GORM
 
 RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (specific), suggestion (actionable with code), file_name, line (exact number), severity ("high"|"medium"|"low").
 
-=== Project Conventions ===
-{conventions if conventions else "No specific conventions defined for this file type."}
+=== Additional Instructions ===
+{additional_content if additional_content else "No additional instructions defined for this agent."}
 
 === Context Information ===
 {context_section}
@@ -83,7 +83,7 @@ RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (
 ```"""
 
 
-def get_business_logic_reviewer_prompt(context: "ServiceContext") -> str:
+def get_business_logic_reviewer_prompt(context: "ServiceContext", additional_content: str = "") -> str:
     """Get the system prompt for business logic reviewer with tool usage instructions."""
     
     # Build additional context information
@@ -142,6 +142,9 @@ CONSTRAINTS:
 - NO technical/performance/error handling review
 
 RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (with requirement reference), suggestion (with spec reference), file_name, line (exact number), severity ("high"|"medium"|"low").
+
+=== Additional Instructions ===
+{additional_content if additional_content else "No additional instructions defined for this agent."}
 
 === Context Information ===
 {context_section}
