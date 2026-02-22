@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from core.agents.sql_agent import SqlContext
 
 
-def get_sql_reviewer_prompt(context: "SqlContext", conventions: str = "") -> str:
+def get_sql_reviewer_prompt(context: "SqlContext", additional_content: str = "") -> str:
     """Get SQL reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -73,8 +73,8 @@ Use these tools if you need additional context to perform your review, but avoid
 - Focus ONLY on the 5 main rules above
 - DO NOT comment on indexes, documentation, or audit columns (created_by, updated_at, etc.)
 
-=== Project Conventions ===
-{conventions if conventions else "No specific conventions defined for this file type."}
+=== Additional Instructions ===
+{additional_content if additional_content else "No additional instructions defined for this agent."}
 
 === Context Information ===
 {context_section}

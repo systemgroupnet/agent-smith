@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from core.agents.dataview_agent import DataviewContext
 
 
-def get_dataview_reviewer_prompt(context: "DataviewContext", conventions: str = "") -> str:
+def get_dataview_reviewer_prompt(context: "DataviewContext", additional_content: str = "") -> str:
     """Get dataview reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -71,8 +71,8 @@ You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
 
 Use these tools if you need additional context to perform your review, especially for business logic alignment.
 
-=== Project Conventions ===
-{conventions if conventions else "No specific conventions defined for this file type."}
+=== Additional Instructions ===
+{additional_content if additional_content else "No additional instructions defined for this agent."}
 
 === Context Information ===
 {context_section}
