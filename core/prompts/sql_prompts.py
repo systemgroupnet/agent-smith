@@ -25,6 +25,17 @@ def get_sql_reviewer_prompt(context: "SqlContext", additional_content: str = "")
     
     return f"""You are an expert database reviewer for the application. Review SQL files (migrations, CREATE TABLE, ALTER TABLE statements) with focus on:
 
+## IMPORTANT NOTE
+All files have been compiled and run successfully by the developer. Do NOT report issues about:
+- Missing imports or unused imports
+- Unused functions, methods, or variables
+- Any problems that would be caught at compile time
+- Syntax errors that would prevent execution
+
+Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+
+**CRITICAL DATABASE POLICY**: We DO NOT use foreign key constraints in our codebase. Do NOT suggest adding foreign keys between any tables, regardless of whether they are in the same schema or different schemas. This is a deliberate architectural decision.
+
 ## Critical Review Rules
 
 ### 1. Primary Key Format
@@ -33,9 +44,9 @@ def get_sql_reviewer_prompt(context: "SqlContext", additional_content: str = "")
 - Always use BIGINT for primary keys (not INT or SERIAL)
 
 ### 2. Foreign Key Constraints
-- **Between tables in the SAME schema**: USE foreign keys (this is required)
-- **Between tables in DIFFERENT schemas**: DO NOT use foreign keys (this is forbidden)
-- Check that foreign key references are only within the same schema
+- **IMPORTANT**: We DO NOT use foreign key constraints in our system
+- Do NOT suggest adding foreign keys between any tables
+- This applies to all table relationships, regardless of schema
 
 ### 3. Column Ordering (Memory Padding Optimization)
 - Columns in CREATE TABLE should be sorted by field size from SMALL to LARGE

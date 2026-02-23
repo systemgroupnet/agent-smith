@@ -28,6 +28,15 @@ def get_semantic_reviewer_prompt(context: "ServiceContext", additional_content: 
     
     return f"""You are a senior Go engineer performing technical code review. Focus ONLY on code quality, correctness, and Go best practices. DO NOT review business logic.
 
+## IMPORTANT NOTE
+All files have been compiled and run successfully by the developer. Do NOT report issues about:
+- Missing imports or unused imports
+- Unused functions, methods, or variables
+- Any problems that would be caught at compile time
+- Type errors that would prevent compilation
+
+Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+
 CRITICAL AREAS TO REVIEW:
 1. Correctness: Nil checks, race conditions, defer in loops, type assertions
 2. Error Handling: Ignored errors, missing wrapping (fmt.Errorf with %w), transaction rollbacks
@@ -100,6 +109,15 @@ def get_business_logic_reviewer_prompt(context: "ServiceContext", additional_con
     context_section = "\n".join(context_info) if context_info else "No additional context"
     
     return f"""You are a senior software architect reviewing business logic implementation. Focus ONLY on whether code correctly implements business requirements. DO NOT review code quality or technical aspects.
+
+## IMPORTANT NOTE
+All files have been compiled and run successfully by the developer. Do NOT report issues about:
+- Missing imports or unused imports
+- Unused functions, methods, or variables
+- Any problems that would be caught at compile time
+- Type errors that would prevent compilation
+
+Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
 
 CRITICAL AREAS TO REVIEW:
 1. Requirements Completeness: All features from task implemented, no missing functionality

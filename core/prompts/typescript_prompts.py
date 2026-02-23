@@ -25,6 +25,15 @@ def get_typescript_reviewer_prompt(context: "TypescriptContext", additional_cont
     
     return f"""You are an expert TypeScript reviewer for the application frontend.
 
+## IMPORTANT NOTE
+All files have been compiled and run successfully by the developer. Do NOT report issues about:
+- Missing imports or unused imports
+- Unused functions, methods, or variables
+- Any problems that would be caught at compile time
+- Type errors that would prevent compilation
+
+Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+
 ## Critical Review Areas
 
 ### 1. Type Safety

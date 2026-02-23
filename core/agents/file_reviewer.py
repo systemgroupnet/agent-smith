@@ -7,6 +7,7 @@ and filtering comments using the comment reviewer agent.
 
 import asyncio
 import json
+import time
 from typing import Optional, List
 from core.workflow.graph import review_workflow
 from core.workflow.state import create_initial_state
@@ -114,6 +115,7 @@ async def review_comments_with_agent(issues: list) -> list:
     
     from core.agents.comment_reviewer_agent import create_comment_reviewer_agent
     
+    start_time = time.time()
     print(f"  🤖 Running comment reviewer agent on {len(issues)} high-severity issues...")
     
     try:
@@ -134,7 +136,8 @@ async def review_comments_with_agent(issues: list) -> list:
         # Run the agent
         result = await agent.run(input_text)
         
-        print(f"  ✅ Agent selected {len(result.selected_issues)} critical issues")
+        elapsed_time = time.time() - start_time
+        print(f"  ✅ Agent selected {len(result.selected_issues)} critical issues (⏱️  {elapsed_time:.2f}s)")
         print(f"  📊 Filtered out {result.filtered_count} less critical issues")
         print(f"  💡 Reasoning: {result.reasoning}")
         
@@ -142,6 +145,7 @@ async def review_comments_with_agent(issues: list) -> list:
         return result.selected_issues
         
     except Exception as e:
-        print(f"  ⚠️  Error running comment reviewer agent: {e}")
+        elapsed_time = time.time() - start_time
+        print(f"  ⚠️  Error running comment reviewer agent after {elapsed_time:.2f}s: {e}")
         print(f"  ℹ️  Falling back to all {len(issues)} issues")
         return issues

@@ -5,16 +5,14 @@ An AI-powered code review system for the application. This project provides spec
 ## Features
 
 - **Multi-Type Code Reviewers**: Specialized agents for different file types:
-
   - **Service Reviewer**: Reviews Go service code with split architecture (semantic + business logic review)
   - **SQL Reviewer**: Reviews SQL migrations and schema changes
   - **Dataview Reviewer**: Reviews dataview implementation code
   - **Test Reviewer**: Reviews BDD/Gherkin test implementation code
   - **Pbook Reviewer**: Reviews error message files (Persian/English)
-  - **Starter Agent**: Classifies files and routes them to appropriate reviewers
+  - **Static File Classifier**: Classifies files based on name patterns and routes them to appropriate reviewers
 
 - **Intelligent Review**:
-
   - Technical code quality and Go best practices
   - Business logic and requirements validation
   - Database query optimization
@@ -205,6 +203,54 @@ These instructions will be injected into the system prompt under the "Additional
    # ... etc
    ```
 
+### LangSmith Configuration (Optional - for Observability)
+
+LangSmith provides powerful tracing and monitoring capabilities for your LangGraph workflows. It helps you debug, optimize, and understand how your code review agents are performing.
+
+1. **Sign up for LangSmith**:
+   - Go to [https://smith.langchain.com/](https://smith.langchain.com/)
+   - Create a free account
+   - Navigate to Settings → API Keys
+   - Create a new API key
+
+2. **Add LangSmith configuration to your `.env` file**:
+
+   ```env
+   # LangSmith Configuration
+   LANGCHAIN_TRACING_V2=true
+   LANGCHAIN_API_KEY=your_langsmith_api_key_here
+   LANGCHAIN_PROJECT=codereviewagent
+   ```
+
+3. **What you'll see in LangSmith**:
+   - **Full trace of each review**: See every step of the LangGraph workflow
+   - **Token usage**: Monitor costs per file review
+   - **Latency metrics**: Identify slow agents or bottlenecks
+   - **Agent decisions**: Debug why certain issues were flagged or filtered
+   - **Error tracking**: Catch and diagnose failures in production
+
+4. **Test your configuration**:
+
+   ```bash
+   python scripts/test_langsmith.py
+   ```
+
+   This will verify your LangSmith setup and optionally create a test trace.
+
+5. **Viewing traces**:
+   - Once configured, run a code review
+   - Visit [https://smith.langchain.com/](https://smith.langchain.com/)
+   - Navigate to your project (e.g., "codereviewagent")
+   - Click on any trace to see the full execution flow
+
+**Benefits**:
+- Debug complex multi-agent workflows
+- Optimize performance by identifying slow components
+- Track costs and token usage over time
+- Share traces with your team for collaboration
+
+**For detailed setup instructions**, see [docs/LANGSMITH_SETUP.md](docs/LANGSMITH_SETUP.md)
+
 ## Usage
 
 This project provides reviewer agents as Python modules. Import and use them in your workflow:
@@ -287,41 +333,45 @@ async def review_sql():
     return result.final_output
 ```
 
-### Example: Using Starter Agent for File Classification
+### Example: Using Static File Classifier
 
 ```python
-from agents.start.starter_agent import starter_agent
-from agents import Runner, RunConfig
+from core.utils.file_classifier import static_classifier
 
 async def classify_file():
-    result = await Runner.run(
-        starter_agent,
-        input=[{
-            "role": "user",
-            "content": [{
-                "type": "input_text",
-                "text": f"""
-                file_path: sales/service/internal/app/sales/invoice/invoice.go
-                content: [file content here]
-                diff: [git diff here]
-                merge_request_title: Add invoice feature GME-456
-                """
-            }]
-        }],
-        context=None,
-        run_config=RunConfig()
+    input_text = """
+file_path: sales/service/internal/app/sales/invoice/invoice.go
+content: [file content here]
+diff: [git diff here]
+merge_request_title: Add invoice feature GME-456
+target_branch: main
+source_branch: feature/invoice
+"""
+
+    classification = await static_classifier.run(
+        input_text,
+        file_path="sales/service/internal/app/sales/invoice/invoice.go"
     )
 
-    classification = result.final_output
     print(f"File type: {classification.file_type}")
     print(f"Module: {classification.module_name}")
     print(f"Package: {classification.package_name}")
 ```
 
+**Static Classification Rules:**
+
+- `*.sql` or `db.go` → SQL agent
+- `dataview.go` → Dataview agent
+- `*_test.go` or `ts.go` or `*_ts.go` → Test agent
+- `pbook.go` → Pbook agent
+- `*.ts` → TypeScript agent
+- `*.html` → HTML agent
+- `*.scss` or `*.css` → SCSS agent
+- `service.go`, `validation.go`, or other `.go` files → Service agent
+
 ### Available Reviewers
 
 1. **`service_reviewer`** - For Go service files
-
    - `semantic_reviewer` - Technical code quality only
    - `business_logic_reviewer` - Business requirements only
    - `run_combined_review()` - Combined review function
@@ -334,48 +384,57 @@ async def classify_file():
 
 5. **`pbook_reviewer`** - For error message files (pbook)
 
-6. **`starter_agent`** - For file classification and routing
+6. **Static File Classifier** - For file classification and routing (no LLM required)
 
 ## Project Structure
 
 ```
 codereviewagent/
-├── main.py                 # Main entry point for GitLab MR reviews
-├── service_reviewer.py    # Go service code reviewer
-├── sql_reviewer.py         # SQL migration reviewer
-├── dataview_reviewer.py    # Dataview code reviewer
-├── test_reviewer.py        # BDD/test code reviewer
-├── pbook_reviewer.py       # Error message file reviewer
-├── starter_agent.py        # File classification agent
-├── requirements.txt        # Python dependencies
-├── .env                    # Environment variables (not in git)
-├── .env.example            # Environment variable template
-└── README.md               # This file
+├── main.py                          # Main entry point for GitLab MR reviews
+├── core/
+│   ├── agents/                      # Specialized review agents
+│   │   ├── service_agents.py       # Go service code reviewer
+│   │   ├── sql_agent.py            # SQL migration reviewer
+│   │   ├── dataview_agent.py       # Dataview code reviewer
+│   │   ├── test_agent.py           # BDD/test code reviewer
+│   │   ├── pbook_agent.py          # Error message file reviewer
+│   │   ├── typescript_agent.py     # TypeScript reviewer
+│   │   ├── html_agent.py           # HTML reviewer
+│   │   └── scss_agent.py           # SCSS/CSS reviewer
+│   ├── utils/
+│   │   └── file_classifier.py      # Static file classification (no LLM)
+│   └── workflow/
+│       ├── graph.py                 # LangGraph workflow orchestration
+│       └── state.py                 # Workflow state management
+├── requirements.txt                 # Python dependencies
+├── .env                             # Environment variables (not in git)
+├── .env.example                     # Environment variable template
+└── README.md                        # This file
 ```
 
 ## Environment Variables
 
-| Variable                           | Required | Description                                            |
-| ---------------------------------- | -------- | ------------------------------------------------------ |
-| `OPENAI_API_KEY`                   | Yes      | OpenAI API key for AI-powered reviews                  |
-| `HTTP_PROXY`                       | No       | HTTP proxy URL (e.g., http://proxy.example.com:8080)   |
-| `HTTPS_PROXY`                      | No       | HTTPS proxy URL (e.g., http://proxy.example.com:8080)  |
-| `PROXY_USERNAME`                   | No       | Proxy authentication username (if required)            |
-| `PROXY_PASSWORD`                   | No       | Proxy authentication password (if required)            |
-| `GITLAB_TOKEN`                     | Yes\*    | GitLab personal access token (required for MR reviews) |
-| `JIRA_URL`                         | No       | Jira instance URL                                      |
-| `JIRA_PERSONAL_ACCESS_TOKEN`       | No       | Jira personal access token                             |
-| `CONFLUENCE_URL`                   | No       | Confluence instance URL                                |
-| `CONFLUENCE_PERSONAL_ACCESS_TOKEN` | No       | Confluence personal access token                       |
-| `MCP_ATLASSIAN_ENABLED`            | No       | Enable MCP Atlassian integration (true/false)          |
-| `MCP_ATLASSIAN_HOST`               | No       | MCP server host (default: localhost)                   |
-| `MCP_ATLASSIAN_PORT`               | No       | MCP server port (default: 3000)                        |
-| `MCP_ATLASSIAN_CONTAINER`          | No       | Docker container name (default: mcp-atlassian)         |
-| `MCP_GITLAB_ENABLED`               | No       | Enable MCP GitLab integration (default: true)          |
-| `MCP_GITLAB_HOST`                  | No       | GitLab MCP server host (default: localhost)            |
-| `MCP_GITLAB_CONTAINER`             | No       | GitLab MCP container name (default: mcp-gitlab)        |
-| `GITLAB_URL`                       | Yes\*    | GitLab instance URL                                    |
-| `GITLAB_TOKEN`                     | Yes\*    | GitLab personal access token (required for MR reviews) |
+| Variable                           | Required | Description                                                                                      |
+| ---------------------------------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `OPENAI_API_KEY`                   | Yes      | OpenAI API key for AI-powered reviews                                                            |
+| `HTTP_PROXY`                       | No       | HTTP proxy URL (e.g., http://proxy.example.com:8080)                                             |
+| `HTTPS_PROXY`                      | No       | HTTPS proxy URL (e.g., http://proxy.example.com:8080)                                            |
+| `PROXY_USERNAME`                   | No       | Proxy authentication username (if required)                                                      |
+| `PROXY_PASSWORD`                   | No       | Proxy authentication password (if required)                                                      |
+| `GITLAB_TOKEN`                     | Yes\*    | GitLab personal access token (required for MR reviews)                                           |
+| `JIRA_URL`                         | No       | Jira instance URL                                                                                |
+| `JIRA_PERSONAL_ACCESS_TOKEN`       | No       | Jira personal access token                                                                       |
+| `CONFLUENCE_URL`                   | No       | Confluence instance URL                                                                          |
+| `CONFLUENCE_PERSONAL_ACCESS_TOKEN` | No       | Confluence personal access token                                                                 |
+| `MCP_ATLASSIAN_ENABLED`            | No       | Enable MCP Atlassian integration (true/false)                                                    |
+| `MCP_ATLASSIAN_HOST`               | No       | MCP server host (default: localhost)                                                             |
+| `MCP_ATLASSIAN_PORT`               | No       | MCP server port (default: 3000)                                                                  |
+| `MCP_ATLASSIAN_CONTAINER`          | No       | Docker container name (default: mcp-atlassian)                                                   |
+| `MCP_GITLAB_ENABLED`               | No       | Enable MCP GitLab integration (default: true)                                                    |
+| `MCP_GITLAB_HOST`                  | No       | GitLab MCP server host (default: localhost)                                                      |
+| `MCP_GITLAB_CONTAINER`             | No       | GitLab MCP container name (default: mcp-gitlab)                                                  |
+| `GITLAB_URL`                       | Yes\*    | GitLab instance URL                                                                              |
+| `GITLAB_TOKEN`                     | Yes\*    | GitLab personal access token (required for MR reviews)                                           |
 | `REVIEW_EXCLUDE_PATTERNS`          | No       | Comma-separated glob patterns to exclude files from review (e.g., `*.md,docs/*,test/fixtures/*`) |
 
 \* Required when using `main.py --gitlab-mr` command
@@ -385,7 +444,7 @@ codereviewagent/
 This project is designed to be integrated into CI/CD pipelines or code review workflows. Example workflow:
 
 1. Trigger on merge request creation/update
-2. Use `starter_agent` to classify changed files
+2. Use static file classifier to classify changed files based on file name patterns
 3. Route files to appropriate reviewers based on classification
 4. Collect and format review results
 5. Post comments back to merge request
@@ -474,17 +533,17 @@ For issues or questions, please open an issue in the GitLab repository.
 ## Flow
 
 ```
-                                                                                                                       
-                                                       Gitlab MR                                                       
-                                                                                                                       
-                                                           │                                                           
-                                                           │                           ┌───────────┐                   
-                                                     ┌─────▼─────┐       Get MR Data   │           │                   
-┌───────────────────────────────────────────────────▷│   Main    │────────────────────▷│  GitLab   │                   
-│                                                    │           │◁────────────────────│  Server   │                   
-│                                                    └─────┬─────┘                     │           │                   
-│                                                          │                           └───────────┘                   
-│                                                          │                                                           
+
+                                                       Gitlab MR
+
+                                                           │
+                                                           │                           ┌───────────┐
+                                                     ┌─────▼─────┐       Get MR Data   │           │
+┌───────────────────────────────────────────────────▷│   Main    │────────────────────▷│  GitLab   │
+│                                                    │           │◁────────────────────│  Server   │
+│                                                    └─────┬─────┘                     │           │
+│                                                          │                           └───────────┘
+│                                                          │
 │   ┌──────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┐
 │   │               Reviewer                         ┌─────▼──────┐                                                   │
 │   │               Langchain                        │ Classifier │                                                   │
@@ -506,5 +565,5 @@ For issues or questions, please open an issue in the GitLab repository.
 │   │                                           │ Comment Review Agent  │                                             │
 │   │                                           └───────────┬───────────┘                                             │
 │   └───────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────┘
-└───────────────────────────────────────────────────────────┘                                                          
+└───────────────────────────────────────────────────────────┘
 ```

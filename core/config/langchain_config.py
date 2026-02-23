@@ -56,8 +56,14 @@ def get_llm_model(
     # Get OpenRouter base URL (default to standard OpenRouter endpoint)
     base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     
-    # Get model name from environment or use provided default
-    model = os.getenv("DEFAULT_LLM_MODEL", model_name)
+    # Use provided model_name, or fall back to DEFAULT_LLM_MODEL only if model_name is the default
+    # This allows explicit model selections to work while still respecting DEFAULT_LLM_MODEL
+    if model_name == "gpt-4o-mini":
+        # Only use DEFAULT_LLM_MODEL if the caller is using the default model_name
+        model = os.getenv("DEFAULT_LLM_MODEL", model_name)
+    else:
+        # Use the explicitly provided model_name
+        model = model_name
     
     # Convert model name to OpenRouter format if needed
     # OpenRouter uses format: "provider/model-name"
@@ -140,6 +146,8 @@ MODEL_NAME_MAPPING = {
     "gpt-4o": "openai/gpt-4o",
     "o1-mini": "openai/o1-mini",
     "o1-preview": "openai/o1-preview",
+    "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",  # Support shorthand for Claude Sonnet 4.5
+    "sonnet-4.5": "anthropic/claude-sonnet-4.5",  # Support even shorter shorthand
 }
 
 

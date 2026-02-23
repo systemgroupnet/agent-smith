@@ -20,8 +20,10 @@ from core.workflow.state import (
 )
 from dto.general import ReviewResponse
 
+# Import static classifier
+from core.utils.file_classifier import static_classifier
+
 # Import all agents
-from core.agents.starter_agent import starter_agent
 from core.agents.service_agents import (
     ServiceContext,
     run_combined_service_review,
@@ -41,7 +43,7 @@ from core.agents.scss_agent import ScssContext, run_scss_review
 
 async def classify_node(state: ReviewState) -> ReviewState:
     """
-    Classification node - runs starter agent to classify file type.
+    Classification node - uses static file classifier to classify file type.
     
     Args:
         state: Current workflow state
@@ -50,12 +52,12 @@ async def classify_node(state: ReviewState) -> ReviewState:
         Updated state with classification
     """
     print("\n" + "="*60)
-    print("🔍 Step 1: File Classification")
+    print("🔍 Step 1: Static File Classification")
     print("="*60)
     
     try:
-        # Run starter agent with file_path for extension-based classification
-        result = await starter_agent.run(
+        # Run static classifier with file_path
+        result = await static_classifier.run(
             state["input_text"], 
             file_path=state.get("file_path")
         )

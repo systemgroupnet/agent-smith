@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -29,9 +30,94 @@ from core.utils.gitlab_helpers import (
     get_file_content,
     post_gitlab_comment,
 )
-from core.utils.file_reviewer import review_file_with_workflow, review_comments_with_agent
+from core.agents.file_reviewer import review_file_with_workflow, review_comments_with_agent
 from core.utils.comment_formatter import format_single_issue, extract_high_severity_issues
 
+
+async def process_single_file(
+    change: dict,
+    exclusion_patterns: list,
+    gitlab_url: str,
+    project_path: str,
+    source_branch: str,
+    gitlab_token: str,
+    mr_title: str,
+    target_branch: str
+) -> tuple:
+    """
+    Process a single file for review.
+    
+    Args:
+        change: GitLab change object containing file information
+        exclusion_patterns: List of file patterns to exclude
+        gitlab_url: GitLab instance URL
+        project_path: Project path in GitLab
+        source_branch: Source branch name
+        gitlab_token: GitLab API token
+        mr_title: Merge request title
+        target_branch: Target branch name
+    
+    Returns:
+        Tuple of (file_path, issues) or None if file should be skipped
+    """
+    file_path = None
+    try:
+        file_path = change.get("new_path") or change.get("old_path")
+        if not file_path:
+            return None
+        
+        # Skip deleted files
+        if change.get("deleted_file", False):
+            print(f"⏭️  Skipping deleted file: {file_path}")
+            return None
+        
+        # Skip excluded files based on patterns
+        if should_exclude_file(file_path, exclusion_patterns):
+            print(f"⏭️  Skipping excluded file: {file_path}")
+            return None
+        
+        file_start_time = time.time()
+        
+        print(f"\n{'=' * 60}")
+        print(f"📝 Processing: {file_path}")
+        print(f"{'=' * 60}")
+        
+        # Get file content
+        file_content = await get_file_content(gitlab_url, project_path, file_path, source_branch, gitlab_token)
+        if not file_content:
+            print(f"⚠️  Could not fetch content for {file_path}, skipping...")
+            return None
+        
+        # Get diff
+        diff = change.get("diff", "")
+        
+        # Review file using LangGraph workflow
+        print(f"🔍 Reviewing file...")
+        issues = await review_file_with_workflow(
+            file_path=file_path,
+            content=file_content,
+            diff=diff,
+            merge_request_title=mr_title,
+            target_branch=target_branch,
+            source_branch=source_branch,
+            gitlab_token=gitlab_token,
+            gitlab_url=gitlab_url,
+            project_path=project_path
+        )
+        
+        if issues is None:
+            print(f"⚠️  Could not review {file_path}, skipping...")
+            return None
+        
+        file_elapsed_time = time.time() - file_start_time
+        print(f"✅ Found {len(issues)} issue(s) (⏱️  Total file processing: {file_elapsed_time:.2f}s)")
+        
+        return (file_path, issues)
+    
+    except Exception as e:
+        file_info = file_path if file_path else "unknown file"
+        print(f"❌ Error processing file {file_info}: {e}")
+        return None
 
 
 async def process_mr(mr_url: str):
@@ -101,59 +187,53 @@ async def process_mr(mr_url: str):
     if exclusion_patterns:
         print(f"🚫 Exclusion patterns: {', '.join(exclusion_patterns)}\n")
     
-    # Process each file
+    # Process files concurrently in batches of 5
     all_comments = []
+    batch_size = int(os.getenv("FILE_BATCH_SIZE", "5"))
+    total_batches = (len(changes) + batch_size - 1) // batch_size
     
-    for change in changes:
-        file_path = change.get("new_path") or change.get("old_path")
-        if not file_path:
-            continue
-        
-        # Skip deleted files
-        if change.get("deleted_file", False):
-            print(f"⏭️  Skipping deleted file: {file_path}")
-            continue
-        
-        # Skip excluded files based on patterns
-        if should_exclude_file(file_path, exclusion_patterns):
-            print(f"⏭️  Skipping excluded file: {file_path}")
-            continue
+    print(f"🔄 Processing {len(changes)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently\n")
+    
+    for batch_num in range(total_batches):
+        start_idx = batch_num * batch_size
+        end_idx = min(start_idx + batch_size, len(changes))
+        batch = changes[start_idx:end_idx]
         
         print(f"\n{'=' * 60}")
-        print(f"📝 Processing: {file_path}")
+        print(f"📦 Processing batch {batch_num + 1}/{total_batches} ({len(batch)} file(s))")
         print(f"{'=' * 60}")
         
-        # Get file content
-        file_content = await get_file_content(gitlab_url, project_path, file_path, source_branch, gitlab_token)
-        if not file_content:
-            print(f"⚠️  Could not fetch content for {file_path}, skipping...")
-            continue
+        # Create tasks for concurrent processing
+        tasks = [
+            process_single_file(
+                change=change,
+                exclusion_patterns=exclusion_patterns,
+                gitlab_url=gitlab_url,
+                project_path=project_path,
+                source_branch=source_branch,
+                gitlab_token=gitlab_token,
+                mr_title=mr_title,
+                target_branch=target_branch
+            )
+            for change in batch
+        ]
         
-        # Get diff
-        diff = change.get("diff", "")
+        # Process batch concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Review file using LangGraph workflow
-        print(f"🔍 Reviewing file...")
-        issues = await review_file_with_workflow(
-            file_path=file_path,
-            content=file_content,
-            diff=diff,
-            merge_request_title=mr_title,
-            target_branch=target_branch,
-            source_branch=source_branch,
-            gitlab_token=gitlab_token,
-            gitlab_url=gitlab_url,
-            project_path=project_path
-        )
+        # Aggregate results
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"❌ Exception during file processing: {result}")
+                continue
+            if result is not None:
+                all_comments.append(result)
         
-        if issues is None:
-            print(f"⚠️  Could not review {file_path}, skipping...")
-            continue
-        
-        print(f"✅ Found {len(issues)} issue(s)")
-        
-        # Store issues with file path for later posting
-        all_comments.append((file_path, issues))
+        print(f"\n✅ Batch {batch_num + 1}/{total_batches} completed")
+    
+    print(f"\n{'=' * 60}")
+    print(f"✅ All batches completed: {len(all_comments)} file(s) reviewed successfully")
+    print(f"{'=' * 60}")
     
     # Filter high-severity issues using comment reviewer agent
     print(f"\n{'=' * 60}")

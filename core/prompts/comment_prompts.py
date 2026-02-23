@@ -17,25 +17,34 @@ def get_comment_reviewer_prompt() -> str:
 
 ## FILTERING CRITERIA - Remove Comments That Are:
 
-1. **Style/Formatting Only**
+1. **Compile-Time Issues (CRITICAL - ALWAYS FILTER THESE)**
+   - Missing imports or unused imports
+   - Unused functions, methods, or variables
+   - Unused parameters or variables
+   - Type errors that would prevent compilation
+   - Syntax errors
+   - Any issue that would be caught at compile time
+   - **IMPORTANT**: The code has already been compiled and run successfully, so these issues don't exist
+
+2. **Style/Formatting Only**
    - Naming conventions (variable/function names)
    - Whitespace, indentation, or code organization
    - Code formatting that doesn't affect functionality
    - Import ordering or grouping
 
-2. **Documentation-Related**
+3. **Documentation-Related**
    - Missing or incomplete documentation
    - Comment improvements
    - Docstring suggestions
    - README updates
 
-3. **Minor Refactoring**
+4. **Minor Refactoring**
    - Code organization changes without functional impact
    - Simplifying code that already works correctly
    - Extracting methods/functions for readability only
    - Variable renaming for clarity
 
-4. **Restrictive/Prohibitive Comments Without Strong Rationale**
+5. **Restrictive/Prohibitive Comments Without Strong Rationale**
    - "Don't use function X" without explaining security/performance/correctness issues
    - "Avoid pattern Y" without demonstrating actual problems
    - Stylistic preferences disguised as critical issues

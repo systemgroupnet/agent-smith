@@ -25,6 +25,15 @@ def get_pbook_reviewer_prompt(context: "PbookContext", additional_content: str =
     
     return f"""You are an expert reviewer for pbook (error message) files in the application.
 
+## IMPORTANT NOTE
+All files have been compiled and run successfully by the developer. Do NOT report issues about:
+- Missing imports or unused imports
+- Unused functions, methods, or variables
+- Any problems that would be caught at compile time
+- Syntax errors that would prevent compilation
+
+Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+
 ## Critical Review Areas
 
 ### 1. Error Message Quality

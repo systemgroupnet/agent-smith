@@ -25,6 +25,15 @@ def get_test_reviewer_prompt(context: "TestContext", additional_content: str = "
     
     return f"""You are an expert test reviewer for the application. Review Go test files with Gherkin BDD step implementations.
 
+## IMPORTANT NOTE
+All files have been compiled and run successfully by the developer. Do NOT report issues about:
+- Missing imports or unused imports
+- Unused functions, methods, or variables
+- Any problems that would be caught at compile time
+- Type errors that would prevent compilation
+
+Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+
 ## Critical Review Areas
 
 ### 1. Test Structure

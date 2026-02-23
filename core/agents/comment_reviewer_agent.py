@@ -26,7 +26,7 @@ class CommentReviewerAgent(BaseReviewAgent[CommentReviewResponse]):
     
     def __init__(
         self,
-        model_name: str = "gpt-4o",
+        model_name: str = "anthropic/claude-sonnet-4.5",
         temperature: float = 0.0,
     ):
         """
@@ -53,7 +53,7 @@ class CommentReviewerAgent(BaseReviewAgent[CommentReviewResponse]):
 
 
 def create_comment_reviewer_agent(
-    model_name: str = "gpt-4o",
+    model_name: str = "anthropic/claude-sonnet-4.5",
     temperature: float = 0.0,
 ) -> CommentReviewerAgent:
     """

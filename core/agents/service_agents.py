@@ -11,6 +11,7 @@ as needed during the review process. The LLM chooses which tools to use.
 
 import asyncio
 import os
+import time
 from typing import Optional
 from pydantic import BaseModel
 
@@ -91,6 +92,7 @@ async def run_semantic_review(context: ServiceContext) -> ReviewResponse:
     Returns:
         ReviewResponse with identified issues
     """
+    start_time = time.time()
     print(f"  🔍 Running semantic code review...")
     
     try:
@@ -121,11 +123,13 @@ async def run_semantic_review(context: ServiceContext) -> ReviewResponse:
         # Run agent
         result = await agent.run(input_text)
         
-        print(f"  ✅ Semantic review complete: {len(result.issues)} issues found")
+        elapsed_time = time.time() - start_time
+        print(f"  ✅ Semantic review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
         
     except Exception as e:
-        print(f"  ❌ Semantic review failed: {e}")
+        elapsed_time = time.time() - start_time
+        print(f"  ❌ Semantic review failed after {elapsed_time:.2f}s: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
         # Return empty response on error
@@ -145,6 +149,7 @@ async def run_business_logic_review(context: ServiceContext) -> ReviewResponse:
     Returns:
         ReviewResponse with identified issues
     """
+    start_time = time.time()
     print(f"  🔍 Running business logic review...")
     
     try:
@@ -175,11 +180,13 @@ async def run_business_logic_review(context: ServiceContext) -> ReviewResponse:
         # Run agent
         result = await agent.run(input_text)
         
-        print(f"  ✅ Business logic review complete: {len(result.issues)} issues found")
+        elapsed_time = time.time() - start_time
+        print(f"  ✅ Business logic review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
         
     except Exception as e:
-        print(f"  ❌ Business logic review failed: {e}")
+        elapsed_time = time.time() - start_time
+        print(f"  ❌ Business logic review failed after {elapsed_time:.2f}s: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
         # Return empty response on error
