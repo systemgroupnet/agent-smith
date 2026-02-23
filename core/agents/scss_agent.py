@@ -5,6 +5,7 @@ This module provides SCSS review agent with MCP tool integration for fetching
 external data (GitLab, Jira, Confluence) as needed during the review process.
 """
 
+import time
 from typing import Optional
 from pydantic import BaseModel
 
@@ -56,6 +57,7 @@ async def run_scss_review(context: ScssContext) -> ReviewResponse:
     Returns:
         ReviewResponse with identified issues
     """
+    start_time = time.time()
     print(f"  🔍 Running SCSS review...")
     
     try:
@@ -86,11 +88,13 @@ async def run_scss_review(context: ScssContext) -> ReviewResponse:
         # Run agent
         result = await agent.run(input_text)
         
-        print(f"  ✅ SCSS review complete: {len(result.issues)} issues found")
+        elapsed_time = time.time() - start_time
+        print(f"  ✅ SCSS review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
         
     except Exception as e:
-        print(f"  ❌ SCSS review failed: {e}")
+        elapsed_time = time.time() - start_time
+        print(f"  ❌ SCSS review failed after {elapsed_time:.2f}s: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
         # Return empty response on error

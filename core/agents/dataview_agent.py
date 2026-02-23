@@ -5,6 +5,7 @@ This module provides dataview review agent with MCP tool integration for fetchin
 external data (GitLab, Jira, Confluence) as needed during the review process.
 """
 
+import time
 from typing import Optional
 from pydantic import BaseModel
 
@@ -58,6 +59,7 @@ async def run_dataview_review(context: DataviewContext) -> ReviewResponse:
     Returns:
         ReviewResponse with identified issues
     """
+    start_time = time.time()
     print(f"  🔍 Running dataview review...")
     
     try:
@@ -88,11 +90,13 @@ async def run_dataview_review(context: DataviewContext) -> ReviewResponse:
         # Run agent
         result = await agent.run(input_text)
         
-        print(f"  ✅ Dataview review complete: {len(result.issues)} issues found")
+        elapsed_time = time.time() - start_time
+        print(f"  ✅ Dataview review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
         
     except Exception as e:
-        print(f"  ❌ Dataview review failed: {e}")
+        elapsed_time = time.time() - start_time
+        print(f"  ❌ Dataview review failed after {elapsed_time:.2f}s: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
         # Return empty response on error

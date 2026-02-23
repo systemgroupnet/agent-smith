@@ -5,6 +5,7 @@ This module provides the base class for all reviewer agents with common function
 including structured output parsing, error handling, and retry logic.
 """
 
+import time
 from abc import ABC, abstractmethod
 from typing import Optional, Type, TypeVar, Generic
 from pydantic import BaseModel
@@ -100,6 +101,9 @@ class BaseReviewAgent(ABC, Generic[T]):
         Raises:
             Exception: If agent execution fails after retries
         """
+        start_time = time.time()
+        agent_name = self.__class__.__name__
+        
         try:
             # Prepare input
             input_data = {"input": input_text}
@@ -108,10 +112,15 @@ class BaseReviewAgent(ABC, Generic[T]):
             
             # Invoke chain
             result = await self.chain.ainvoke(input_data)
+            
+            elapsed_time = time.time() - start_time
+            print(f"⏱️  {agent_name} completed in {elapsed_time:.2f}s")
+            
             return result
             
         except Exception as e:
-            print(f"❌ Error in {self.__class__.__name__}: {e}")
+            elapsed_time = time.time() - start_time
+            print(f"❌ Error in {agent_name} after {elapsed_time:.2f}s: {e}")
             raise
     
     def run_sync(self, input_text: str, context: Optional[dict] = None) -> T:

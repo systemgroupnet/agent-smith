@@ -10,6 +10,7 @@ For other files, it delegates to the LLM-based starter agent.
 
 import os
 import re
+import time
 from typing import Optional
 
 from core.agents.base_agent import StructuredOutputAgent
@@ -175,15 +176,22 @@ class StarterAgentWrapper:
         Returns:
             StarterResponse with classification results
         """
+        start_time = time.time()
+        
         # Extract file_path from input_text if not provided
         if not file_path:
             file_path = FileClassifier.extract_field_from_input(input_text, 'file_path')
         
         if not file_path:
             # No file path available, use LLM classification
-            return await _starter_agent.run(input_text)
+            result = await _starter_agent.run(input_text)
+        else:
+            result = await FileClassifier.classify(input_text, file_path)
         
-        return await FileClassifier.classify(input_text, file_path)
+        elapsed_time = time.time() - start_time
+        print(f"⏱️  File classification completed in {elapsed_time:.2f}s")
+        
+        return result
 
 
 # Export the wrapper as starter_agent
