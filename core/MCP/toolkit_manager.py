@@ -39,6 +39,18 @@ class MCPToolkitManager:
     access all available MCP tools.
     """
     
+    # Define allowed tools for each MCP server
+    ALLOWED_GITLAB_TOOLS = {
+        "get_file_contents",
+        "get_repository_tree",
+    }
+    
+    ALLOWED_ATLASSIAN_TOOLS = {
+        "jira_get_issue",
+        "confluence_get_page",
+        "jira_search",
+    }
+    
     def __init__(self):
         """Initialize the toolkit manager."""
         self._gitlab_toolkit: Optional[MCPToolkit] = None
@@ -169,11 +181,12 @@ class MCPToolkitManager:
             print(f"  🔄 [GitLab MCP] Initializing toolkit...")
             await self._gitlab_toolkit.initialize()
             
-            tools = self._gitlab_toolkit.get_tools()
-            print(f"  ✅ [GitLab MCP] Initialized with {len(tools)} tool(s)")
+            all_tools = self._gitlab_toolkit.get_tools()
+            filtered_tools = [t for t in all_tools if t.name in self.ALLOWED_GITLAB_TOOLS]
+            print(f"  ✅ [GitLab MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s) (filtered)")
             
-            # Print available tools
-            for tool in tools:
+            # Print available tools (filtered)
+            for tool in filtered_tools:
                 print(f"     - {tool.name}: {tool.description[:80]}...")
                 
         except asyncio.CancelledError as e:
@@ -223,11 +236,12 @@ class MCPToolkitManager:
             print(f"  🔄 [Atlassian MCP] Initializing toolkit...")
             await self._atlassian_toolkit.initialize()
             
-            tools = self._atlassian_toolkit.get_tools()
-            print(f"  ✅ [Atlassian MCP] Initialized with {len(tools)} tool(s)")
+            all_tools = self._atlassian_toolkit.get_tools()
+            filtered_tools = [t for t in all_tools if t.name in self.ALLOWED_ATLASSIAN_TOOLS]
+            print(f"  ✅ [Atlassian MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s) (filtered)")
             
-            # Print available tools
-            for tool in tools:
+            # Print available tools (filtered)
+            for tool in filtered_tools:
                 print(f"     - {tool.name}: {tool.description[:80]}...")
                 
         except asyncio.CancelledError as e:
@@ -287,7 +301,7 @@ class MCPToolkitManager:
     
     def get_gitlab_tools(self) -> List[BaseTool]:
         """
-        Get GitLab MCP tools.
+        Get GitLab MCP tools (filtered to allowed tools only).
         
         Returns:
             List of GitLab MCP tools or empty list if not initialized
@@ -296,14 +310,20 @@ class MCPToolkitManager:
             return []
         
         try:
-            return self._gitlab_toolkit.get_tools()
+            all_tools = self._gitlab_toolkit.get_tools()
+            # Filter to only allowed tools
+            filtered_tools = [
+                tool for tool in all_tools 
+                if tool.name in self.ALLOWED_GITLAB_TOOLS
+            ]
+            return filtered_tools
         except Exception as e:
             print(f"  ⚠️  [GitLab MCP] Error getting tools: {e}")
             return []
     
     def get_atlassian_tools(self) -> List[BaseTool]:
         """
-        Get Atlassian MCP tools.
+        Get Atlassian MCP tools (filtered to allowed tools only).
         
         Returns:
             List of Atlassian MCP tools or empty list if not initialized
@@ -312,7 +332,13 @@ class MCPToolkitManager:
             return []
         
         try:
-            return self._atlassian_toolkit.get_tools()
+            all_tools = self._atlassian_toolkit.get_tools()
+            # Filter to only allowed tools
+            filtered_tools = [
+                tool for tool in all_tools 
+                if tool.name in self.ALLOWED_ATLASSIAN_TOOLS
+            ]
+            return filtered_tools
         except Exception as e:
             print(f"  ⚠️  [Atlassian MCP] Error getting tools: {e}")
             return []
