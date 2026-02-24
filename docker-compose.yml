@@ -7,7 +7,7 @@ services:
       - .env.mcp.atlassian
     networks:
       - codereview-network
-    command: ["--transport", "streamable-http", "--port", "9000", "uv"]
+    command: ["--transport", "streamable-http", "--port", "9000"]
     ports:
       - "3011:9000"
 
