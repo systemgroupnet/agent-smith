@@ -86,24 +86,12 @@ class MCPToolkitManager:
         return "streamable-http"  # default to streamable-http
     
     def _get_gitlab_url(self) -> str:
-        """Get GitLab MCP server endpoint URL."""
-        mcp_host = os.getenv("MCP_GITLAB_HOST", "mcp-gitlab")
-        mcp_port = os.getenv("MCP_GITLAB_PORT", "3002")
-        transport = self._get_gitlab_transport()
-        
-        # SSE uses /sse endpoint, streamable-http uses /mcp endpoint
-        endpoint = "/sse" if transport == "sse" else "/mcp"
-        return f"http://{mcp_host}:{mcp_port}{endpoint}"
+        """Get GitLab MCP server URL (no endpoint appended)."""
+        return os.getenv("MCP_GITLAB_URL", "http://mcp-gitlab:3002").rstrip('/')
     
     def _get_atlassian_url(self) -> str:
-        """Get Atlassian MCP server endpoint URL."""
-        mcp_host = os.getenv("MCP_ATLASSIAN_HOST", "mcp-atlassian")
-        mcp_port = os.getenv("MCP_ATLASSIAN_PORT", "9000")
-        transport = self._get_atlassian_transport()
-        
-        # SSE uses /sse endpoint, streamable-http uses /mcp endpoint
-        endpoint = "/sse" if transport == "sse" else "/mcp"
-        return f"http://{mcp_host}:{mcp_port}{endpoint}"
+        """Get Atlassian MCP server URL (no endpoint appended)."""
+        return os.getenv("MCP_ATLASSIAN_URL", "http://mcp-atlassian:9000").rstrip('/')
     
     async def initialize(self) -> None:
         """
