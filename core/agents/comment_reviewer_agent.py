@@ -26,14 +26,14 @@ class CommentReviewerAgent(BaseReviewAgent[CommentReviewResponse]):
     
     def __init__(
         self,
-        model_name: str = "anthropic/claude-sonnet-4.5",
+        model_name: str = None,
         temperature: float = 0.0,
     ):
         """
         Initialize comment reviewer agent.
         
         Args:
-            model_name: Name of the LLM model to use
+            model_name: Name of the LLM model to use. Defaults to DEFAULT_LLM_MODEL env var.
             temperature: Model temperature (0.0 = deterministic)
         """
         super().__init__(
@@ -53,14 +53,14 @@ class CommentReviewerAgent(BaseReviewAgent[CommentReviewResponse]):
 
 
 def create_comment_reviewer_agent(
-    model_name: str = "anthropic/claude-sonnet-4.5",
+    model_name: str = None,
     temperature: float = 0.0,
 ) -> CommentReviewerAgent:
     """
     Factory function to create a comment reviewer agent.
     
     Args:
-        model_name: Name of the LLM model to use
+        model_name: Name of the LLM model to use. Defaults to DEFAULT_LLM_MODEL env var.
         temperature: Model temperature (0.0 = deterministic)
     
     Returns:

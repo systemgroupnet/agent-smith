@@ -14,8 +14,22 @@ from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 
 
+def get_default_model() -> str:
+    """
+    Return the default LLM model name from the environment.
+
+    Reads DEFAULT_LLM_MODEL at call time so that changes to the environment
+    variable after import are respected.
+
+    Environment Variables:
+        - DEFAULT_LLM_MODEL: Model identifier in OpenRouter format
+                             (default: deepseek/deepseek-v4-pro)
+    """
+    return os.getenv("DEFAULT_LLM_MODEL", "deepseek/deepseek-v4-pro")
+
+
 def get_llm_model(
-    model_name: str = "gpt-4o-mini",
+    model_name: Optional[str] = None,
     temperature: float = 0.0,
     streaming: bool = False,
     max_tokens: Optional[int] = None,
@@ -27,11 +41,11 @@ def get_llm_model(
     seamless switching between different LLM providers via OpenRouter.
     
     Args:
-        model_name: The model to use (default: gpt-4o-mini)
-                   Examples: 
+        model_name: The model to use. When None or omitted, falls back to
+                   DEFAULT_LLM_MODEL env var (default: deepseek/deepseek-v4-pro).
+                   Examples:
                    - "openai/gpt-4o-mini" (OpenRouter format)
-                   - "gpt-4o-mini" (will be converted to OpenRouter format)
-                   - "anthropic/claude-3-5-sonnet-20241022"
+                   - "deepseek/deepseek-v4-pro"
                    - "google/gemini-pro"
         temperature: Model temperature (0.0 = deterministic, 1.0 = creative)
         streaming: Enable streaming responses
@@ -43,7 +57,7 @@ def get_llm_model(
     Environment Variables:
         - OPENROUTER_API_KEY: OpenRouter API key (required)
         - OPENROUTER_BASE_URL: OpenRouter base URL (default: https://openrouter.ai/api/v1)
-        - DEFAULT_LLM_MODEL: Default model to use if not specified
+        - DEFAULT_LLM_MODEL: Fallback model when model_name is not provided
     """
     # Get OpenRouter API key
     api_key = os.getenv("OPENROUTER_API_KEY")
@@ -56,14 +70,8 @@ def get_llm_model(
     # Get OpenRouter base URL (default to standard OpenRouter endpoint)
     base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     
-    # Use provided model_name, or fall back to DEFAULT_LLM_MODEL only if model_name is the default
-    # This allows explicit model selections to work while still respecting DEFAULT_LLM_MODEL
-    if model_name == "gpt-4o-mini":
-        # Only use DEFAULT_LLM_MODEL if the caller is using the default model_name
-        model = os.getenv("DEFAULT_LLM_MODEL", model_name)
-    else:
-        # Use the explicitly provided model_name
-        model = model_name
+    # Resolve model: explicit argument takes priority, then env var
+    model = model_name or get_default_model()
     
     # Convert model name to OpenRouter format if needed
     # OpenRouter uses format: "provider/model-name"
@@ -146,8 +154,7 @@ MODEL_NAME_MAPPING = {
     "gpt-4o": "openai/gpt-4o",
     "o1-mini": "openai/o1-mini",
     "o1-preview": "openai/o1-preview",
-    "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",  # Support shorthand for Claude Sonnet 4.5
-    "sonnet-4.5": "anthropic/claude-sonnet-4.5",  # Support even shorter shorthand
+    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
 }
 
 

@@ -37,7 +37,6 @@ async def create_scss_reviewer_agent():
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
         tools=["gitlab", "atlassian"],  # GitLab + Atlassian (Jira/Confluence) tools
-        model_name="anthropic/claude-sonnet-4.5",
         temperature=0.3,
         max_iterations=10,
         verbose=False,

@@ -25,7 +25,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain.agents import create_openai_tools_agent, AgentExecutor
 from langchain_core.tools import BaseTool
 
-from core.config.langchain_config import get_model_for_agent
+from core.config.langchain_config import get_model_for_agent, get_default_model
 from core.MCP.toolkit_manager import get_mcp_toolkit_manager
 from dto.general import ReviewResponse
 
@@ -47,7 +47,7 @@ class ToolEnabledAgent:
         self,
         system_prompt: str,
         tools: List[BaseTool],
-        model_name: str = "openai/gpt-5-mini",
+        model_name: Optional[str] = None,
         temperature: float = 0.8,
         output_model: Optional[Type[T]] = None,
         max_iterations: int = 15,
@@ -59,15 +59,16 @@ class ToolEnabledAgent:
         Args:
             system_prompt: The system prompt for the agent
             tools: List of LangChain tools the agent can use
-            model_name: Name of the LLM model to use
+            model_name: Name of the LLM model to use. Defaults to DEFAULT_LLM_MODEL env var.
             temperature: Model temperature (0.0 = deterministic)
             output_model: Optional Pydantic model for structured output
             max_iterations: Maximum tool usage iterations
             verbose: Whether to print agent thoughts and tool calls
         """
+        resolved_model = model_name or get_default_model()
         self.system_prompt = system_prompt
         self.tools = tools
-        self.model_name = model_name
+        self.model_name = resolved_model
         self.temperature = temperature
         self.output_model = output_model
         self.max_iterations = max_iterations
@@ -75,7 +76,7 @@ class ToolEnabledAgent:
         
         # Initialize LLM
         self.llm = get_model_for_agent(
-            model_name,
+            resolved_model,
             temperature=temperature,
             streaming=False
         )
@@ -202,7 +203,7 @@ class ToolEnabledAgent:
 async def create_tool_agent(
     system_prompt: str,
     tools: Optional[Union[List[str], List[BaseTool]]] = None,
-    model_name: str = "gpt-4o",
+    model_name: Optional[str] = None,
     temperature: float = 0.0,
     output_model: Optional[Type[T]] = None,
     max_iterations: int = 15,
@@ -215,7 +216,7 @@ async def create_tool_agent(
         system_prompt: The system prompt for the agent
         tools: List of tool names ("gitlab", "atlassian") or BaseTool objects.
                If None, all available MCP tools are included.
-        model_name: Name of the LLM model to use
+        model_name: Name of the LLM model to use. Defaults to DEFAULT_LLM_MODEL env var.
         temperature: Model temperature
         output_model: Optional Pydantic model for structured output
         max_iterations: Maximum tool usage iterations
@@ -283,7 +284,7 @@ async def create_tool_agent(
 async def create_review_agent_with_tools(
     system_prompt: str,
     tools: Optional[Union[List[str], List[BaseTool]]] = None,
-    model_name: str = "openai/gpt-5-nano",
+    model_name: Optional[str] = None,
     temperature: float = 0.3,
     max_iterations: int = 15,
     verbose: bool = False,
@@ -297,7 +298,7 @@ async def create_review_agent_with_tools(
     Args:
         system_prompt: The system prompt for the agent
         tools: List of tool names or BaseTool objects
-        model_name: Name of the LLM model to use
+        model_name: Name of the LLM model to use. Defaults to DEFAULT_LLM_MODEL env var.
         temperature: Model temperature
         max_iterations: Maximum tool usage iterations
         verbose: Whether to print agent thoughts and tool calls

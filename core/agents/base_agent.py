@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from core.config.langchain_config import get_model_for_agent
+from core.config.langchain_config import get_model_for_agent, get_default_model
 from dto.general import ReviewResponse, ReviewIssue
 
 
@@ -32,7 +32,7 @@ class BaseReviewAgent(ABC, Generic[T]):
     
     def __init__(
         self,
-        model_name: str = "gpt-4o",
+        model_name: Optional[str] = None,
         temperature: float = 0.0,
         output_model: Type[T] = ReviewResponse,
     ):
@@ -40,17 +40,18 @@ class BaseReviewAgent(ABC, Generic[T]):
         Initialize base review agent.
         
         Args:
-            model_name: Name of the LLM model to use
+            model_name: Name of the LLM model to use. Defaults to DEFAULT_LLM_MODEL env var.
             temperature: Model temperature (0.0 = deterministic)
             output_model: Pydantic model for structured output
         """
-        self.model_name = model_name
+        resolved_model = model_name or get_default_model()
+        self.model_name = resolved_model
         self.temperature = temperature
         self.output_model = output_model
         
         # Initialize LLM
         self.llm = get_model_for_agent(
-            model_name,
+            resolved_model,
             temperature=temperature,
             streaming=False
         )
@@ -160,7 +161,7 @@ class StructuredOutputAgent(BaseReviewAgent[T]):
     def __init__(
         self,
         system_prompt: str,
-        model_name: str = "gpt-4o",
+        model_name: Optional[str] = None,
         temperature: float = 0.0,
         output_model: Type[T] = ReviewResponse,
     ):
@@ -169,7 +170,7 @@ class StructuredOutputAgent(BaseReviewAgent[T]):
         
         Args:
             system_prompt: The system prompt for this agent
-            model_name: Name of the LLM model to use
+            model_name: Name of the LLM model to use. Defaults to DEFAULT_LLM_MODEL env var.
             temperature: Model temperature
             output_model: Pydantic model for structured output
         """
@@ -183,7 +184,7 @@ class StructuredOutputAgent(BaseReviewAgent[T]):
 
 def create_review_agent(
     system_prompt: str,
-    model_name: str = "gpt-4o",
+    model_name: Optional[str] = None,
     temperature: float = 0.0,
 ) -> StructuredOutputAgent[ReviewResponse]:
     """
@@ -191,7 +192,7 @@ def create_review_agent(
     
     Args:
         system_prompt: The system prompt for the agent
-        model_name: Name of the LLM model to use
+        model_name: Name of the LLM model to use. Defaults to DEFAULT_LLM_MODEL env var.
         temperature: Model temperature
     
     Returns:

@@ -49,7 +49,6 @@ async def create_semantic_reviewer_agent():
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
         tools=["gitlab"],  # Only GitLab tools for semantic review
-        model_name="anthropic/claude-sonnet-4.5",
         temperature=0.3,
         max_iterations=10,
         verbose=False,
@@ -68,7 +67,6 @@ async def create_business_logic_reviewer_agent():
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
         tools=["gitlab", "atlassian"],  # GitLab + Atlassian (Jira/Confluence) tools
-        model_name="gpt-4o",
         temperature=0.5,
         max_iterations=15,
         verbose=False,
