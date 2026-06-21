@@ -41,7 +41,8 @@ class ReviewState(TypedDict):
     merge_request_title: Optional[str]
     target_branch: Optional[str]
     source_branch: Optional[str]
-    
+    mr_context: Optional[str]  # Shared MR-level context (description, changed files, Jira body)
+
     # Classification results
     file_type: Optional[str]
     classification: Optional[Dict[str, Any]]  # StarterResponse as dict
@@ -93,6 +94,7 @@ def create_initial_state(input_text: str, **kwargs) -> ReviewState:
         "merge_request_title": kwargs.get("merge_request_title"),
         "target_branch": kwargs.get("target_branch"),
         "source_branch": kwargs.get("source_branch"),
+        "mr_context": kwargs.get("mr_context"),
         "file_type": None,
         "classification": None,
         "jira_task_number": None,

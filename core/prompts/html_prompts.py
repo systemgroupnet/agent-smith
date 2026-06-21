@@ -7,6 +7,8 @@ Reviews HTML template files for the application frontend.
 
 from typing import TYPE_CHECKING
 
+from core.prompts.common import format_mr_context_section
+
 if TYPE_CHECKING:
     from core.agents.html_agent import HtmlContext
 
@@ -78,6 +80,9 @@ Use these tools if you need additional context to perform your review, but avoid
 
 === Additional Instructions ===
 {additional_content if additional_content else "No additional instructions defined for this agent."}
+
+=== Merge Request Context ===
+{format_mr_context_section(context.mr_context)}
 
 === Context Information ===
 {context_section}

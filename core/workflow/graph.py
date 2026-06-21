@@ -103,6 +103,7 @@ async def review_service_node(state: ReviewState) -> ReviewState:
             gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
+            mr_context=state.get("mr_context"),
         )
         
         # Run combined review (semantic + business logic in parallel)
@@ -137,6 +138,7 @@ async def review_sql_node(state: ReviewState) -> ReviewState:
             gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
+            mr_context=state.get("mr_context"),
         )
         
         result = await run_sql_review(context)
@@ -167,6 +169,7 @@ async def review_test_node(state: ReviewState) -> ReviewState:
             gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
+            mr_context=state.get("mr_context"),
         )
         
         result = await run_test_review(context)
@@ -197,6 +200,7 @@ async def review_pbook_node(state: ReviewState) -> ReviewState:
             gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
+            mr_context=state.get("mr_context"),
         )
         
         result = await run_pbook_review(context)
@@ -229,6 +233,7 @@ async def review_dataview_node(state: ReviewState) -> ReviewState:
             gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
+            mr_context=state.get("mr_context"),
         )
         
         result = await run_dataview_review(context)
@@ -259,6 +264,7 @@ async def review_typescript_node(state: ReviewState) -> ReviewState:
             gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
+            mr_context=state.get("mr_context"),
         )
         
         result = await run_typescript_review(context)
@@ -289,6 +295,7 @@ async def review_html_node(state: ReviewState) -> ReviewState:
             gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
+            mr_context=state.get("mr_context"),
         )
         
         result = await run_html_review(context)
@@ -319,6 +326,7 @@ async def review_scss_node(state: ReviewState) -> ReviewState:
             gitlab_url=state.get("gitlab_url"),
             source_branch=state.get("source_branch"),
             project_path=state.get("project_path"),
+            mr_context=state.get("mr_context"),
         )
         
         result = await run_scss_review(context)

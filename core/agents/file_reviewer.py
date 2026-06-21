@@ -22,7 +22,8 @@ async def review_file_with_workflow(
     source_branch: str,
     gitlab_token: Optional[str],
     gitlab_url: Optional[str],
-    project_path: Optional[str]
+    project_path: Optional[str],
+    mr_context: Optional[str] = None
 ) -> Optional[list]:
     """Review a file using LangGraph workflow."""
     
@@ -50,7 +51,8 @@ source_branch: {source_branch}
             source_branch=source_branch,
             gitlab_token=gitlab_token,
             gitlab_url=gitlab_url,
-            project_path=project_path
+            project_path=project_path,
+            mr_context=mr_context
         )
         
         # Run workflow

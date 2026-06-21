@@ -29,9 +29,14 @@ from core.utils.gitlab_helpers import (
     get_gitlab_mr_changes,
     get_file_content,
     post_gitlab_comment,
+    get_gitlab_compare,
+    get_review_marker,
+    upsert_review_marker,
 )
 from core.agents.file_reviewer import review_file_with_workflow, review_comments_with_agent
 from core.utils.comment_formatter import format_single_issue, extract_high_severity_issues
+from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
+from core.utils.file_classifier import StaticFileClassifier
 
 
 async def process_single_file(
@@ -42,7 +47,8 @@ async def process_single_file(
     source_branch: str,
     gitlab_token: str,
     mr_title: str,
-    target_branch: str
+    target_branch: str,
+    mr_context: str = ""
 ) -> tuple:
     """
     Process a single file for review.
@@ -102,9 +108,10 @@ async def process_single_file(
             source_branch=source_branch,
             gitlab_token=gitlab_token,
             gitlab_url=gitlab_url,
-            project_path=project_path
+            project_path=project_path,
+            mr_context=mr_context
         )
-        
+
         if issues is None:
             print(f"⚠️  Could not review {file_path}, skipping...")
             return None
@@ -171,15 +178,46 @@ async def process_mr(mr_url: str):
     print(f"📄 Title: {mr_title}")
     print(f"🌿 Source Branch: {source_branch}")
     print(f"🎯 Target Branch: {target_branch}\n")
-    
+
+    # Incremental review: read the marker note recording the last commit we reviewed
+    # so we only review commits added since then instead of the whole MR diff.
+    last_sha, marker_note_id = await get_review_marker(
+        gitlab_url, project_path, mr_id, gitlab_token
+    )
+    if last_sha and head_sha and last_sha == head_sha:
+        print(f"✅ No new commits since last review ({head_sha[:8]}). Nothing to do.")
+        return
+
     # Fetch changes
     print("📥 Fetching changed files...")
     changes = await get_gitlab_mr_changes(gitlab_url, project_path, mr_id, gitlab_token)
     if not changes:
         print("Error: Could not fetch MR changes.")
         sys.exit(1)
-    
-    print(f"Found {len(changes)} changed file(s)\n")
+
+    print(f"Found {len(changes)} changed file(s) in the full MR\n")
+
+    # Decide which files to actually review. On the first run (no marker) we review the
+    # full MR. On later runs we review only the incremental diff between the previously
+    # reviewed commit and the current head. The full `changes` list is still used below to
+    # build the shared MR context so reviewers keep full cross-file awareness.
+    changes_to_review = changes
+    if last_sha and head_sha and last_sha != head_sha:
+        print(f"🔁 Incremental review: comparing {last_sha[:8]}..{head_sha[:8]}")
+        incremental = await get_gitlab_compare(
+            gitlab_url, project_path, last_sha, head_sha, gitlab_token
+        )
+        if incremental is None:
+            print("⚠️  Compare failed (e.g. force-push/rebase); falling back to full MR review.")
+        elif len(incremental) == 0:
+            print("✅ No code changes between last reviewed commit and head; updating marker only.")
+            await upsert_review_marker(
+                gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id
+            )
+            return
+        else:
+            changes_to_review = incremental
+            print(f"Reviewing {len(changes_to_review)} changed file(s) from new commits\n")
     
     # Get exclusion patterns from environment variable
     exclusion_patterns_str = os.getenv("REVIEW_EXCLUDE_PATTERNS", "")
@@ -187,17 +225,50 @@ async def process_mr(mr_url: str):
     if exclusion_patterns:
         print(f"🚫 Exclusion patterns: {', '.join(exclusion_patterns)}\n")
     
+    # Build the shared MR context once — injected into every file's review so
+    # each reviewer knows what else changed in this MR (cuts false positives and
+    # surfaces cross-file breakage).
+    mr_description = mr_data.get("description", "") or ""
+    changed_paths = []
+    for change in changes:
+        path = change.get("new_path") or change.get("old_path")
+        if not path:
+            continue
+        if change.get("deleted_file", False):
+            change_type = "deleted"
+        elif change.get("new_file", False):
+            change_type = "added"
+        elif change.get("renamed_file", False):
+            change_type = "renamed"
+        else:
+            change_type = "modified"
+        changed_paths.append(f"{change_type}: {path}")
+
+    jira_key = StaticFileClassifier.extract_jira_task_number(f"{mr_title}\n{mr_description}")
+    jira_ticket_body = await fetch_jira_ticket_body(jira_key)
+    mr_context = build_mr_context(
+        mr_title=mr_title,
+        mr_description=mr_description,
+        changed_paths=changed_paths,
+        jira_ticket_body=jira_ticket_body,
+        jira_key="" if jira_key == "N/A" else jira_key,
+    )
+    print(
+        f"🧩 Built shared MR context: {len(changed_paths)} changed file(s), "
+        f"Jira: {jira_key if jira_key != 'N/A' else 'none'}\n"
+    )
+
     # Process files concurrently in batches of 5
     all_comments = []
     batch_size = int(os.getenv("FILE_BATCH_SIZE", "5"))
-    total_batches = (len(changes) + batch_size - 1) // batch_size
-    
-    print(f"🔄 Processing {len(changes)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently\n")
-    
+    total_batches = (len(changes_to_review) + batch_size - 1) // batch_size
+
+    print(f"🔄 Processing {len(changes_to_review)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently\n")
+
     for batch_num in range(total_batches):
         start_idx = batch_num * batch_size
-        end_idx = min(start_idx + batch_size, len(changes))
-        batch = changes[start_idx:end_idx]
+        end_idx = min(start_idx + batch_size, len(changes_to_review))
+        batch = changes_to_review[start_idx:end_idx]
         
         print(f"\n{'=' * 60}")
         print(f"📦 Processing batch {batch_num + 1}/{total_batches} ({len(batch)} file(s))")
@@ -213,7 +284,8 @@ async def process_mr(mr_url: str):
                 source_branch=source_branch,
                 gitlab_token=gitlab_token,
                 mr_title=mr_title,
-                target_branch=target_branch
+                target_branch=target_branch,
+                mr_context=mr_context
             )
             for change in batch
         ]
@@ -234,7 +306,16 @@ async def process_mr(mr_url: str):
     print(f"\n{'=' * 60}")
     print(f"✅ All batches completed: {len(all_comments)} file(s) reviewed successfully")
     print(f"{'=' * 60}")
-    
+
+    # Record that we've reviewed up to the current head, so the next pipeline run only
+    # reviews newer commits. Done here (after the review pass, before the early-returns
+    # below) so even runs that find no issues still advance the marker.
+    if head_sha:
+        if await upsert_review_marker(
+            gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id
+        ):
+            print(f"🔖 Review marker updated to {head_sha[:8]}")
+
     # Filter high-severity issues using comment reviewer agent
     print(f"\n{'=' * 60}")
     print(f"🔍 Filtering high-severity comments...")

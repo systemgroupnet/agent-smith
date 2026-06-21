@@ -5,9 +5,16 @@ This module provides utility functions for interacting with GitLab API
 using direct REST API calls, including the GitLab REST API client.
 """
 
-from typing import Optional, Dict, List
+import re
+from typing import Optional, Dict, List, Tuple
 from urllib.parse import quote
 import requests
+
+
+# Machine-readable token embedded in the review marker note on the MR. The
+# agent uses it to remember the last commit it reviewed so subsequent pipeline
+# runs only review the new commits instead of the whole MR diff.
+MARKER_TOKEN = "code-review-agent:last-reviewed-sha"
 
 
 __all__ = [
@@ -16,7 +23,11 @@ __all__ = [
     'get_gitlab_mr_info',
     'get_gitlab_mr_changes',
     'get_file_content',
-    'post_gitlab_comment'
+    'post_gitlab_comment',
+    'get_gitlab_compare',
+    'get_review_marker',
+    'upsert_review_marker',
+    'MARKER_TOKEN',
 ]
 
 
@@ -144,6 +155,88 @@ class GitLabAPIClient:
             print(f"  ❌ [GitLab API] Error creating note: {e}")
             return None
     
+    def update_merge_request_note(
+        self, project_path: str, mr_iid: str, note_id: int, body: str
+    ) -> Optional[Dict]:
+        """
+        Update an existing general note/comment on the merge request.
+
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+            note_id: ID of the note to update
+            body: New comment text (markdown supported)
+
+        Returns:
+            Updated note data or None if failed
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(
+                f"/projects/{project_id}/merge_requests/{mr_iid}/notes/{note_id}"
+            )
+
+            data = {"body": body}
+            response = requests.put(url, headers=self.headers, json=data, timeout=30)
+            response.raise_for_status()
+
+            return response.json()
+
+        except Exception as e:
+            print(f"  ❌ [GitLab API] Error updating note: {e}")
+            return None
+
+    def list_merge_request_notes(self, project_path: str, mr_iid: str) -> Optional[List[Dict]]:
+        """
+        List notes/comments on the merge request (most recent first).
+
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+
+        Returns:
+            List of note dictionaries or None if failed
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes")
+
+            params = {"per_page": 100, "sort": "desc", "order_by": "updated_at"}
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            response.raise_for_status()
+
+            return response.json()
+
+        except Exception as e:
+            print(f"  ❌ [GitLab API] Error listing notes: {e}")
+            return None
+
+    def compare_commits(self, project_path: str, from_sha: str, to_sha: str) -> Optional[Dict]:
+        """
+        Compare two commits/refs and return the diff between them.
+
+        Args:
+            project_path: Project path (e.g., "group/project")
+            from_sha: Base commit SHA (the previously reviewed commit)
+            to_sha: Target commit SHA (the current MR head)
+
+        Returns:
+            Compare result dictionary (with a "diffs" list) or None if failed
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/repository/compare")
+
+            params = {"from": from_sha, "to": to_sha, "unidiff": "true"}
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            response.raise_for_status()
+
+            return response.json()
+
+        except Exception as e:
+            print(f"  ❌ [GitLab API] Error comparing commits: {e}")
+            return None
+
     def create_merge_request_discussion(
         self,
         project_path: str,
@@ -306,4 +399,96 @@ async def post_gitlab_comment(
         return result is not None
     except Exception as e:
         print(f"  ❌ Failed to post comment: {e}")
+        return False
+
+
+async def get_gitlab_compare(
+    gitlab_url: str, project_path: str, from_sha: str, to_sha: str, token: str
+) -> Optional[list]:
+    """
+    Fetch the incremental diff between two commits via the GitLab compare API.
+
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        from_sha: Base commit SHA (the previously reviewed commit)
+        to_sha: Target commit SHA (the current MR head)
+        token: GitLab access token
+
+    Returns:
+        List of changed files with diffs (same shape as MR changes) or None if failed.
+    """
+    print(f"  🔍 [GitLab] Comparing {from_sha[:8]}..{to_sha[:8]} via REST API...")
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    result = api_client.compare_commits(project_path, from_sha, to_sha)
+    if result is None:
+        return None
+    return result.get("diffs", [])
+
+
+async def get_review_marker(
+    gitlab_url: str, project_path: str, mr_id: str, token: str
+) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Find the agent's review marker note on the MR and read the last-reviewed SHA.
+
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        mr_id: Merge request IID
+        token: GitLab access token
+
+    Returns:
+        Tuple of (last_reviewed_sha, note_id). Both are None when no marker exists.
+    """
+    print(f"  🔍 [GitLab] Looking up review marker note...")
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    notes = api_client.list_merge_request_notes(project_path, mr_id)
+    if not notes:
+        return None, None
+
+    pattern = re.compile(re.escape(MARKER_TOKEN) + r"=([0-9a-fA-F]+)")
+    for note in notes:
+        body = note.get("body", "") or ""
+        match = pattern.search(body)
+        if match:
+            return match.group(1), note.get("id")
+    return None, None
+
+
+async def upsert_review_marker(
+    gitlab_url: str,
+    project_path: str,
+    mr_id: str,
+    token: str,
+    sha: str,
+    note_id: Optional[int] = None,
+) -> bool:
+    """
+    Create or update the review marker note recording the last-reviewed SHA.
+
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        mr_id: Merge request IID
+        token: GitLab access token
+        sha: The commit SHA that was just reviewed (the current MR head)
+        note_id: Existing marker note id to update in place; None to create a new note.
+
+    Returns:
+        True if the marker was written successfully, False otherwise.
+    """
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    body = (
+        f"<!-- {MARKER_TOKEN}={sha} -->\n"
+        f"🤖 Code Review Agent reviewed up to commit `{sha[:8]}`."
+    )
+    try:
+        if note_id is not None:
+            result = api_client.update_merge_request_note(project_path, mr_id, note_id, body)
+        else:
+            result = api_client.create_merge_request_note(project_path, mr_id, body)
+        return result is not None
+    except Exception as e:
+        print(f"  ❌ Failed to write review marker: {e}")
         return False

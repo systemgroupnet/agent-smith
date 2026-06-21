@@ -8,6 +8,8 @@ This module contains system prompts for the service review agents:
 
 from typing import TYPE_CHECKING
 
+from core.prompts.common import format_mr_context_section
+
 if TYPE_CHECKING:
     from core.agents.service_agents import ServiceContext
 
@@ -34,6 +36,7 @@ All files have been compiled and run successfully by the developer. Do NOT repor
 - Unused functions, methods, or variables
 - Any problems that would be caught at compile time
 - Type errors that would prevent compilation
+- Symbols (functions, types, methods) that look undefined here but are defined in another file changed in this same MR — see the "Merge Request Context" section below; those exist, do NOT report them as undefined or missing
 
 Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
 
@@ -78,6 +81,9 @@ RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (
 === Additional Instructions ===
 {additional_content if additional_content else "No additional instructions defined for this agent."}
 
+=== Merge Request Context ===
+{format_mr_context_section(context.mr_context)}
+
 === Context Information ===
 {context_section}
 
@@ -116,6 +122,7 @@ All files have been compiled and run successfully by the developer. Do NOT repor
 - Unused functions, methods, or variables
 - Any problems that would be caught at compile time
 - Type errors that would prevent compilation
+- Symbols (functions, types, methods) that look undefined here but are defined in another file changed in this same MR — see the "Merge Request Context" section below; those exist, do NOT report them as undefined or missing
 
 Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
 
@@ -163,6 +170,9 @@ RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (
 
 === Additional Instructions ===
 {additional_content if additional_content else "No additional instructions defined for this agent."}
+
+=== Merge Request Context ===
+{format_mr_context_section(context.mr_context)}
 
 === Context Information ===
 {context_section}

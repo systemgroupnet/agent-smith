@@ -34,6 +34,7 @@ class ServiceContext(BaseModel):
     gitlab_url: Optional[str] = None
     source_branch: Optional[str] = None
     project_path: Optional[str] = None
+    mr_context: Optional[str] = None
 
 
 # =============================================================================

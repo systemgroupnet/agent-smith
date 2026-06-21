@@ -7,6 +7,8 @@ Reviews dataview registration and implementation files.
 
 from typing import TYPE_CHECKING
 
+from core.prompts.common import format_mr_context_section
+
 if TYPE_CHECKING:
     from core.agents.dataview_agent import DataviewContext
 
@@ -82,6 +84,9 @@ Use these tools if you need additional context to perform your review, especiall
 
 === Additional Instructions ===
 {additional_content if additional_content else "No additional instructions defined for this agent."}
+
+=== Merge Request Context ===
+{format_mr_context_section(context.mr_context)}
 
 === Context Information ===
 {context_section}
