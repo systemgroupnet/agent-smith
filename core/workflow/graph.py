@@ -23,6 +23,9 @@ from dto.general import ReviewResponse
 # Import static classifier
 from core.utils.file_classifier import static_classifier
 
+# Tracing helper: keep the inherited thread_id while naming each agent run
+from core.config.tracing import merge_thread_into_config
+
 # Import all agents
 from core.agents.service_agents import (
     ServiceContext,
@@ -75,7 +78,7 @@ async def classify_node(state: ReviewState) -> ReviewState:
         return state
 
 
-async def review_service_node(state: ReviewState) -> ReviewState:
+async def review_service_node(state: ReviewState, config: RunnableConfig) -> ReviewState:
     """
     Service review node - runs semantic and business logic reviewers in parallel.
     
@@ -107,7 +110,9 @@ async def review_service_node(state: ReviewState) -> ReviewState:
         )
         
         # Run combined review (semantic + business logic in parallel)
-        result = await run_combined_service_review(context)
+        result = await run_combined_service_review(
+            context, config=merge_thread_into_config(config, run_name="service_review")
+        )
         
         # Set output directly
         state = set_output(state, result)
@@ -121,7 +126,7 @@ async def review_service_node(state: ReviewState) -> ReviewState:
         return state
 
 
-async def review_sql_node(state: ReviewState) -> ReviewState:
+async def review_sql_node(state: ReviewState, config: RunnableConfig) -> ReviewState:
     """SQL review node."""
     print("\n" + "="*60)
     print("🔍 Step 2: SQL File Review")
@@ -141,7 +146,9 @@ async def review_sql_node(state: ReviewState) -> ReviewState:
             mr_context=state.get("mr_context"),
         )
         
-        result = await run_sql_review(context)
+        result = await run_sql_review(
+            context, config=merge_thread_into_config(config, run_name="sql_review")
+        )
         state = set_output(state, result)
         
         print(f"✅ SQL review complete: {len(result.issues)} issues")
@@ -152,7 +159,7 @@ async def review_sql_node(state: ReviewState) -> ReviewState:
         return state
 
 
-async def review_test_node(state: ReviewState) -> ReviewState:
+async def review_test_node(state: ReviewState, config: RunnableConfig) -> ReviewState:
     """Test review node."""
     print("\n" + "="*60)
     print("🔍 Step 2: Test File Review")
@@ -172,7 +179,9 @@ async def review_test_node(state: ReviewState) -> ReviewState:
             mr_context=state.get("mr_context"),
         )
         
-        result = await run_test_review(context)
+        result = await run_test_review(
+            context, config=merge_thread_into_config(config, run_name="test_review")
+        )
         state = set_output(state, result)
         
         print(f"✅ Test review complete: {len(result.issues)} issues")
@@ -183,7 +192,7 @@ async def review_test_node(state: ReviewState) -> ReviewState:
         return state
 
 
-async def review_pbook_node(state: ReviewState) -> ReviewState:
+async def review_pbook_node(state: ReviewState, config: RunnableConfig) -> ReviewState:
     """Pbook review node."""
     print("\n" + "="*60)
     print("🔍 Step 2: Pbook File Review")
@@ -203,7 +212,9 @@ async def review_pbook_node(state: ReviewState) -> ReviewState:
             mr_context=state.get("mr_context"),
         )
         
-        result = await run_pbook_review(context)
+        result = await run_pbook_review(
+            context, config=merge_thread_into_config(config, run_name="pbook_review")
+        )
         state = set_output(state, result)
         
         print(f"✅ Pbook review complete: {len(result.issues)} issues")
@@ -214,7 +225,7 @@ async def review_pbook_node(state: ReviewState) -> ReviewState:
         return state
 
 
-async def review_dataview_node(state: ReviewState) -> ReviewState:
+async def review_dataview_node(state: ReviewState, config: RunnableConfig) -> ReviewState:
     """Dataview review node."""
     print("\n" + "="*60)
     print("🔍 Step 2: Dataview File Review")
@@ -236,7 +247,9 @@ async def review_dataview_node(state: ReviewState) -> ReviewState:
             mr_context=state.get("mr_context"),
         )
         
-        result = await run_dataview_review(context)
+        result = await run_dataview_review(
+            context, config=merge_thread_into_config(config, run_name="dataview_review")
+        )
         state = set_output(state, result)
         
         print(f"✅ Dataview review complete: {len(result.issues)} issues")
@@ -247,7 +260,7 @@ async def review_dataview_node(state: ReviewState) -> ReviewState:
         return state
 
 
-async def review_typescript_node(state: ReviewState) -> ReviewState:
+async def review_typescript_node(state: ReviewState, config: RunnableConfig) -> ReviewState:
     """TypeScript review node."""
     print("\n" + "="*60)
     print("🔍 Step 2: TypeScript File Review")
@@ -267,7 +280,9 @@ async def review_typescript_node(state: ReviewState) -> ReviewState:
             mr_context=state.get("mr_context"),
         )
         
-        result = await run_typescript_review(context)
+        result = await run_typescript_review(
+            context, config=merge_thread_into_config(config, run_name="typescript_review")
+        )
         state = set_output(state, result)
         
         print(f"✅ TypeScript review complete: {len(result.issues)} issues")
@@ -278,7 +293,7 @@ async def review_typescript_node(state: ReviewState) -> ReviewState:
         return state
 
 
-async def review_html_node(state: ReviewState) -> ReviewState:
+async def review_html_node(state: ReviewState, config: RunnableConfig) -> ReviewState:
     """HTML review node."""
     print("\n" + "="*60)
     print("🔍 Step 2: HTML File Review")
@@ -298,7 +313,9 @@ async def review_html_node(state: ReviewState) -> ReviewState:
             mr_context=state.get("mr_context"),
         )
         
-        result = await run_html_review(context)
+        result = await run_html_review(
+            context, config=merge_thread_into_config(config, run_name="html_review")
+        )
         state = set_output(state, result)
         
         print(f"✅ HTML review complete: {len(result.issues)} issues")
@@ -309,7 +326,7 @@ async def review_html_node(state: ReviewState) -> ReviewState:
         return state
 
 
-async def review_scss_node(state: ReviewState) -> ReviewState:
+async def review_scss_node(state: ReviewState, config: RunnableConfig) -> ReviewState:
     """SCSS review node."""
     print("\n" + "="*60)
     print("🔍 Step 2: SCSS File Review")
@@ -329,7 +346,9 @@ async def review_scss_node(state: ReviewState) -> ReviewState:
             mr_context=state.get("mr_context"),
         )
         
-        result = await run_scss_review(context)
+        result = await run_scss_review(
+            context, config=merge_thread_into_config(config, run_name="scss_review")
+        )
         state = set_output(state, result)
         
         print(f"✅ SCSS review complete: {len(result.issues)} issues")

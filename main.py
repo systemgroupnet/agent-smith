@@ -37,6 +37,7 @@ from core.agents.file_reviewer import review_file_with_workflow, review_comments
 from core.utils.comment_formatter import format_single_issue, extract_high_severity_issues
 from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
+from core.config.tracing import build_thread_id, build_run_config
 
 
 async def process_single_file(
@@ -48,11 +49,14 @@ async def process_single_file(
     gitlab_token: str,
     mr_title: str,
     target_branch: str,
-    mr_context: str = ""
+    mr_context: str = "",
+    thread_id: str = None,
+    mr_id: str = None,
+    head_sha: str = None,
 ) -> tuple:
     """
     Process a single file for review.
-    
+
     Args:
         change: GitLab change object containing file information
         exclusion_patterns: List of file patterns to exclude
@@ -62,7 +66,10 @@ async def process_single_file(
         gitlab_token: GitLab API token
         mr_title: Merge request title
         target_branch: Target branch name
-    
+        thread_id: LangSmith thread id grouping all runs of this MR review
+        mr_id: Merge request IID (for trace metadata)
+        head_sha: Current head commit SHA (for trace metadata)
+
     Returns:
         Tuple of (file_path, issues) or None if file should be skipped
     """
@@ -97,6 +104,22 @@ async def process_single_file(
         # Get diff
         diff = change.get("diff", "")
         
+        # Build the per-file LangSmith run config so this file's trace (and all of its
+        # nested agent/LLM/tool runs) lands inside this MR's thread.
+        review_config = None
+        if thread_id:
+            review_config = build_run_config(
+                thread_id,
+                run_name=f"review:{file_path}",
+                extra_metadata={
+                    "file_path": file_path,
+                    "mr_id": mr_id,
+                    "project_path": project_path,
+                    "commit": head_sha,
+                },
+                tags=["code-review", "file-review"],
+            )
+
         # Review file using LangGraph workflow
         print(f"🔍 Reviewing file...")
         issues = await review_file_with_workflow(
@@ -109,7 +132,8 @@ async def process_single_file(
             gitlab_token=gitlab_token,
             gitlab_url=gitlab_url,
             project_path=project_path,
-            mr_context=mr_context
+            mr_context=mr_context,
+            config=review_config,
         )
 
         if issues is None:
@@ -178,6 +202,12 @@ async def process_mr(mr_url: str):
     print(f"📄 Title: {mr_title}")
     print(f"🌿 Source Branch: {source_branch}")
     print(f"🎯 Target Branch: {target_branch}\n")
+
+    # Build a per-MR LangSmith thread id so every run of this review (one trace per
+    # file, plus the comment-reviewer trace) is grouped into a single thread. Keying
+    # on the MR means incremental re-reviews append to the same thread.
+    thread_id = build_thread_id(project_path, mr_id)
+    print(f"🧵 LangSmith thread: {thread_id}\n")
 
     # Incremental review: read the marker note recording the last commit we reviewed
     # so we only review commits added since then instead of the whole MR diff.
@@ -285,7 +315,10 @@ async def process_mr(mr_url: str):
                 gitlab_token=gitlab_token,
                 mr_title=mr_title,
                 target_branch=target_branch,
-                mr_context=mr_context
+                mr_context=mr_context,
+                thread_id=thread_id,
+                mr_id=mr_id,
+                head_sha=head_sha,
             )
             for change in batch
         ]
@@ -327,7 +360,19 @@ async def process_mr(mr_url: str):
     
     # Apply comment reviewer agent if there are high-severity issues
     if all_high_severity_issues:
-        filtered_issues = await review_comments_with_agent(all_high_severity_issues)
+        comment_config = build_run_config(
+            thread_id,
+            run_name="comment_review",
+            extra_metadata={
+                "mr_id": mr_id,
+                "project_path": project_path,
+                "commit": head_sha,
+            },
+            tags=["code-review", "comment-review"],
+        )
+        filtered_issues = await review_comments_with_agent(
+            all_high_severity_issues, config=comment_config
+        )
     else:
         print(f"ℹ️  No high-severity issues to filter")
         return 

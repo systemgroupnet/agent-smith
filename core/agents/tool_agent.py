@@ -22,6 +22,7 @@ from typing import Optional, Type, TypeVar, List, Union
 from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.runnables import RunnableConfig
 from langchain.agents import create_openai_tools_agent, AgentExecutor
 from langchain_core.tools import BaseTool
 
@@ -123,20 +124,27 @@ class ToolEnabledAgent:
             return_intermediate_steps=False,
         )
     
-    async def run(self, input_text: str, context: Optional[dict] = None) -> Union[T, dict]:
+    async def run(
+        self,
+        input_text: str,
+        context: Optional[dict] = None,
+        config: Optional[RunnableConfig] = None,
+    ) -> Union[T, dict]:
         """
         Run the agent with given input.
-        
+
         The agent will automatically choose and use tools as needed to
         complete the task.
-        
+
         Args:
             input_text: Input text for the agent
             context: Optional context dictionary
-        
+            config: Optional LangSmith run config (carries thread metadata so the
+                    agent's nested LLM/tool runs stay in the MR thread)
+
         Returns:
             Structured output (if output_model specified) or dict
-        
+
         Raises:
             Exception: If agent execution fails
         """
@@ -145,9 +153,9 @@ class ToolEnabledAgent:
             input_data = {"input": input_text}
             if context:
                 input_data.update(context)
-            
+
             # Invoke agent
-            result = await self.agent_executor.ainvoke(input_data)
+            result = await self.agent_executor.ainvoke(input_data, config=config)
             
             # Extract output
             output = result.get("output", "")
@@ -260,6 +268,8 @@ async def create_tool_agent(
                     resolved_tools.extend(tools_by_category["gitlab"])
                 elif tool_name.lower() == "atlassian":
                     resolved_tools.extend(tools_by_category["atlassian"])
+                elif tool_name.lower() == "aiand":
+                    resolved_tools.extend(tools_by_category["aiand"])
                 else:
                     print(f"  ⚠️  Unknown tool category: {tool_name}")
         else:

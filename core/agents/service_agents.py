@@ -14,6 +14,7 @@ import os
 import time
 from typing import Optional
 from pydantic import BaseModel
+from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
@@ -49,7 +50,7 @@ async def create_semantic_reviewer_agent():
     """
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
-        tools=["gitlab"],  # Only GitLab tools for semantic review
+        tools=["gitlab", "aiand"],  # GitLab (changed files) + AIAND Source (old/unchanged files)
         temperature=0.3,
         max_iterations=10,
         verbose=False,
@@ -67,7 +68,7 @@ async def create_business_logic_reviewer_agent():
     """
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
-        tools=["gitlab", "atlassian"],  # GitLab + Atlassian (Jira/Confluence) tools
+        tools=["gitlab", "atlassian", "aiand"],  # GitLab + Atlassian (Jira/Confluence) + AIAND Source (code index)
         temperature=0.5,
         max_iterations=15,
         verbose=False,
@@ -78,7 +79,7 @@ async def create_business_logic_reviewer_agent():
 # Review Functions
 # =============================================================================
 
-async def run_semantic_review(context: ServiceContext) -> ReviewResponse:
+async def run_semantic_review(context: ServiceContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
     """
     Run semantic code review with MCP tools.
     
@@ -120,8 +121,8 @@ async def run_semantic_review(context: ServiceContext) -> ReviewResponse:
         input_text = get_semantic_reviewer_prompt(context, additional_content)
         
         # Run agent
-        result = await agent.run(input_text)
-        
+        result = await agent.run(input_text, config=config)
+
         elapsed_time = time.time() - start_time
         print(f"  ✅ Semantic review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
@@ -135,7 +136,7 @@ async def run_semantic_review(context: ServiceContext) -> ReviewResponse:
         return ReviewResponse(issues=[])
 
 
-async def run_business_logic_review(context: ServiceContext) -> ReviewResponse:
+async def run_business_logic_review(context: ServiceContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
     """
     Run business logic review with MCP tools.
     
@@ -177,8 +178,8 @@ async def run_business_logic_review(context: ServiceContext) -> ReviewResponse:
         input_text = get_business_logic_reviewer_prompt(context, additional_content)
         
         # Run agent
-        result = await agent.run(input_text)
-        
+        result = await agent.run(input_text, config=config)
+
         elapsed_time = time.time() - start_time
         print(f"  ✅ Business logic review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
@@ -192,7 +193,7 @@ async def run_business_logic_review(context: ServiceContext) -> ReviewResponse:
         return ReviewResponse(issues=[])
 
 
-async def run_combined_service_review(context: ServiceContext) -> ReviewResponse:
+async def run_combined_service_review(context: ServiceContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
     """
     Run both semantic and business logic reviews in parallel.
     
@@ -217,12 +218,12 @@ async def run_combined_service_review(context: ServiceContext) -> ReviewResponse
     
     try:
         # Always run semantic review
-        semantic_task = run_semantic_review(context)
-        
+        semantic_task = run_semantic_review(context, config=config)
+
         # Conditionally run business logic review
         if business_logic_enabled:
             print(f"  ℹ️  Business logic review enabled")
-            business_task = run_business_logic_review(context)
+            business_task = run_business_logic_review(context, config=config)
             
             semantic_result, business_result = await asyncio.gather(
                 semantic_task,

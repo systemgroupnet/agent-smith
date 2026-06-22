@@ -8,7 +8,7 @@ This module contains system prompts for the service review agents:
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section
+from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
 
 if TYPE_CHECKING:
     from core.agents.service_agents import ServiceContext
@@ -61,10 +61,12 @@ SUGGESTION FIELD FORMAT:
 **IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
 
 TOOLS AVAILABLE:
-You have access to MCP tools for GitLab that can help you:
+You have access to MCP tools for GitLab and the AIAND Source code index that can help you:
 - Fetch file contents from the repository to understand context
 - Look up related files or dependencies
 - View merge request information
+
+{AIAND_SOURCE_GUIDANCE}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 
@@ -153,9 +155,11 @@ You have access to MCP tools for Jira and Confluence that can help you:
 - Retrieve Confluence documentation and specifications
 - Look up related tasks and documents
 
-You also have GitLab tools to:
+You also have GitLab tools and the AIAND Source code index to:
 - Fetch related files from the repository
 - View merge request context
+
+{AIAND_SOURCE_GUIDANCE}
 
 Use these tools to gather the information you need to properly review business logic against requirements. You SHOULD use Jira/Confluence tools if a Jira task number is provided to understand the requirements.
 

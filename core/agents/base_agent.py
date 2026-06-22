@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Type, TypeVar, Generic
 from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from core.config.langchain_config import get_model_for_agent, get_default_model
@@ -88,31 +89,37 @@ class BaseReviewAgent(ABC, Generic[T]):
         # Create chain: prompt | llm_with_structure
         self.chain = self.prompt | llm_with_structure
     
-    async def run(self, input_text: str, context: Optional[dict] = None) -> T:
+    async def run(
+        self,
+        input_text: str,
+        context: Optional[dict] = None,
+        config: Optional[RunnableConfig] = None,
+    ) -> T:
         """
         Run the agent with given input.
-        
+
         Args:
             input_text: Input text for the agent
             context: Optional context dictionary
-        
+            config: Optional LangSmith run config (carries thread metadata)
+
         Returns:
             Structured output from the agent
-        
+
         Raises:
             Exception: If agent execution fails after retries
         """
         start_time = time.time()
         agent_name = self.__class__.__name__
-        
+
         try:
             # Prepare input
             input_data = {"input": input_text}
             if context:
                 input_data.update(context)
-            
+
             # Invoke chain
-            result = await self.chain.ainvoke(input_data)
+            result = await self.chain.ainvoke(input_data, config=config)
             
             elapsed_time = time.time() - start_time
             print(f"⏱️  {agent_name} completed in {elapsed_time:.2f}s")

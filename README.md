@@ -217,12 +217,17 @@ LangSmith provides powerful tracing and monitoring capabilities for your LangGra
 
    ```env
    # LangSmith Configuration
-   LANGCHAIN_TRACING_V2=true
-   LANGCHAIN_API_KEY=your_langsmith_api_key_here
-   LANGCHAIN_PROJECT=codereviewagent
+   LANGSMITH_TRACING=true
+   LANGSMITH_API_KEY=your_langsmith_api_key_here
+   LANGSMITH_PROJECT=codereviewagent
+   LANGSMITH_ENDPOINT=https://api.smith.langchain.com
    ```
 
 3. **What you'll see in LangSmith**:
+   - **One thread per MR review**: every run of a review (one trace per file plus the
+     comment reviewer) is grouped into a single thread keyed by the MR
+     (`{project_path}!{mr_id}`). Re-reviewing the same MR appends to the same thread.
+     Find them under the project's **Threads** tab.
    - **Full trace of each review**: See every step of the LangGraph workflow
    - **Token usage**: Monitor costs per file review
    - **Latency metrics**: Identify slow agents or bottlenecks

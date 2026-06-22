@@ -50,11 +50,17 @@ class MCPToolkitManager:
         "confluence_get_page",
         "jira_search",
     }
-    
+
+    # AIAND Source MCP (code index for old/unchanged files).
+    # An empty set means "allow all tools" since the exact tool names exposed
+    # by the AIAND Source server are not fixed/known ahead of time.
+    ALLOWED_AIAND_TOOLS: set[str] = set()
+
     def __init__(self):
         """Initialize the toolkit manager."""
         self._gitlab_toolkit: Optional[MCPToolkit] = None
         self._atlassian_toolkit: Optional[MCPToolkit] = None
+        self._aiand_toolkit: Optional[MCPToolkit] = None
         self._exit_stack: Optional[AsyncExitStack] = None
         self._initialized = False
     
@@ -70,7 +76,11 @@ class MCPToolkitManager:
     def is_atlassian_enabled(self) -> bool:
         """Check if Atlassian MCP integration is enabled."""
         return os.getenv("MCP_ATLASSIAN_ENABLED", "false").lower() == "true"
-    
+
+    def is_aiand_enabled(self) -> bool:
+        """Check if AIAND Source MCP integration is enabled."""
+        return os.getenv("MCP_AIAND_ENABLED", "true").lower() == "true"
+
     def _get_gitlab_transport(self) -> TransportType:
         """Get GitLab MCP transport type from environment."""
         transport = os.getenv("MCP_GITLAB_TRANSPORT", "streamable-http").lower()
@@ -84,14 +94,28 @@ class MCPToolkitManager:
         if transport in ("sse", "streamable-http"):
             return transport  # type: ignore
         return "streamable-http"  # default to streamable-http
-    
+
+    def _get_aiand_transport(self) -> TransportType:
+        """Get AIAND Source MCP transport type from environment."""
+        transport = os.getenv("MCP_AIAND_TRANSPORT", "streamable-http").lower()
+        if transport in ("sse", "streamable-http"):
+            return transport  # type: ignore
+        return "streamable-http"  # default to streamable-http
+
     def _get_gitlab_url(self) -> str:
         """Get GitLab MCP server URL (no endpoint appended)."""
         return os.getenv("MCP_GITLAB_URL", "http://mcp-gitlab:3002").rstrip('/')
-    
+
     def _get_atlassian_url(self) -> str:
         """Get Atlassian MCP server URL (no endpoint appended)."""
         return os.getenv("MCP_ATLASSIAN_URL", "http://mcp-atlassian:9000").rstrip('/')
+
+    def _get_aiand_url(self) -> str:
+        """Get AIAND Source MCP server URL (code index for old/unchanged files)."""
+        return os.getenv(
+            "MCP_AIAND_URL",
+            "http://internal.example.com/mcp",
+        ).rstrip('/')
     
     async def initialize(self) -> None:
         """
@@ -132,7 +156,16 @@ class MCPToolkitManager:
             )
         else:
             print("  ⏭️  [Atlassian MCP] Disabled, skipping...")
-        
+
+        # Initialize AIAND Source toolkit (isolated to prevent cancel scope leakage)
+        if self.is_aiand_enabled():
+            await self._initialize_toolkit_isolated(
+                self._initialize_aiand_toolkit,
+                "AIAND Source MCP"
+            )
+        else:
+            print("  ⏭️  [AIAND Source MCP] Disabled, skipping...")
+
         self._initialized = True
         print("\n✅ MCP Toolkit Manager initialized\n")
     
@@ -246,6 +279,67 @@ class MCPToolkitManager:
             self._atlassian_toolkit = None
             # Don't raise - allow partial initialization
 
+    async def _initialize_aiand_toolkit(self) -> None:
+        """Initialize AIAND Source MCP toolkit (code index for old/unchanged files)."""
+        try:
+            url = self._get_aiand_url()
+            transport = self._get_aiand_transport()
+            transport_name = "SSE (Server-Sent Events)" if transport == "sse" else "Streamable HTTP"
+
+            print(f"  🔌 [AIAND Source MCP] Connecting to: {url}")
+            print(f"     - Transport: {transport_name}")
+
+            # Create client based on transport type
+            if transport == "sse":
+                read_stream, write_stream = await self._exit_stack.enter_async_context(
+                    sse_client(url)
+                )
+            else:
+                # streamable-http transport
+                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                    streamablehttp_client(url)
+                )
+
+            # Create ClientSession with the streams
+            session = ClientSession(read_stream, write_stream)
+
+            # Initialize the session
+            await self._exit_stack.enter_async_context(session)
+
+            # Create MCPToolkit with the session
+            self._aiand_toolkit = MCPToolkit(session=session)
+
+            print(f"  🔄 [AIAND Source MCP] Initializing toolkit...")
+            await self._aiand_toolkit.initialize()
+
+            all_tools = self._aiand_toolkit.get_tools()
+            filtered_tools = self._filter_aiand_tools(all_tools)
+            print(f"  ✅ [AIAND Source MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s)")
+
+            # Print available tools (filtered)
+            for tool in filtered_tools:
+                print(f"     - {tool.name}: {tool.description[:80]}...")
+
+        except asyncio.CancelledError as e:
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            print(f"  ❌ [AIAND Source MCP] Initialization cancelled: {e}")
+            self._aiand_toolkit = None
+            # Don't raise - allow partial initialization
+        except Exception as e:
+            print(f"  ❌ [AIAND Source MCP] Failed to initialize: {e}")
+            import traceback
+            print(f"     Traceback: {traceback.format_exc()}")
+            self._aiand_toolkit = None
+            # Don't raise - allow partial initialization
+
+    def _filter_aiand_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
+        """Filter AIAND Source tools. Empty allow-set means expose all tools."""
+        if not self.ALLOWED_AIAND_TOOLS:
+            return list(tools)
+        return [tool for tool in tools if tool.name in self.ALLOWED_AIAND_TOOLS]
+
     async def _initialize_toolkit_isolated(
         self,
         initializer: Callable[[], Awaitable[None]],
@@ -330,29 +424,48 @@ class MCPToolkitManager:
         except Exception as e:
             print(f"  ⚠️  [Atlassian MCP] Error getting tools: {e}")
             return []
-    
+
+    def get_aiand_tools(self) -> List[BaseTool]:
+        """
+        Get AIAND Source MCP tools (code index for old/unchanged files).
+
+        Returns:
+            List of AIAND Source MCP tools or empty list if not initialized
+        """
+        if self._aiand_toolkit is None:
+            return []
+
+        try:
+            all_tools = self._aiand_toolkit.get_tools()
+            return self._filter_aiand_tools(all_tools)
+        except Exception as e:
+            print(f"  ⚠️  [AIAND Source MCP] Error getting tools: {e}")
+            return []
+
     def get_all_tools(self) -> List[BaseTool]:
         """
         Get all available MCP tools from all toolkits.
-        
+
         Returns:
             Combined list of all MCP tools
         """
         all_tools = []
         all_tools.extend(self.get_gitlab_tools())
         all_tools.extend(self.get_atlassian_tools())
+        all_tools.extend(self.get_aiand_tools())
         return all_tools
-    
+
     def get_tools_by_category(self) -> Dict[str, List[BaseTool]]:
         """
-        Get tools organized by category (gitlab, atlassian).
-        
+        Get tools organized by category (gitlab, atlassian, aiand).
+
         Returns:
             Dictionary mapping category names to tool lists
         """
         return {
             "gitlab": self.get_gitlab_tools(),
             "atlassian": self.get_atlassian_tools(),
+            "aiand": self.get_aiand_tools(),
         }
     
     async def close(self) -> None:
@@ -371,7 +484,11 @@ class MCPToolkitManager:
         if self._atlassian_toolkit is not None:
             print("  ✅ [Atlassian MCP] Toolkit closed")
             self._atlassian_toolkit = None
-        
+
+        if self._aiand_toolkit is not None:
+            print("  ✅ [AIAND Source MCP] Toolkit closed")
+            self._aiand_toolkit = None
+
         # Close all async context managers (SSE/HTTP clients)
         if self._exit_stack is not None:
             try:

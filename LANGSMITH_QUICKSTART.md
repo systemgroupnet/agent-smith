@@ -15,60 +15,51 @@ Open your `.env` file and find these lines:
 
 ```env
 # LangSmith Configuration
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=your_langsmith_api_key_here
-LANGCHAIN_PROJECT=codereviewagent
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your_langsmith_api_key_here
+LANGSMITH_PROJECT=codereviewagent
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 ```
 
 Replace `your_langsmith_api_key_here` with your actual key:
 
 ```env
-LANGCHAIN_API_KEY=lsv2_pt_abc123...
+LANGSMITH_API_KEY=lsv2_pt_abc123...
 ```
 
-## 3. Test Setup (1 minute)
+Tracing is fully env-driven — LangChain reads these variables automatically, no code
+changes required.
 
-```bash
-python scripts/test_langsmith.py
-```
-
-You should see:
-
-```
-✅ LANGCHAIN_TRACING_V2 is enabled
-✅ LANGCHAIN_API_KEY is set: lsv2_pt_...xyz
-✅ LANGCHAIN_PROJECT is set: codereviewagent
-✅ Successfully connected to LangSmith
-```
-
-## 4. Run a Review (1 minute)
+## 3. Run a Review (1 minute)
 
 ```bash
 python main.py --gitlab-mr "YOUR_MR_URL"
 ```
 
-Look for this at the start:
+Look for the thread id printed at the start of the review:
 
 ```
-🔍 LangSmith tracing enabled
-📊 Project: codereviewagent
+🧵 LangSmith thread: group/project!123
 ```
 
-## 5. View Traces
+## 4. View Traces
 
 1. Go to: https://smith.langchain.com/
-2. Click on "codereviewagent" project
-3. See your traces! 🎉
+2. Click on the "codereviewagent" project
+3. Open the **Threads** tab — one thread per MR review! 🎉
 
 ## What You'll See
 
-Each merge request creates a trace showing:
+Each merge request review is grouped into one **thread** (keyed by the MR), containing:
 
-- 📄 Every file reviewed
-- 🤖 Which agent reviewed it
+- 📄 One trace per file reviewed (`review:<path>`)
+- 🤖 Which agent reviewed it, plus its LLM / MCP tool calls
+- 🔍 A `comment_review` trace for the final filtering step
 - ⏱️ How long it took
 - 💰 How much it cost (tokens)
 - ✅ What issues were found
+
+Re-reviewing the same MR appends new traces to the same thread.
 
 ## Troubleshooting
 

@@ -35,22 +35,34 @@ This document explains how LangSmith integrates with your CodeReviewAgent workfl
 
 ## How Tracing Works
 
-### 1. Initialization (main.py)
+### 1. Initialization (env-driven)
 
-When your application starts:
+Tracing is enabled purely through environment variables — LangChain reads them
+automatically, so there is no setup code to call:
 
-```python
-# Load environment variables
-load_dotenv()
-
-# Configure LangSmith tracing
-if os.getenv("LANGCHAIN_TRACING_V2") == "true":
-    os.environ["LANGCHAIN_TRACING_V2"] = "true"
-    os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
-    print("🔍 LangSmith tracing enabled")
+```env
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=lsv2_pt_...
+LANGSMITH_PROJECT=codereviewagent
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 ```
 
-This sets up the tracing context for all subsequent LangChain/LangGraph operations.
+### 1b. Thread grouping (main.py + core/config/tracing.py)
+
+To group a whole MR review into one LangSmith **thread**, `main.py::process_mr` builds
+a per-MR thread id and a run config that is threaded into every `ainvoke`:
+
+```python
+from core.config.tracing import build_thread_id, build_run_config
+
+thread_id = build_thread_id(project_path, mr_id)        # e.g. "group/project!123"
+config = build_run_config(thread_id, run_name=f"review:{file_path}")
+await review_file_with_workflow(..., config=config)     # one trace per file
+```
+
+`build_run_config` sets the LangSmith `thread_id`/`session_id` metadata, and the graph
+nodes forward the config to their agents so the metadata lands on **all** runs (root
+and child).
 
 ### 2. Automatic Instrumentation
 
@@ -63,31 +75,28 @@ LangSmith automatically traces:
 
 **No code changes needed!** Just set the environment variables.
 
-### 3. Trace Structure
+### 3. Thread & Trace Structure
 
-For each merge request review:
+Each merge request review is grouped into a single **thread** (keyed by the MR). The
+thread holds one trace per reviewed file plus one for comment filtering — each file's
+`review_workflow.ainvoke` is its own trace root, not a child of a single MR root:
 
 ```
-Trace: MR #123 Review
-├─ File 1: service.go
-│  ├─ Node: classify_file
-│  │  └─ LLM Call: gpt-4o-mini (classify)
-│  ├─ Node: route_to_agent
-│  ├─ Node: service_agent_review
-│  │  ├─ LLM Call: claude-sonnet-4.5 (semantic review)
-│  │  ├─ Tool Call: gitlab_get_file (context)
-│  │  └─ LLM Call: claude-sonnet-4.5 (business review)
-│  └─ Node: extract_issues
+Thread: group/project!123  (one MR review)
+├─ Trace: review:service.go
+│  ├─ Node: classify
+│  └─ Node: service_review
+│     ├─ LLM Call: semantic review
+│     ├─ Tool Call: get_file_contents (context)
+│     └─ LLM Call: business review
 │
-├─ File 2: migration.sql
-│  ├─ Node: classify_file
-│  ├─ Node: route_to_agent
-│  ├─ Node: sql_agent_review
-│  │  └─ LLM Call: gpt-4o-mini (sql review)
-│  └─ Node: extract_issues
+├─ Trace: review:migration.sql
+│  ├─ Node: classify
+│  └─ Node: sql_review
+│     └─ LLM Call: sql review
 │
-└─ Node: comment_reviewer
-   └─ LLM Call: gpt-4o-mini (filter comments)
+└─ Trace: comment_review
+   └─ LLM Call: filter comments
 ```
 
 ### 4. Data Captured
@@ -224,19 +233,19 @@ The tracing happens in the background and won't slow down your reviews.
 
 ```env
 # Enable/disable tracing
-LANGCHAIN_TRACING_V2=true|false
+LANGSMITH_TRACING=true|false
 
 # Your API key
-LANGCHAIN_API_KEY=lsv2_pt_...
+LANGSMITH_API_KEY=lsv2_pt_...
 
 # Project name (organizes traces)
-LANGCHAIN_PROJECT=codereviewagent
+LANGSMITH_PROJECT=codereviewagent
 
 # Optional: Custom endpoint (for self-hosted)
-LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 
 # Optional: Sampling rate (trace 10% of requests)
-LANGCHAIN_SAMPLING_RATE=0.1
+LANGSMITH_SAMPLING_RATE=0.1
 ```
 
 ### Programmatic Control
@@ -325,17 +334,17 @@ When something goes wrong:
 
 ```env
 # Good
-LANGCHAIN_PROJECT=codereviewagent-prod
+LANGSMITH_PROJECT=codereviewagent-prod
 
 # Better
-LANGCHAIN_PROJECT=codereviewagent-gitlab-prod-v2
+LANGSMITH_PROJECT=codereviewagent-gitlab-prod-v2
 ```
 
 ### 2. Add Tags for Important Reviews
 
 ```python
 # Tag critical MRs
-os.environ["LANGCHAIN_TAGS"] = "critical,security-review"
+os.environ["LANGSMITH_TAGS"] = "critical,security-review"
 ```
 
 ### 3. Monitor Regularly
@@ -348,7 +357,7 @@ os.environ["LANGCHAIN_TAGS"] = "critical,security-review"
 
 ```env
 # Only trace 10% of reviews
-LANGCHAIN_SAMPLING_RATE=0.1
+LANGSMITH_SAMPLING_RATE=0.1
 ```
 
 ### 5. Share Traces for Collaboration

@@ -7,7 +7,7 @@ Reviews TypeScript files in the application frontend.
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section
+from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
 
 if TYPE_CHECKING:
     from core.agents.typescript_agent import TypescriptContext
@@ -69,11 +69,13 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 **IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
+You have access to MCP tools for GitLab, Jira, Confluence, and the AIAND Source code index that can help you:
 - Fetch related TypeScript files from the repository (components, services, models)
 - Look up Jira issues to understand feature requirements
 - View Confluence documentation about frontend architecture and standards
 - Understand the broader context of the component/service
+
+{AIAND_SOURCE_GUIDANCE}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 

@@ -7,7 +7,7 @@ Reviews error message definition files (pbook) in the application.
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section
+from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
 
 if TYPE_CHECKING:
     from core.agents.pbook_agent import PbookContext
@@ -69,11 +69,13 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 **IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected error message definition code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
+You have access to MCP tools for GitLab, Jira, Confluence, and the AIAND Source code index that can help you:
 - Fetch related error message files from the repository to check for duplicates
 - Look up Jira issues to understand the context of error messages
 - View Confluence documentation about error message standards
 - Understand the broader error handling strategy
+
+{AIAND_SOURCE_GUIDANCE}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 

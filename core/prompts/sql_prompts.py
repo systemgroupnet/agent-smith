@@ -7,7 +7,7 @@ Reviews SQL migrations, CREATE TABLE, and ALTER TABLE statements.
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section
+from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
 
 if TYPE_CHECKING:
     from core.agents.sql_agent import SqlContext
@@ -72,11 +72,13 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 **IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected SQL code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual SQL code that should replace the problematic code.
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
+You have access to MCP tools for GitLab, Jira, Confluence, and the AIAND Source code index that can help you:
 - Fetch related migration files from the repository
 - Look up Jira issues for context about the database changes
 - View Confluence documentation about database schema
 - Understand the broader context of the migration
+
+{AIAND_SOURCE_GUIDANCE}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 

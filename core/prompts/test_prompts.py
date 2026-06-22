@@ -7,7 +7,7 @@ Reviews Go test files with Gherkin BDD step implementations.
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section
+from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
 
 if TYPE_CHECKING:
     from core.agents.test_agent import TestContext
@@ -74,11 +74,13 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 **IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
+You have access to MCP tools for GitLab, Jira, Confluence, and the AIAND Source code index that can help you:
 - Fetch the source code being tested from the repository
 - Look up Jira issues to understand feature requirements being tested
 - View Confluence documentation about testing standards
 - Understand test scenarios and expected behaviors
+
+{AIAND_SOURCE_GUIDANCE}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 

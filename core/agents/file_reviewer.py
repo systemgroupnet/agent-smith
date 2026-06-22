@@ -9,6 +9,7 @@ import asyncio
 import json
 import time
 from typing import Optional, List
+from langchain_core.runnables import RunnableConfig
 from core.workflow.graph import review_workflow
 from core.workflow.state import create_initial_state
 
@@ -23,9 +24,14 @@ async def review_file_with_workflow(
     gitlab_token: Optional[str],
     gitlab_url: Optional[str],
     project_path: Optional[str],
-    mr_context: Optional[str] = None
+    mr_context: Optional[str] = None,
+    config: Optional[RunnableConfig] = None,
 ) -> Optional[list]:
-    """Review a file using LangGraph workflow."""
+    """Review a file using LangGraph workflow.
+
+    ``config`` carries the LangSmith thread metadata (thread_id) so this file's
+    trace and every nested agent/LLM/tool run is grouped into the MR's thread.
+    """
     
     async def _run_workflow() -> Optional[list]:
         """Inner function to run the workflow in isolation."""
@@ -55,8 +61,9 @@ source_branch: {source_branch}
             mr_context=mr_context
         )
         
-        # Run workflow
-        final_state = await review_workflow.ainvoke(initial_state)
+        # Run workflow (config carries the LangSmith thread metadata, which LangGraph
+        # forwards into each node's RunnableConfig)
+        final_state = await review_workflow.ainvoke(initial_state, config=config)
         
         # Extract issues from output
         if final_state.get("error"):
@@ -102,13 +109,16 @@ source_branch: {source_branch}
         return None
 
 
-async def review_comments_with_agent(issues: list) -> list:
+async def review_comments_with_agent(
+    issues: list, config: Optional[RunnableConfig] = None
+) -> list:
     """
     Filter and rank high-severity comments using the comment reviewer agent.
-    
+
     Args:
         issues: List of high-severity ReviewIssue objects/dicts
-    
+        config: Optional LangSmith run config carrying the MR thread metadata
+
     Returns:
         List of top 10 most critical issues
     """
@@ -136,7 +146,7 @@ async def review_comments_with_agent(issues: list) -> list:
         input_text = json.dumps({"issues": issues_list}, indent=2)
         
         # Run the agent
-        result = await agent.run(input_text)
+        result = await agent.run(input_text, config=config)
         
         elapsed_time = time.time() - start_time
         print(f"  ✅ Agent selected {len(result.selected_issues)} critical issues (⏱️  {elapsed_time:.2f}s)")

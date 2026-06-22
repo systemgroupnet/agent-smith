@@ -7,7 +7,7 @@ Reviews SCSS/CSS files for the application frontend.
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section
+from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
 
 if TYPE_CHECKING:
     from core.agents.scss_agent import ScssContext
@@ -69,12 +69,14 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 **IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, and Confluence that can help you:
+You have access to MCP tools for GitLab, Jira, Confluence, and the AIAND Source code index that can help you:
 - Fetch related SCSS files from the repository to check for consistency
 - Look up Jira issues to understand styling requirements
 - View Confluence documentation about design system and CSS standards
 - Fetch related HTML templates to understand styling context
 - Understand the design requirements
+
+{AIAND_SOURCE_GUIDANCE}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 

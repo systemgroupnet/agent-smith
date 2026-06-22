@@ -36,9 +36,10 @@ Add these lines to your `.env` file:
 
 ```env
 # LangSmith Configuration
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=***REMOVED***
-LANGCHAIN_PROJECT=codereviewagent
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=***REMOVED***
+LANGSMITH_PROJECT=codereviewagent
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 ```
 
 Replace `***REMOVED***` with your actual API key.
@@ -61,26 +62,31 @@ You should see this output at startup:
 1. Go to [https://smith.langchain.com/](https://smith.langchain.com/)
 2. Click on **Projects** in the left sidebar
 3. Select your project (e.g., "codereviewagent")
-4. You'll see a list of all traces (one per merge request review)
+4. Open the **Threads** tab to see one thread per merge request review
 
 ## Understanding Traces
 
-### Trace Structure
+### Thread & Trace Structure
 
-Each merge request review creates a trace with the following structure:
+Each merge request review is grouped into a single **thread** keyed by the MR
+(`{project_path}!{mr_id}`). Within that thread there is one trace per reviewed file
+plus one trace for comment filtering. Re-reviewing the same MR (incremental review)
+appends new traces to the same thread.
 
 ```
-📊 MR Review (Root)
-├── 📄 File 1 Review
-│   ├── 🔍 File Classification
-│   ├── 🤖 Agent Selection
-│   ├── 📝 Code Analysis
-│   └── ✅ Issue Extraction
-├── 📄 File 2 Review
+🧵 Thread: group/project!123  (one MR review)
+├── 📄 review:path/to/file1   (one trace per file)
+│   ├── 🔍 classify
+│   └── 🤖 <type>_review  → agent → LLM / MCP tool calls
+├── 📄 review:path/to/file2
 │   └── ...
-└── 🔍 Comment Filtering
+└── 🔍 comment_review
     └── 🤖 Comment Reviewer Agent
 ```
+
+The MR thread id is built in `core/config/tracing.py` and attached to every run via
+the LangChain run config, so the `thread_id`/`session_id` metadata is present on the
+trace roots **and** their nested child runs.
 
 ### Key Metrics to Monitor
 
@@ -107,13 +113,13 @@ You can create different projects for different environments:
 
 ```env
 # Development
-LANGCHAIN_PROJECT=codereviewagent-dev
+LANGSMITH_PROJECT=codereviewagent-dev
 
 # Production
-LANGCHAIN_PROJECT=codereviewagent-prod
+LANGSMITH_PROJECT=codereviewagent-prod
 
 # Testing
-LANGCHAIN_PROJECT=codereviewagent-test
+LANGSMITH_PROJECT=codereviewagent-test
 ```
 
 ### 2. Filtering and Searching
@@ -147,8 +153,8 @@ You can add feedback to traces:
 
 ### Traces Not Appearing
 
-1. **Check API Key**: Make sure `LANGCHAIN_API_KEY` is set correctly
-2. **Check Tracing Flag**: Ensure `LANGCHAIN_TRACING_V2=true`
+1. **Check API Key**: Make sure `LANGSMITH_API_KEY` is set correctly
+2. **Check Tracing Flag**: Ensure `LANGSMITH_TRACING=true`
 3. **Check Network**: LangSmith requires internet access
 4. **Check Logs**: Look for LangSmith errors in console output
 
@@ -165,13 +171,13 @@ LangSmith adds minimal overhead (~10-50ms per trace). If you notice significant 
 To temporarily disable tracing:
 
 ```env
-LANGCHAIN_TRACING_V2=false
+LANGSMITH_TRACING=false
 ```
 
 Or comment out the line:
 
 ```env
-# LANGCHAIN_TRACING_V2=true
+# LANGSMITH_TRACING=true
 ```
 
 ## Best Practices
@@ -181,7 +187,7 @@ Or comment out the line:
 Instead of generic names, use descriptive ones:
 
 ```env
-LANGCHAIN_PROJECT=codereviewagent-gitlab-prod
+LANGSMITH_PROJECT=codereviewagent-gitlab-prod
 ```
 
 ### 2. Monitor Regularly

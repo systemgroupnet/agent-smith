@@ -8,6 +8,7 @@ external data (GitLab, Jira, Confluence) as needed during the review process.
 import time
 from typing import Optional
 from pydantic import BaseModel
+from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
@@ -37,7 +38,7 @@ async def create_pbook_reviewer_agent():
     """
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
-        tools=["gitlab", "atlassian"],  # GitLab + Atlassian (Jira/Confluence) tools
+        tools=["gitlab", "atlassian", "aiand"],  # GitLab + Atlassian (Jira/Confluence) + AIAND Source (code index)
         model_name="openai/gpt-5-nano",
         temperature=0.3,
         max_iterations=10,
@@ -45,7 +46,7 @@ async def create_pbook_reviewer_agent():
     )
 
 
-async def run_pbook_review(context: PbookContext) -> ReviewResponse:
+async def run_pbook_review(context: PbookContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
     """
     Run pbook review with MCP tools.
     
@@ -87,7 +88,7 @@ async def run_pbook_review(context: PbookContext) -> ReviewResponse:
         input_text = get_pbook_reviewer_prompt(context, additional_content)
         
         # Run agent
-        result = await agent.run(input_text)
+        result = await agent.run(input_text, config=config)
         
         elapsed_time = time.time() - start_time
         print(f"  ✅ Pbook review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")

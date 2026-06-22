@@ -8,6 +8,7 @@ external data (GitLab, Jira, Confluence) as needed during the review process.
 import time
 from typing import Optional
 from pydantic import BaseModel
+from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
@@ -37,14 +38,14 @@ async def create_test_reviewer_agent():
     """
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
-        tools=["gitlab", "atlassian"],  # GitLab + Atlassian (Jira/Confluence) tools
+        tools=["gitlab", "atlassian", "aiand"],  # GitLab + Atlassian (Jira/Confluence) + AIAND Source (code index)
         temperature=0.3,
         max_iterations=10,
         verbose=False,
     )
 
 
-async def run_test_review(context: TestContext) -> ReviewResponse:
+async def run_test_review(context: TestContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
     """
     Run test review with MCP tools.
     
@@ -86,7 +87,7 @@ async def run_test_review(context: TestContext) -> ReviewResponse:
         input_text = get_test_reviewer_prompt(context, additional_content)
         
         # Run agent
-        result = await agent.run(input_text)
+        result = await agent.run(input_text, config=config)
         
         elapsed_time = time.time() - start_time
         print(f"  ✅ Test review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")

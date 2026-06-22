@@ -48,6 +48,9 @@ services:
       - MCP_GITLAB_ENABLED=true
       - MCP_GITLAB_URL=${MCP_GITLAB_URL:-http://mcp-gitlab:3002}
       - MCP_GITLAB_TRANSPORT=${MCP_GITLAB_TRANSPORT:-streamable-http}
+      - MCP_AIAND_ENABLED=${MCP_AIAND_ENABLED:-true}
+      - MCP_AIAND_URL=${MCP_AIAND_URL:-http://internal.example.com/mcp}
+      - MCP_AIAND_TRANSPORT=${MCP_AIAND_TRANSPORT:-streamable-http}
       - GITLAB_URL=${GITLAB_URL}
       - GITLAB_TOKEN=${GITLAB_TOKEN}
     volumes:
