@@ -1,7 +1,7 @@
 """
-Dataview Reviewer Agent - Review dataview registration files with MCP Tools
+Test Reviewer Agent - Review Go test files with Gherkin BDD steps and MCP Tools
 
-This module provides dataview review agent with MCP tool integration for fetching
+This module provides test review agent with MCP tool integration for fetching
 external data (GitLab, Jira, Confluence) as needed during the review process.
 """
 
@@ -12,18 +12,16 @@ from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
-from core.prompts import get_dataview_reviewer_prompt
+from core.prompts import get_test_reviewer_prompt
 from dto.general import ReviewResponse
 
 
-class DataviewContext(BaseModel):
-    """Context for dataview review"""
+class TestContext(BaseModel):
+    """Context for test review"""
     content: str
     diff: str
     file_name: str
     file_path: Optional[str] = None
-    package_name: Optional[str] = None
-    module_name: Optional[str] = None
     jira_task_number: Optional[str] = None
     gitlab_token: Optional[str] = None
     gitlab_url: Optional[str] = None
@@ -32,9 +30,9 @@ class DataviewContext(BaseModel):
     mr_context: Optional[str] = None
 
 
-async def create_dataview_reviewer_agent():
+async def create_test_reviewer_agent():
     """
-    Create dataview reviewer agent with MCP tools.
+    Create test reviewer agent with MCP tools.
     
     The agent can use GitLab, Jira, and Confluence tools to fetch additional context.
     """
@@ -42,26 +40,26 @@ async def create_dataview_reviewer_agent():
         system_prompt="",  # Will be replaced with context-specific prompt
         tools=["gitlab", "atlassian", "aiand"],  # GitLab + Atlassian (Jira/Confluence) + AIAND Source (code index)
         temperature=0.3,
-        max_iterations=15,
+        max_iterations=10,
         verbose=False,
     )
 
 
-async def run_dataview_review(context: DataviewContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
+async def run_test_review(context: TestContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
     """
-    Run dataview review with MCP tools.
+    Run test review with MCP tools.
     
-    The agent will automatically use MCP tools to fetch requirements
-    and related documentation as needed.
+    The agent will automatically use MCP tools if it needs additional
+    context about the tests.
     
     Args:
-        context: Dataview context with file information
+        context: Test context with file information
         
     Returns:
         ReviewResponse with identified issues
     """
     start_time = time.time()
-    print(f"  🔍 Running dataview review...")
+    print(f"  🔍 Running test review...")
     
     try:
         # Load additional content
@@ -70,9 +68,9 @@ async def run_dataview_review(context: DataviewContext, config: Optional[Runnabl
             and context.source_branch and context.gitlab_token):
             try:
                 additional_content = await load_md_content(
-                    agent_type="dataview",
+                    agent_type="test",
                     file_path=context.file_path,
-                    module_name=context.module_name,
+                    module_name=None,  # Test files typically don't have module context in state
                     gitlab_url=context.gitlab_url,
                     project_path=context.project_path,
                     source_branch=context.source_branch,
@@ -83,23 +81,25 @@ async def run_dataview_review(context: DataviewContext, config: Optional[Runnabl
                 additional_content = ""
         
         # Create agent with tools
-        agent = await create_dataview_reviewer_agent()
+        agent = await create_test_reviewer_agent()
         
         # Build input with context and additional content
-        input_text = get_dataview_reviewer_prompt(context, additional_content)
+        input_text = get_test_reviewer_prompt(context, additional_content)
         
         # Run agent
         result = await agent.run(input_text, config=config)
         
         elapsed_time = time.time() - start_time
-        print(f"  ✅ Dataview review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
+        print(f"  ✅ Test review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
         
     except Exception as e:
         elapsed_time = time.time() - start_time
-        print(f"  ❌ Dataview review failed after {elapsed_time:.2f}s: {e}")
+        print(f"  ❌ Test review failed after {elapsed_time:.2f}s: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
-        # Return empty response on error
-        return ReviewResponse(issues=[])
+        # Surface the failure instead of swallowing it into an empty result, so
+        # this file is recorded as errored and the run exits non-zero. Other
+        # files are unaffected (they are reviewed concurrently and isolated).
+        raise
 

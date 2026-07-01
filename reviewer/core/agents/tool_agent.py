@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 from typing import Optional, Type, TypeVar, List, Union
 from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
@@ -123,7 +124,46 @@ class ToolEnabledAgent:
             handle_parsing_errors=True,
             return_intermediate_steps=False,
         )
-    
+
+    def _parse_text_output(self, output: str):
+        """Best-effort parse of the agent's free-text answer into ``output_model``.
+
+        A tool-calling agent returns free text that usually *contains* the JSON
+        answer but often wraps it in prose and several fenced code blocks — e.g. a
+        ```go snippet quoting the reviewed code, followed by the real ```json
+        result. ``PydanticOutputParser.parse`` can latch onto the wrong fence and
+        raise, so we try progressively more forgiving strategies. Returns ``None``
+        (rather than raising) when no JSON can be recovered, so the caller can fall
+        back to an LLM re-format.
+        """
+        parser = PydanticOutputParser(pydantic_object=self.output_model)
+
+        # 1) Native parse — handles a clean JSON body or a single ```json block.
+        try:
+            return parser.parse(output)
+        except Exception:
+            pass
+
+        # 2) Scan fenced code blocks, last first (the final answer comes last),
+        #    skipping non-JSON blocks such as ```go snippets embedded in the prose.
+        for block in reversed(re.findall(r"```(?:json)?\s*(.*?)```", output, re.DOTALL)):
+            block = block.strip()
+            if block.startswith("{"):
+                try:
+                    return self.output_model.model_validate_json(block)
+                except Exception:
+                    continue
+
+        # 3) Widest {...} span anywhere in the text.
+        start, end = output.find("{"), output.rfind("}")
+        if start != -1 and end > start:
+            try:
+                return self.output_model.model_validate_json(output[start:end + 1])
+            except Exception:
+                pass
+
+        return None
+
     async def run(
         self,
         input_text: str,
@@ -156,16 +196,27 @@ class ToolEnabledAgent:
 
             # Invoke agent
             result = await self.agent_executor.ainvoke(input_data, config=config)
-            
+
             # Extract output
             output = result.get("output", "")
-            
+
             # Parse structured output if model specified
             if self.output_model:
-                parser = PydanticOutputParser(pydantic_object=self.output_model)
-                parsed_output = parser.parse(output)
+                parsed_output = self._parse_text_output(output)
+                if parsed_output is None:
+                    # Couldn't recover JSON from the free text — ask the model to
+                    # coerce its own answer into the schema. Function calling is far
+                    # more reliable than parsing prose, and this only runs on the
+                    # rare occasions the direct parse fails.
+                    print("  ⚠️  [ToolEnabledAgent] Could not parse structured output; re-formatting via structured LLM call")
+                    structured_llm = self.llm.with_structured_output(self.output_model)
+                    parsed_output = await structured_llm.ainvoke(
+                        "Convert the following code-review result into the required "
+                        "structured format exactly. If it reports no problems, return "
+                        f"an empty issues list.\n\n{output}"
+                    )
                 return parsed_output
-            
+
             return output
             
         except Exception as e:
@@ -191,16 +242,23 @@ class ToolEnabledAgent:
             
             # Invoke agent
             result = self.agent_executor.invoke(input_data)
-            
+
             # Extract output
             output = result.get("output", "")
-            
+
             # Parse structured output if model specified
             if self.output_model:
-                parser = PydanticOutputParser(pydantic_object=self.output_model)
-                parsed_output = parser.parse(output)
+                parsed_output = self._parse_text_output(output)
+                if parsed_output is None:
+                    print("  ⚠️  [ToolEnabledAgent] Could not parse structured output; re-formatting via structured LLM call")
+                    structured_llm = self.llm.with_structured_output(self.output_model)
+                    parsed_output = structured_llm.invoke(
+                        "Convert the following code-review result into the required "
+                        "structured format exactly. If it reports no problems, return "
+                        f"an empty issues list.\n\n{output}"
+                    )
                 return parsed_output
-            
+
             return output
             
         except Exception as e:

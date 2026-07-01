@@ -1,7 +1,7 @@
 """
-Test Reviewer Agent - Review Go test files with Gherkin BDD steps and MCP Tools
+SCSS Reviewer Agent - Review SCSS/CSS files with MCP Tools
 
-This module provides test review agent with MCP tool integration for fetching
+This module provides SCSS review agent with MCP tool integration for fetching
 external data (GitLab, Jira, Confluence) as needed during the review process.
 """
 
@@ -12,12 +12,12 @@ from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
-from core.prompts import get_test_reviewer_prompt
+from core.prompts import get_scss_reviewer_prompt
 from dto.general import ReviewResponse
 
 
-class TestContext(BaseModel):
-    """Context for test review"""
+class ScssContext(BaseModel):
+    """Context for SCSS review"""
     content: str
     diff: str
     file_name: str
@@ -30,9 +30,9 @@ class TestContext(BaseModel):
     mr_context: Optional[str] = None
 
 
-async def create_test_reviewer_agent():
+async def create_scss_reviewer_agent():
     """
-    Create test reviewer agent with MCP tools.
+    Create SCSS reviewer agent with MCP tools.
     
     The agent can use GitLab, Jira, and Confluence tools to fetch additional context.
     """
@@ -45,21 +45,21 @@ async def create_test_reviewer_agent():
     )
 
 
-async def run_test_review(context: TestContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
+async def run_scss_review(context: ScssContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
     """
-    Run test review with MCP tools.
+    Run SCSS review with MCP tools.
     
     The agent will automatically use MCP tools if it needs additional
-    context about the tests.
+    context about the styles.
     
     Args:
-        context: Test context with file information
+        context: SCSS context with file information
         
     Returns:
         ReviewResponse with identified issues
     """
     start_time = time.time()
-    print(f"  🔍 Running test review...")
+    print(f"  🔍 Running SCSS review...")
     
     try:
         # Load additional content
@@ -68,9 +68,9 @@ async def run_test_review(context: TestContext, config: Optional[RunnableConfig]
             and context.source_branch and context.gitlab_token):
             try:
                 additional_content = await load_md_content(
-                    agent_type="test",
+                    agent_type="scss",
                     file_path=context.file_path,
-                    module_name=None,  # Test files typically don't have module context in state
+                    module_name=None,  # SCSS files typically don't have module context
                     gitlab_url=context.gitlab_url,
                     project_path=context.project_path,
                     source_branch=context.source_branch,
@@ -81,23 +81,25 @@ async def run_test_review(context: TestContext, config: Optional[RunnableConfig]
                 additional_content = ""
         
         # Create agent with tools
-        agent = await create_test_reviewer_agent()
+        agent = await create_scss_reviewer_agent()
         
         # Build input with context and additional content
-        input_text = get_test_reviewer_prompt(context, additional_content)
+        input_text = get_scss_reviewer_prompt(context, additional_content)
         
         # Run agent
         result = await agent.run(input_text, config=config)
         
         elapsed_time = time.time() - start_time
-        print(f"  ✅ Test review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
+        print(f"  ✅ SCSS review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
         
     except Exception as e:
         elapsed_time = time.time() - start_time
-        print(f"  ❌ Test review failed after {elapsed_time:.2f}s: {e}")
+        print(f"  ❌ SCSS review failed after {elapsed_time:.2f}s: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
-        # Return empty response on error
-        return ReviewResponse(issues=[])
+        # Surface the failure instead of swallowing it into an empty result, so
+        # this file is recorded as errored and the run exits non-zero. Other
+        # files are unaffected (they are reviewed concurrently and isolated).
+        raise
 

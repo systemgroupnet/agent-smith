@@ -148,7 +148,10 @@ async def process_single_file(
     except Exception as e:
         file_info = file_path if file_path else "unknown file"
         print(f"❌ Error processing file {file_info}: {e}")
-        return None
+        # Propagate so process_mr records this file as failed and the run exits
+        # non-zero. Best-effort: sibling files in the batch are reviewed
+        # independently (asyncio.gather with return_exceptions=True).
+        raise
 
 
 async def process_mr(mr_url: str):
@@ -166,14 +169,14 @@ async def process_mr(mr_url: str):
     # Parse MR URL
     mr_info = parse_gitlab_mr_url(mr_url)
     if not mr_info:
-        sys.exit(1)
+        return 1
     
     # Get GitLab credentials
     gitlab_token = os.getenv("GITLAB_TOKEN")
     if not gitlab_token:
         print("Error: GITLAB_TOKEN not found in environment variables.")
         print("Please set GITLAB_TOKEN in your .env file.")
-        sys.exit(1)
+        return 1
     
     gitlab_url = mr_info["domain"]
     project_path = mr_info["project_path"]
@@ -187,7 +190,7 @@ async def process_mr(mr_url: str):
     mr_data = await get_gitlab_mr_info(gitlab_url, project_path, mr_id, gitlab_token)
     if not mr_data:
         print("Error: Could not fetch MR information.")
-        sys.exit(1)
+        return 1
     
     mr_title = mr_data.get("title", "")
     source_branch = mr_data.get("source_branch", "")
@@ -216,14 +219,14 @@ async def process_mr(mr_url: str):
     )
     if last_sha and head_sha and last_sha == head_sha:
         print(f"✅ No new commits since last review ({head_sha[:8]}). Nothing to do.")
-        return
+        return 0
 
     # Fetch changes
     print("📥 Fetching changed files...")
     changes = await get_gitlab_mr_changes(gitlab_url, project_path, mr_id, gitlab_token)
     if not changes:
         print("Error: Could not fetch MR changes.")
-        sys.exit(1)
+        return 1
 
     print(f"Found {len(changes)} changed file(s) in the full MR\n")
 
@@ -244,7 +247,7 @@ async def process_mr(mr_url: str):
             await upsert_review_marker(
                 gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id
             )
-            return
+            return 0
         else:
             changes_to_review = incremental
             print(f"Reviewing {len(changes_to_review)} changed file(s) from new commits\n")
@@ -290,6 +293,7 @@ async def process_mr(mr_url: str):
 
     # Process files concurrently in batches of 5
     all_comments = []
+    file_error_count = 0  # files whose review raised — drives the non-zero exit code
     batch_size = int(os.getenv("FILE_BATCH_SIZE", "5"))
     total_batches = (len(changes_to_review) + batch_size - 1) // batch_size
 
@@ -330,6 +334,7 @@ async def process_mr(mr_url: str):
         for result in results:
             if isinstance(result, Exception):
                 print(f"❌ Exception during file processing: {result}")
+                file_error_count += 1
                 continue
             if result is not None:
                 all_comments.append(result)
@@ -338,16 +343,27 @@ async def process_mr(mr_url: str):
     
     print(f"\n{'=' * 60}")
     print(f"✅ All batches completed: {len(all_comments)} file(s) reviewed successfully")
+    if file_error_count:
+        print(f"⚠️  {file_error_count} file(s) failed to review (the run will exit non-zero)")
     print(f"{'=' * 60}")
 
     # Record that we've reviewed up to the current head, so the next pipeline run only
     # reviews newer commits. Done here (after the review pass, before the early-returns
     # below) so even runs that find no issues still advance the marker.
-    if head_sha:
+    #
+    # Skip advancing when any file failed to review: leaving the marker where it is
+    # means a re-run re-enters the incremental compare and retries the failed file(s),
+    # instead of short-circuiting on "no new commits" and reporting success while the
+    # failure was never actually reviewed. Trade-off: on that retry, files that DID
+    # succeed get their inline comments posted again (GitLab does not de-duplicate
+    # discussions) — a visible duplicate is preferable to a silently-green failure.
+    if head_sha and file_error_count == 0:
         if await upsert_review_marker(
             gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id
         ):
             print(f"🔖 Review marker updated to {head_sha[:8]}")
+    elif head_sha and file_error_count:
+        print(f"⏭️  Not advancing review marker — {file_error_count} file(s) failed; a re-run will retry them")
 
     # Filter high-severity issues using comment reviewer agent
     print(f"\n{'=' * 60}")
@@ -375,7 +391,7 @@ async def process_mr(mr_url: str):
         )
     else:
         print(f"ℹ️  No high-severity issues to filter")
-        return 
+        return 1 if file_error_count else 0
 
     # Post comments to GitLab
     print(f"\n{'=' * 60}")
@@ -415,11 +431,20 @@ async def process_mr(mr_url: str):
     print(f"❌ Failed comments: {total_failed}")
     print(f"{'=' * 60}\n")
 
+    # Non-zero exit if any file failed to review or any comment failed to post, so
+    # GitLab CI reflects the failure instead of showing a green job.
+    return 1 if (file_error_count or total_failed) else 0
 
-async def run_with_cleanup(mr_url: str):
-    """Run the MR processing with proper cleanup in the same event loop."""
+
+async def run_with_cleanup(mr_url: str) -> int:
+    """Run the MR processing with proper cleanup in the same event loop.
+
+    Returns the process exit code (0 = success, non-zero = a review or comment-post
+    error occurred) so the CLI can propagate it to the shell / GitLab CI.
+    """
     try:
-        await process_mr(mr_url)
+        exit_code = await process_mr(mr_url)
+        return exit_code if exit_code is not None else 0
     finally:
         print("\n🔌 Cleaning up MCP sessions...")
         try:
@@ -450,7 +475,20 @@ def main():
         sys.exit(1)
     
     # Run async main function with cleanup in the same event loop
-    asyncio.run(run_with_cleanup(args.gitlab_mr))
+    try:
+        exit_code = asyncio.run(run_with_cleanup(args.gitlab_mr))
+    except KeyboardInterrupt:
+        print("\n⚠️  Interrupted by user")
+        sys.exit(130)
+    except Exception as e:
+        # Any unhandled error means the review did not complete — fail loudly so
+        # GitLab CI does not treat the job as successful.
+        print(f"❌ Fatal error during review: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    sys.exit(exit_code or 0)
 
 
 if __name__ == "__main__":

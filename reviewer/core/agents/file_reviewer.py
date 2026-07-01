@@ -67,9 +67,10 @@ source_branch: {source_branch}
         
         # Extract issues from output
         if final_state.get("error"):
-            print(f"  ❌ Workflow error: {final_state['error']}")
-            return []
-        
+            # Surface the workflow error so the file is recorded as errored and the
+            # run exits non-zero, instead of masking it as "no issues found".
+            raise RuntimeError(f"Workflow error: {final_state['error']}")
+
         output = final_state.get("output")
         if output and isinstance(output, dict):
             issues = output.get("issues", [])
@@ -103,10 +104,12 @@ source_branch: {source_branch}
             if current_task is not None:
                 current_task.uncancel()
             print(f"  ⚠️  Workflow error after cancel for {file_path}: {inner_e}")
-            return None
+            raise
     except Exception as e:
+        # Genuine review failure (not an MCP cancel-scope race) — propagate so the
+        # caller records this file as errored and the run exits non-zero.
         print(f"Error reviewing file {file_path}: {e}")
-        return None
+        raise
 
 
 async def review_comments_with_agent(

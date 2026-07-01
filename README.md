@@ -2,6 +2,8 @@
 
 An AI-powered code review system for the application. This project provides specialized reviewers for different file types including Go services, SQL migrations, dataviews, test files, and error message files (pbook).
 
+> **Repository layout (monorepo):** this repo hosts two services — **`reviewer/`** (the code-review agent described below) and **`collector/`** (a second service, currently a scaffold). The commands in this README run from inside **`reviewer/`** (run `cd reviewer` first). The repo-root `.gitlab-ci.yml` builds and pushes one image per service (`reviewer` and `collector`) on git tags.
+
 ## Features
 
 - **Multi-Type Code Reviewers**: Specialized agents for different file types:

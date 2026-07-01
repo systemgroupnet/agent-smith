@@ -24,7 +24,7 @@ services:
 
   codereviewagent:
     build:
-      context: .
+      context: ./reviewer
       dockerfile: Dockerfile
     image: registry.example.com/code-reviewer:v0.0.1
     container_name: codereviewagent
@@ -54,7 +54,7 @@ services:
       - GITLAB_URL=${GITLAB_URL}
       - GITLAB_TOKEN=${GITLAB_TOKEN}
     volumes:
-      - .:/app
+      - ./reviewer:/app
       - ./.env:/app/.env:ro
     networks:
       - codereview-network

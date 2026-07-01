@@ -1,7 +1,7 @@
 """
-HTML Reviewer Agent - Review HTML template files with MCP Tools
+SQL Reviewer Agent - Review SQL migrations and table operations with MCP Tools
 
-This module provides HTML review agent with MCP tool integration for fetching
+This module provides SQL review agent with MCP tool integration for fetching
 external data (GitLab, Jira, Confluence) as needed during the review process.
 """
 
@@ -12,12 +12,12 @@ from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
-from core.prompts import get_html_reviewer_prompt
+from core.prompts import get_sql_reviewer_prompt
 from dto.general import ReviewResponse
 
 
-class HtmlContext(BaseModel):
-    """Context for HTML review"""
+class SqlContext(BaseModel):
+    """Context for SQL review"""
     content: str
     diff: str
     file_name: str
@@ -30,9 +30,9 @@ class HtmlContext(BaseModel):
     mr_context: Optional[str] = None
 
 
-async def create_html_reviewer_agent():
+async def create_sql_reviewer_agent():
     """
-    Create HTML reviewer agent with MCP tools.
+    Create SQL reviewer agent with MCP tools.
     
     The agent can use GitLab, Jira, and Confluence tools to fetch additional context.
     """
@@ -45,21 +45,21 @@ async def create_html_reviewer_agent():
     )
 
 
-async def run_html_review(context: HtmlContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
+async def run_sql_review(context: SqlContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
     """
-    Run HTML review with MCP tools.
+    Run SQL review with MCP tools.
     
     The agent will automatically use MCP tools if it needs additional
-    context about the HTML templates.
+    context about the database changes.
     
     Args:
-        context: HTML context with file information
+        context: SQL context with file information
         
     Returns:
         ReviewResponse with identified issues
     """
     start_time = time.time()
-    print(f"  🔍 Running HTML review...")
+    print(f"  🔍 Running SQL review...")
     
     try:
         # Load additional content
@@ -68,9 +68,9 @@ async def run_html_review(context: HtmlContext, config: Optional[RunnableConfig]
             and context.source_branch and context.gitlab_token):
             try:
                 additional_content = await load_md_content(
-                    agent_type="html",
+                    agent_type="sql",
                     file_path=context.file_path,
-                    module_name=None,  # HTML files typically don't have module context
+                    module_name=None,  # SQL files typically don't have module context
                     gitlab_url=context.gitlab_url,
                     project_path=context.project_path,
                     source_branch=context.source_branch,
@@ -81,23 +81,25 @@ async def run_html_review(context: HtmlContext, config: Optional[RunnableConfig]
                 additional_content = ""
         
         # Create agent with tools
-        agent = await create_html_reviewer_agent()
+        agent = await create_sql_reviewer_agent()
         
         # Build input with context and additional content
-        input_text = get_html_reviewer_prompt(context, additional_content)
+        input_text = get_sql_reviewer_prompt(context, additional_content)
         
         # Run agent
         result = await agent.run(input_text, config=config)
         
         elapsed_time = time.time() - start_time
-        print(f"  ✅ HTML review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
+        print(f"  ✅ SQL review complete: {len(result.issues)} issues found (⏱️  {elapsed_time:.2f}s)")
         return result
         
     except Exception as e:
         elapsed_time = time.time() - start_time
-        print(f"  ❌ HTML review failed after {elapsed_time:.2f}s: {e}")
+        print(f"  ❌ SQL review failed after {elapsed_time:.2f}s: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
-        # Return empty response on error
-        return ReviewResponse(issues=[])
+        # Surface the failure instead of swallowing it into an empty result, so
+        # this file is recorded as errored and the run exits non-zero. Other
+        # files are unaffected (they are reviewed concurrently and isolated).
+        raise
 

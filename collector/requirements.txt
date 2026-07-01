@@ -1,0 +1,2 @@
+# Collector Python dependencies. Empty for now — add packages as the collector
+# is implemented. `uv pip install -r requirements.txt` is a no-op while empty.

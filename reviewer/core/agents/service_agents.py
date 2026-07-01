@@ -132,8 +132,9 @@ async def run_semantic_review(context: ServiceContext, config: Optional[Runnable
         print(f"  ❌ Semantic review failed after {elapsed_time:.2f}s: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
-        # Return empty response on error
-        return ReviewResponse(issues=[])
+        # Semantic review is the core review; surface the failure so the file
+        # is recorded as errored and the run exits non-zero.
+        raise
 
 
 async def run_business_logic_review(context: ServiceContext, config: Optional[RunnableConfig] = None) -> ReviewResponse:
@@ -231,13 +232,16 @@ async def run_combined_service_review(context: ServiceContext, config: Optional[
                 return_exceptions=True
             )
             
-            # Handle exceptions
+            # Semantic review is the core review — if it failed, surface the error
+            # so this file is recorded as errored (the run then exits non-zero).
             if isinstance(semantic_result, Exception):
-                print(f"  ⚠️  Semantic review exception: {semantic_result}")
-                semantic_result = ReviewResponse(issues=[])
-            
+                raise semantic_result
+
+            # The business-logic reviewer is optional (BUSINESS_LOGIC_REVIEW_ENABLED)
+            # and leans on flaky external tools (Jira/Confluence), so its failure is
+            # non-fatal: log it and continue with the semantic results only.
             if isinstance(business_result, Exception):
-                print(f"  ⚠️  Business logic review exception: {business_result}")
+                print(f"  ⚠️  Business logic review failed (non-fatal): {business_result}")
                 business_result = ReviewResponse(issues=[])
             
             # Combine results
@@ -268,7 +272,9 @@ async def run_combined_service_review(context: ServiceContext, config: Optional[
         print(f"  ❌ Combined review failed: {e}")
         import traceback
         print(f"     Traceback: {traceback.format_exc()}")
-        return ReviewResponse(issues=[])
+        # Propagate so the service file is recorded as errored and the run exits
+        # non-zero, rather than silently reporting zero issues.
+        raise
 
 
 
