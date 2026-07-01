@@ -122,7 +122,10 @@ class ToolEnabledAgent:
             verbose=self.verbose,
             max_iterations=self.max_iterations,
             handle_parsing_errors=True,
-            return_intermediate_steps=False,
+            # Keep the tool call/result trace so we can (a) diagnose why a run
+            # looped to max_iterations and (b) reconstruct a structured answer
+            # from what was gathered when the agent doesn't emit clean JSON.
+            return_intermediate_steps=True,
         )
 
     def _parse_text_output(self, output: str):
@@ -164,6 +167,44 @@ class ToolEnabledAgent:
 
         return None
 
+    def _log_run(self, steps, output):
+        """Surface what the agent actually did — the key diagnostic for a run that
+        loops to max_iterations (tool failures vs. genuine over-exploration)."""
+        if steps:
+            print(f"  🔧 [ToolEnabledAgent] {len(steps)} tool call(s) this run:")
+            for i, step in enumerate(steps, 1):
+                try:
+                    action, observation = step
+                except (ValueError, TypeError):
+                    continue
+                obs = observation if isinstance(observation, str) else str(observation)
+                obs_snippet = " ".join(obs.split())[:300]
+                print(f"     {i}. {getattr(action, 'tool', '?')}({getattr(action, 'tool_input', '')}) -> {obs_snippet}")
+        if isinstance(output, str) and "Agent stopped due to max iterations" in output:
+            print("  ⚠️  [ToolEnabledAgent] hit max_iterations without emitting a final answer")
+
+    def _build_structuring_prompt(self, output, steps):
+        """Bounded prompt to derive structured output from what the agent gathered,
+        used when the agent's own final text isn't parseable JSON (prose, or the
+        max_iterations sentinel). Per-observation size is capped to bound tokens."""
+        parts = [
+            "Produce the required structured output for this code review, based only "
+            "on the reviewer notes and tool results below. If no genuine problem is "
+            "evident, return an empty issues list."
+        ]
+        if isinstance(output, str) and output and "Agent stopped due to max iterations" not in output:
+            parts.append(f"\nReviewer notes:\n{output[:4000]}")
+        if steps:
+            parts.append("\nContext gathered via tools:")
+            for step in steps[-12:]:
+                try:
+                    action, observation = step
+                except (ValueError, TypeError):
+                    continue
+                obs = observation if isinstance(observation, str) else str(observation)
+                parts.append(f"- {getattr(action, 'tool', '?')}: {obs[:1500]}")
+        return "\n".join(parts)
+
     async def run(
         self,
         input_text: str,
@@ -197,23 +238,23 @@ class ToolEnabledAgent:
             # Invoke agent
             result = await self.agent_executor.ainvoke(input_data, config=config)
 
-            # Extract output
+            # Extract the final output + the tool call/result trace
             output = result.get("output", "")
+            steps = result.get("intermediate_steps", []) or []
+            self._log_run(steps, output)
 
             # Parse structured output if model specified
             if self.output_model:
                 parsed_output = self._parse_text_output(output)
                 if parsed_output is None:
-                    # Couldn't recover JSON from the free text — ask the model to
-                    # coerce its own answer into the schema. Function calling is far
-                    # more reliable than parsing prose, and this only runs on the
-                    # rare occasions the direct parse fails.
-                    print("  ⚠️  [ToolEnabledAgent] Could not parse structured output; re-formatting via structured LLM call")
+                    # Agent didn't emit parseable JSON (prose, or it hit
+                    # max_iterations and returned the sentinel string). Derive the
+                    # structured result from what it actually gathered, via a single
+                    # reliable with_structured_output call.
+                    print("  ⚠️  [ToolEnabledAgent] No parseable final answer; deriving structured output from gathered context")
                     structured_llm = self.llm.with_structured_output(self.output_model)
                     parsed_output = await structured_llm.ainvoke(
-                        "Convert the following code-review result into the required "
-                        "structured format exactly. If it reports no problems, return "
-                        f"an empty issues list.\n\n{output}"
+                        self._build_structuring_prompt(output, steps)
                     )
                 return parsed_output
 
@@ -243,19 +284,19 @@ class ToolEnabledAgent:
             # Invoke agent
             result = self.agent_executor.invoke(input_data)
 
-            # Extract output
+            # Extract the final output + the tool call/result trace
             output = result.get("output", "")
+            steps = result.get("intermediate_steps", []) or []
+            self._log_run(steps, output)
 
             # Parse structured output if model specified
             if self.output_model:
                 parsed_output = self._parse_text_output(output)
                 if parsed_output is None:
-                    print("  ⚠️  [ToolEnabledAgent] Could not parse structured output; re-formatting via structured LLM call")
+                    print("  ⚠️  [ToolEnabledAgent] No parseable final answer; deriving structured output from gathered context")
                     structured_llm = self.llm.with_structured_output(self.output_model)
                     parsed_output = structured_llm.invoke(
-                        "Convert the following code-review result into the required "
-                        "structured format exactly. If it reports no problems, return "
-                        f"an empty issues list.\n\n{output}"
+                        self._build_structuring_prompt(output, steps)
                     )
                 return parsed_output
 
