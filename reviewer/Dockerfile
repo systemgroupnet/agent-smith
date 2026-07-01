@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM registry.example.com/python:3.13-slim
  
 WORKDIR /app
 
@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN pip install uv
+RUN pip install uv -i https://pypi.org/simple
 
 COPY requirements.txt .
 
