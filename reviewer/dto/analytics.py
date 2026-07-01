@@ -1,0 +1,80 @@
+"""Analytics event emitted once per MR-review run.
+
+This model is populated incrementally over the course of a run (see
+``main.py::process_mr``) and serialized to JSON exactly once, in a ``finally``
+block, so that *every* exit path — the happy path, the "no new commits" and
+"no issues" early returns, and unhandled exceptions — produces one event.
+
+The collector service validates this payload independently (each service has
+its own Docker build context and cannot import the other's code), so the
+contract between the two is JSON, not a shared class. ``schema_version`` lets
+the two evolve without lockstep deploys; the collector stores unknown fields
+rather than rejecting them.
+"""
+
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+# Bump when the meaning of existing fields changes (not merely when adding new
+# optional ones — the collector tolerates extra/missing fields).
+ANALYTICS_SCHEMA_VERSION = "1"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class RunMetrics(BaseModel):
+    """Mutable accumulator + wire payload for a single review run.
+
+    All fields are optional/defaulted so an event is meaningful even for a run
+    that fails before it learns the MR's identity (bad URL, missing token).
+    """
+
+    schema_version: str = ANALYTICS_SCHEMA_VERSION
+    run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Run start time; the collector treats this as the event timestamp.
+    timestamp: str = Field(default_factory=_utc_now_iso)
+
+    # --- MR identity (populated once the URL is parsed / MR is fetched) ---
+    mr_url: Optional[str] = None
+    project_path: Optional[str] = None
+    mr_id: Optional[str] = None
+    mr_title: Optional[str] = None
+    source_branch: Optional[str] = None
+    target_branch: Optional[str] = None
+    head_sha: Optional[str] = None
+    last_reviewed_sha: Optional[str] = None
+
+    # "full" | "incremental" | "none" (no code to review) | None (never got there)
+    review_type: Optional[str] = None
+    # LLM model in provider/model form, e.g. "deepseek/deepseek-v4-pro".
+    model: Optional[str] = None
+
+    # --- file counts ---
+    files_changed_total: int = 0   # full MR changed-file count
+    files_reviewed: int = 0        # reviewed successfully this run
+    files_failed: int = 0          # raised during review
+    files_skipped: int = 0         # deleted / excluded / unfetchable
+
+    # --- issue counts (across all reviewed files, before comment filtering) ---
+    issues_total: int = 0
+    issues_high: int = 0
+    issues_medium: int = 0
+    issues_low: int = 0
+
+    # --- comment posting (after the comment-reviewer filter) ---
+    comments_selected: int = 0
+    comments_posted: int = 0
+    comments_failed: int = 0
+
+    duration_seconds: Optional[float] = None
+
+    # "success" | "partial_failure" | "no_op" | "config_error" | "error".
+    # Defaults to "error" so an unexpected crash is recorded as a failure unless
+    # a clean exit path explicitly overwrites it.
+    status: str = "error"
