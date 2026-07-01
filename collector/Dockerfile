@@ -11,7 +11,7 @@ RUN pip install uv
 
 COPY requirements.txt .
 
-RUN uv pip install --system -r requirements.txt
+RUN uv pip install -i https://pypi.org/simple --system -r requirements.txt
 
 COPY . .
 
