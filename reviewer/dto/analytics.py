@@ -12,6 +12,7 @@ the two evolve without lockstep deploys; the collector stores unknown fields
 rather than rejecting them.
 """
 
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -28,6 +29,25 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def get_reviewer_version() -> str:
+    """Resolve the running reviewer's version from the PR_AGENT_IMAGE env.
+
+    The GitLab runner sets PR_AGENT_IMAGE to this agent's full image ref
+    (e.g. ``registry.example.com/aid/codereviewagent/reviewer:v0.3.2``).
+    The version is the tag after the final ':'. We guard against a registry-port
+    colon with no tag (that trailing segment still contains '/') by falling back
+    to the full value. Always returns a non-empty string so every event carries
+    a version; "dev" when the env is unset (local runs).
+    """
+    raw = os.getenv("PR_AGENT_IMAGE", "").strip()
+    if not raw:
+        return "dev"
+    tag = raw.rsplit(":", 1)[-1]
+    if tag and "/" not in tag:
+        return tag
+    return raw
+
+
 class RunMetrics(BaseModel):
     """Mutable accumulator + wire payload for a single review run.
 
@@ -39,6 +59,9 @@ class RunMetrics(BaseModel):
     run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     # Run start time; the collector treats this as the event timestamp.
     timestamp: str = Field(default_factory=_utc_now_iso)
+    # Reviewer build version (image tag / commit sha), resolved at construction
+    # so every event — including early-exit and error events — carries it.
+    reviewer_version: str = Field(default_factory=get_reviewer_version)
 
     # --- MR identity (populated once the URL is parsed / MR is fetched) ---
     mr_url: Optional[str] = None
@@ -73,6 +96,9 @@ class RunMetrics(BaseModel):
     comments_failed: int = 0
 
     duration_seconds: Optional[float] = None
+    # True when the overall-timeout budget truncated the review (some files were
+    # not reviewed; the marker is held so a re-run picks them up).
+    timed_out: bool = False
 
     # "success" | "partial_failure" | "no_op" | "config_error" | "error".
     # Defaults to "error" so an unexpected crash is recorded as a failure unless

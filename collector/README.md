@@ -3,7 +3,8 @@
 Second service of the `codereviewagent` monorepo (alongside [`reviewer/`](../reviewer)).
 
 Ingests one **analytics event per review run** emitted by the reviewer and stores
-it in SQLite. A dashboard can be built on top of the read API later.
+it in PostgreSQL. A dashboard (e.g. DevLake/Grafana) can be built on top of the
+read API or the database later.
 
 ## Endpoints
 
@@ -14,40 +15,45 @@ it in SQLite. A dashboard can be built on top of the read API later.
 | `GET`  | `/health`     | Liveness + stored-event count. |
 
 The payload is validated **leniently**: it must be a JSON object, but unknown or
-missing fields are tolerated (unknown fields are preserved in a `raw_json` blob;
-missing typed fields become `NULL`). This lets the reviewer and collector evolve
-independently — the contract is JSON plus a `schema_version` field, not a shared
-Python model (each service has its own Docker build context and can't import the
-other's code). See [`reviewer/dto/analytics.py`](../reviewer/dto/analytics.py) for
-the fields the reviewer currently sends.
+missing fields are tolerated (unknown fields are preserved in a `raw_json` JSONB
+column; missing typed fields become `NULL`). This lets the reviewer and collector
+evolve independently — the contract is JSON plus a `schema_version` field, not a
+shared Python model (each service has its own Docker build context and can't
+import the other's code). See [`reviewer/dto/analytics.py`](../reviewer/dto/analytics.py)
+for the fields the reviewer currently sends.
 
 ## Storage
 
-SQLite at `COLLECTOR_DB_PATH` (default `/data/collector.db`). The Docker image
-mounts a named volume at `/data` so data survives container restarts. One
+**PostgreSQL** (required; no SQLite fallback), via `COLLECTOR_DATABASE_URL`. One
 `review_runs` table: typed columns for the fields a dashboard filters/groups on
-(project, status, review_type, counts, duration, timestamps) plus the `raw_json`
-blob.
+(project, status, review_type, counts, duration, timestamps, `reviewer_version`)
+plus a `raw_json` **JSONB** column preserving the full payload.
+
+Schema is managed by **Alembic** (`migrations/`). `storage.run_migrations()`
+applies `alembic upgrade head` at startup (called from `main.py` at import), so a
+fresh database is created and an existing one is upgraded automatically. The
+initial revision is guarded to adopt a table created by the earlier
+`create_all`-based collector without dropping data. To run migrations by hand:
+`COLLECTOR_DATABASE_URL=… alembic upgrade head` (from `collector/`).
 
 ## Configuration
 
 | Variable | Default | Notes |
 |---|---|---|
-| `COLLECTOR_DB_PATH` | `/data/collector.db` | SQLite file path. |
+| `COLLECTOR_DATABASE_URL` | _(required)_ | PostgreSQL SQLAlchemy URL, e.g. `postgresql+psycopg://user:pass@host:5432/collector`. |
 | `COLLECTOR_TOKEN` | _(unset)_ | When set, `POST /api/events` requires a matching `X-Collector-Token` header. Unset → open (fine on a trusted network). |
 | `PORT` | `8000` | Only used by the local dev server (`python main.py`). |
 
 ## Build / run locally
 
 ```bash
-# Directly (dev server on :8000)
+# Directly (dev server on :8000) — needs a reachable PostgreSQL
 cd collector
 pip install -r requirements.txt
-COLLECTOR_DB_PATH=./collector.db python main.py
+COLLECTOR_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/collector python main.py
 
-# Or via Docker (serves with gunicorn on :8000)
-docker build -t collector:dev collector
-docker run --rm -p 8000:8000 -v collector-data:/data collector:dev
+# Or via Docker Compose (brings up Postgres + collector together)
+docker compose -f ../docker-compose.collector.yml up -d
 
 # Smoke test
 curl localhost:8000/health

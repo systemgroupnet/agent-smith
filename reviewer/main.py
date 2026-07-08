@@ -380,17 +380,37 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     batch_size = max(1, int_env("FILE_BATCH_SIZE", 5))
     total_batches = (len(changes_to_review) + batch_size - 1) // batch_size
 
-    print(f"🔄 Processing {len(changes_to_review)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently\n")
+    # Overall runtime budget: once exceeded, stop reviewing remaining files and
+    # jump straight to comment filtering/posting with whatever was gathered, so a
+    # slow/large MR still posts findings within the CI window instead of running
+    # until the job is killed. The marker is NOT advanced when we truncate (see
+    # below), so a re-run picks up the files we skipped.
+    overall_timeout_s = int_env("OVERALL_TIMEOUT_S", 1500)  # 25 min
+    overall_deadline = time.monotonic() + overall_timeout_s
+    timed_out = False
+
+    print(f"🔄 Processing {len(changes_to_review)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently")
+    print(f"⏳ Overall review budget: {overall_timeout_s}s\n")
 
     for batch_num in range(total_batches):
+        if time.monotonic() >= overall_deadline:
+            reviewed_so_far = batch_num * batch_size
+            remaining = len(changes_to_review) - reviewed_so_far
+            timed_out = True
+            print(
+                f"\n⏳ Overall timeout ({overall_timeout_s}s) reached after {batch_num}/{total_batches} "
+                f"batch(es); skipping ~{remaining} remaining file(s) and proceeding to comment filtering/posting."
+            )
+            break
+
         start_idx = batch_num * batch_size
         end_idx = min(start_idx + batch_size, len(changes_to_review))
         batch = changes_to_review[start_idx:end_idx]
-        
+
         print(f"\n{'=' * 60}")
         print(f"📦 Processing batch {batch_num + 1}/{total_batches} ({len(batch)} file(s))")
         print(f"{'=' * 60}")
-        
+
         # Create tasks for concurrent processing
         tasks = [
             process_single_file(
@@ -425,10 +445,13 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         print(f"\n✅ Batch {batch_num + 1}/{total_batches} completed")
     
     print(f"\n{'=' * 60}")
-    print(f"✅ All batches completed: {len(all_comments)} file(s) reviewed successfully")
+    print(f"✅ Review pass done: {len(all_comments)} file(s) reviewed successfully")
     if file_error_count:
         print(f"⚠️  {file_error_count} file(s) failed to review (the run will exit non-zero)")
+    if timed_out:
+        print(f"⏳ Review pass truncated by the overall timeout — some files were not reviewed")
     print(f"{'=' * 60}")
+    metrics.timed_out = timed_out
 
     # Aggregate per-run analytics from this pass. Files that returned None were
     # skipped (deleted/excluded/unfetchable); exceptions were counted as failures.
@@ -455,17 +478,20 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     # reviews newer commits. Done here (after the review pass, before the early-returns
     # below) so even runs that find no issues still advance the marker.
     #
-    # Skip advancing when any file failed to review: leaving the marker where it is
-    # means a re-run re-enters the incremental compare and retries the failed file(s),
-    # instead of short-circuiting on "no new commits" and reporting success while the
-    # failure was never actually reviewed. Trade-off: on that retry, files that DID
-    # succeed get their inline comments posted again (GitLab does not de-duplicate
-    # discussions) — a visible duplicate is preferable to a silently-green failure.
-    if head_sha and file_error_count == 0:
+    # Skip advancing when any file failed to review OR the run was truncated by the
+    # overall timeout: leaving the marker where it is means a re-run re-enters the
+    # incremental compare and reviews the file(s) we didn't get to, instead of
+    # short-circuiting on "no new commits" and reporting a complete review that
+    # never happened. Trade-off: on that retry, files that DID succeed get their
+    # inline comments posted again (GitLab does not de-duplicate discussions) — a
+    # visible duplicate is preferable to silently skipping un-reviewed files.
+    if head_sha and file_error_count == 0 and not timed_out:
         if await upsert_review_marker(
             gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id
         ):
             print(f"🔖 Review marker updated to {head_sha[:8]}")
+    elif head_sha and timed_out:
+        print("⏭️  Not advancing review marker — run hit the overall timeout; a re-run will review the remaining files")
     elif head_sha and file_error_count:
         print(f"⏭️  Not advancing review marker — {file_error_count} file(s) failed; a re-run will retry them")
 
@@ -496,7 +522,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         metrics.comments_selected = len(filtered_issues)
     else:
         print(f"ℹ️  No high-severity issues to filter")
-        metrics.status = "partial_failure" if file_error_count else "success"
+        # A timeout truncation is a partial review (marker held), but it exits 0 —
+        # it posted what it could, by design; only real file errors exit non-zero.
+        metrics.status = "partial_failure" if (file_error_count or timed_out) else "success"
         return 1 if file_error_count else 0
 
     # Post comments to GitLab
@@ -545,10 +573,12 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
 
     metrics.comments_posted = total_posted
     metrics.comments_failed = total_failed
-    metrics.status = "partial_failure" if (file_error_count or total_failed) else "success"
+    metrics.status = "partial_failure" if (file_error_count or total_failed or timed_out) else "success"
 
     # Non-zero exit if any file failed to review or any comment failed to post, so
-    # GitLab CI reflects the failure instead of showing a green job.
+    # GitLab CI reflects the failure instead of showing a green job. A timeout
+    # truncation exits 0 on purpose — it degraded gracefully and posted its
+    # findings; the held marker makes a later run pick up the remaining files.
     return 1 if (file_error_count or total_failed) else 0
 
 

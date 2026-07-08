@@ -1,23 +1,20 @@
-"""Storage for review-run analytics events (SQLAlchemy Core, engine-agnostic).
+"""PostgreSQL storage for review-run analytics events (SQLAlchemy Core).
 
 One ``review_runs`` table: typed columns for the fields a dashboard will filter
 and group on (project, status, review_type, counts, duration, timestamps) plus a
-``raw_json`` payload column holding the exact event the reviewer sent. The
-payload column makes the store lenient — unknown or future fields are preserved
-without a migration, and missing fields simply land as NULL in their typed
-column.
+``raw_json`` JSONB column holding the exact event the reviewer sent. The JSONB
+column makes the store lenient — unknown or future fields are preserved without
+a migration, and missing fields simply land as NULL in their typed column.
 
-Backend is chosen by ``COLLECTOR_DATABASE_URL`` (a SQLAlchemy URL), e.g.
-``postgresql+psycopg://user:pass@host:5432/collector``. PostgreSQL is the
-production target so the data lands in a DevLake-compatible database (DevLake
-ingests from PostgreSQL/MySQL). When the URL is unset the store falls back to a
-local SQLite file at ``COLLECTOR_DB_PATH`` — convenient for local dev and tests,
-since the same code runs on both. On PostgreSQL ``raw_json`` is JSONB
-(queryable/indexable); on SQLite it is the generic JSON type (TEXT-backed).
+PostgreSQL only (so DevLake can ingest the data); the backend URL comes from
+``COLLECTOR_DATABASE_URL`` (e.g. ``postgresql+psycopg://user:pass@host:5432/collector``).
+Schema is owned by **Alembic** (see ``migrations/``); ``run_migrations`` applies
+``alembic upgrade head`` at startup. This module only defines the table (as the
+Alembic autogenerate target) and the read/write queries.
 
-A single ``Engine`` (with a connection pool) is created lazily and reused. Each
-call runs in its own transaction (``with engine.begin()``); the engine/pool is
-safe to share across the threaded WSGI worker.
+A single ``Engine`` (with a connection pool) is created lazily and reused; each
+call runs in its own transaction and the pool is safe across the threaded WSGI
+worker.
 """
 
 import json
@@ -26,7 +23,6 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import (
-    JSON,
     Column,
     Float,
     Index,
@@ -39,8 +35,6 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-
-DEFAULT_DB_PATH = "/data/collector.db"
 
 # Typed columns pulled out of each payload for querying. Everything (including
 # these) is also preserved verbatim in raw_json.
@@ -61,6 +55,7 @@ _TYPED_TEXT_FIELDS = (
     "schema_version",
     "run_id",
     "timestamp",
+    "reviewer_version",
     "project_path",
     "mr_id",
     "mr_url",
@@ -74,19 +69,16 @@ _TYPED_TEXT_FIELDS = (
     "status",
 )
 
-# JSONB on PostgreSQL (queryable/indexable), generic JSON elsewhere (SQLite).
-_JSON_TYPE = JSON().with_variant(JSONB(), "postgresql")
-
-_metadata = MetaData()
+metadata = MetaData()
 review_runs = Table(
     "review_runs",
-    _metadata,
+    metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("received_at", String, nullable=False),  # server-side ingest time (ISO UTC)
     Column("duration_seconds", Float),
     *[Column(name, String) for name in _TYPED_TEXT_FIELDS],
     *[Column(name, Integer) for name in _TYPED_INT_FIELDS],
-    Column("raw_json", _JSON_TYPE, nullable=False),
+    Column("raw_json", JSONB, nullable=False),
     Index("idx_review_runs_project_mr", "project_path", "mr_id"),
     Index("idx_review_runs_timestamp", "timestamp"),
 )
@@ -95,30 +87,36 @@ _engine = None
 
 
 def database_url() -> str:
-    """Resolve the SQLAlchemy URL: COLLECTOR_DATABASE_URL, else a local SQLite file."""
+    """The PostgreSQL SQLAlchemy URL from COLLECTOR_DATABASE_URL (required)."""
     url = os.getenv("COLLECTOR_DATABASE_URL", "").strip()
-    if url:
-        return url
-    path = os.getenv("COLLECTOR_DB_PATH", DEFAULT_DB_PATH)
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    return f"sqlite:///{path}"
+    if not url:
+        raise RuntimeError(
+            "COLLECTOR_DATABASE_URL is required (PostgreSQL), e.g. "
+            "postgresql+psycopg://user:pass@host:5432/collector"
+        )
+    return url
 
 
 def get_engine():
     """Lazily create and cache the process-wide Engine."""
     global _engine
     if _engine is None:
-        # pool_pre_ping avoids handing out a connection the DB has already
-        # dropped (idle timeouts, restarts); harmless for SQLite.
+        # pool_pre_ping avoids handing out a connection the DB already dropped
+        # (idle timeouts, restarts).
         _engine = create_engine(database_url(), pool_pre_ping=True, future=True)
     return _engine
 
 
-def init_db() -> None:
-    """Create the table and indexes if they don't exist. Safe to call repeatedly."""
-    _metadata.create_all(get_engine())
+def run_migrations() -> None:
+    """Apply Alembic migrations up to head. Idempotent; safe on every startup."""
+    from alembic import command
+    from alembic.config import Config
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    cfg = Config(os.path.join(here, "alembic.ini"))
+    cfg.set_main_option("script_location", os.path.join(here, "migrations"))
+    cfg.set_main_option("sqlalchemy.url", database_url())
+    command.upgrade(cfg, "head")
 
 
 def insert_event(payload: dict[str, Any]) -> int:
@@ -162,9 +160,7 @@ def list_events(
     events = []
     for row in rows:
         payload = row.raw_json
-        # PostgreSQL JSONB returns a dict; SQLite's generic JSON may hand back a
-        # str on some driver paths — normalize both to a dict.
-        if isinstance(payload, str):
+        if isinstance(payload, str):  # defensive; JSONB normally hands back a dict
             try:
                 payload = json.loads(payload)
             except (json.JSONDecodeError, TypeError):

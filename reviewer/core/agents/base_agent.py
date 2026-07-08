@@ -13,6 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
 from core.config.langchain_config import get_structured_model_for_agent, get_default_model
+from core.utils.llm_retry import with_llm_retry
 from dto.general import ReviewResponse, ReviewIssue
 
 
@@ -119,8 +120,12 @@ class BaseReviewAgent(ABC, Generic[T]):
             if context:
                 input_data.update(context)
 
-            # Invoke chain
-            result = await self.chain.ainvoke(input_data, config=config)
+            # Invoke chain, retrying transient gateway failures (e.g. the egress
+            # security proxy's burst 403) but not hard quota/limit denials.
+            result = await with_llm_retry(
+                lambda: self.chain.ainvoke(input_data, config=config),
+                label=f"{agent_name} structured call",
+            )
             
             elapsed_time = time.time() - start_time
             print(f"⏱️  {agent_name} completed in {elapsed_time:.2f}s")

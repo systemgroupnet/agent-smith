@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Optional, Type, TypeVar, List, Union
 from pydantic import BaseModel
@@ -33,6 +34,7 @@ from core.config.langchain_config import (
     get_structured_model_for_agent,
     get_default_model,
 )
+from core.utils.llm_retry import with_llm_retry
 from core.MCP.toolkit_manager import get_mcp_toolkit_manager
 from dto.general import ReviewResponse
 
@@ -172,10 +174,17 @@ class ToolEnabledAgent:
 
         return None
 
+    @staticmethod
+    def _tool_trace_enabled() -> bool:
+        """Whether to print the per-run tool-call trace. On by default; set
+        LOG_TOOL_TRACE=false to silence the verbose block in CI logs."""
+        return os.getenv("LOG_TOOL_TRACE", "true").strip().lower() in ("1", "true", "yes", "on")
+
     def _log_run(self, steps, output):
         """Surface what the agent actually did — the key diagnostic for a run that
-        loops to max_iterations (tool failures vs. genuine over-exploration)."""
-        if steps:
+        loops to max_iterations (tool failures vs. genuine over-exploration).
+        The verbose per-call trace is gated by LOG_TOOL_TRACE (default on)."""
+        if steps and self._tool_trace_enabled():
             print(f"  🔧 [ToolEnabledAgent] {len(steps)} tool call(s) this run:")
             for i, step in enumerate(steps, 1):
                 try:
@@ -185,6 +194,8 @@ class ToolEnabledAgent:
                 obs = observation if isinstance(observation, str) else str(observation)
                 obs_snippet = " ".join(obs.split())[:300]
                 print(f"     {i}. {getattr(action, 'tool', '?')}({getattr(action, 'tool_input', '')}) -> {obs_snippet}")
+        # Always surface the max-iterations sentinel — it's a one-liner and the
+        # most important signal, independent of the verbose trace toggle.
         if isinstance(output, str) and "Agent stopped due to max iterations" in output:
             print("  ⚠️  [ToolEnabledAgent] hit max_iterations without emitting a final answer")
 
@@ -252,8 +263,12 @@ class ToolEnabledAgent:
             if context:
                 input_data.update(context)
 
-            # Invoke agent
-            result = await self.agent_executor.ainvoke(input_data, config=config)
+            # Invoke agent, retrying transient gateway failures (e.g. the egress
+            # security proxy's burst 403) but not hard quota/limit denials.
+            result = await with_llm_retry(
+                lambda: self.agent_executor.ainvoke(input_data, config=config),
+                label=f"{self.__class__.__name__} agent",
+            )
 
             # Extract the final output + the tool call/result trace
             output = result.get("output", "")
@@ -269,13 +284,15 @@ class ToolEnabledAgent:
                     # structured result from what it actually gathered, via a single
                     # reliable with_structured_output call.
                     print("  ⚠️  [ToolEnabledAgent] No parseable final answer; deriving structured output from gathered context")
-                    parsed_output = await self._get_structured_llm().ainvoke(
-                        self._build_structuring_prompt(output, steps)
+                    prompt = self._build_structuring_prompt(output, steps)
+                    parsed_output = await with_llm_retry(
+                        lambda: self._get_structured_llm().ainvoke(prompt),
+                        label=f"{self.__class__.__name__} salvage",
                     )
                 return parsed_output
 
             return output
-            
+
         except Exception as e:
             print(f"❌ Error in ToolEnabledAgent: {e}")
             raise

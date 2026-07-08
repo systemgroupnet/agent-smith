@@ -1,5 +1,5 @@
 FROM registry.example.com/python:3.13-slim
- 
+
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \

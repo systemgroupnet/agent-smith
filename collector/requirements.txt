@@ -1,5 +1,6 @@
 # Collector Python dependencies.
 flask==3.1.0             # HTTP API (matches the reviewer's Flask version)
 gunicorn>=22.0.0         # production WSGI server used by the Docker image
-SQLAlchemy>=2.0,<3.0     # engine-agnostic storage layer (Postgres in prod, SQLite for dev)
+SQLAlchemy>=2.0,<3.0     # storage layer (PostgreSQL)
+alembic>=1.13,<2.0       # schema migrations (applied at startup)
 psycopg[binary]>=3.1     # PostgreSQL driver (binary wheel bundles libpq — no system deps)

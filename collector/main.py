@@ -4,7 +4,7 @@
 Second service of the codereviewagent monorepo (alongside ``reviewer/``). The
 reviewer emits one analytics event per MR-review run (see
 ``reviewer/core/analytics/client.py``); this service ingests those events into a
-SQLite database and exposes a read API a future dashboard can build on.
+PostgreSQL database and exposes a read API a future dashboard can build on.
 
 Endpoints:
   POST /api/events   ingest one event (JSON body). Optionally token-guarded.
@@ -25,9 +25,9 @@ import storage
 
 app = Flask(__name__)
 
-# Init the DB at import time so it's ready under any WSGI server (gunicorn imports
-# the module; there is no __main__). Safe to call repeatedly (CREATE IF NOT EXISTS).
-storage.init_db()
+# Apply Alembic migrations at import time so the schema is ready under any WSGI
+# server (gunicorn imports the module; there is no __main__). Idempotent.
+storage.run_migrations()
 
 
 def _clamp_int(raw, default: int, low: int, high: int) -> int:
