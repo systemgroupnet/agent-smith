@@ -32,6 +32,7 @@ services:
     depends_on:
       - mcp-atlassian
       - mcp-gitlab
+      - collector
     env_file:
       - .env
     environment:
@@ -53,6 +54,11 @@ services:
       - MCP_AIAND_TRANSPORT=${MCP_AIAND_TRANSPORT:-streamable-http}
       - GITLAB_URL=${GITLAB_URL}
       - GITLAB_TOKEN=${GITLAB_TOKEN}
+      # Run analytics — opt-in. Off by default so a reviewer run never depends on
+      # the collector being reachable (e.g. in one-shot GitLab CI containers).
+      - COLLECTOR_ENABLED=${COLLECTOR_ENABLED:-false}
+      - COLLECTOR_URL=${COLLECTOR_URL:-http://collector:8000}
+      - COLLECTOR_TOKEN=${COLLECTOR_TOKEN:-}
     volumes:
       - ./reviewer:/app
       - ./.env:/app/.env:ro
@@ -62,6 +68,27 @@ services:
       - "5000:5000"
     command: python app.py
 
+  collector:
+    build:
+      context: ./collector
+      dockerfile: Dockerfile
+    image: codereviewagent-collector:local
+    container_name: codereview-collector
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_DB_PATH=/data/collector.db
+      # When set, POST /api/events requires a matching X-Collector-Token header.
+      - COLLECTOR_TOKEN=${COLLECTOR_TOKEN:-}
+    volumes:
+      - collector-data:/data
+    networks:
+      - codereview-network
+    ports:
+      - "8000:8000"
+
 networks:
   codereview-network:
     driver: bridge
+
+volumes:
+  collector-data:

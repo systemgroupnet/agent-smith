@@ -1,2 +1,4 @@
-# Collector Python dependencies. Empty for now — add packages as the collector
-# is implemented. `uv pip install -r requirements.txt` is a no-op while empty.
+# Collector Python dependencies.
+flask==3.1.0        # HTTP API (matches the reviewer's Flask version)
+gunicorn>=22.0.0    # production WSGI server used by the Docker image
+# Storage is SQLite via the stdlib `sqlite3` module — no dependency needed.

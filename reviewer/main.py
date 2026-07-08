@@ -39,6 +39,8 @@ from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
 from core.config.langchain_config import get_llm_model
+from core.analytics import send_run_analytics
+from dto.analytics import RunMetrics
 
 
 async def process_single_file(
@@ -192,6 +194,24 @@ async def llm_preflight() -> bool:
 
 
 async def process_mr(mr_url: str):
+    """Process an MR and emit exactly one analytics event for the run.
+
+    The review logic lives in ``_run_review``; this wrapper exists purely so the
+    ``finally`` block fires on every exit path (the happy path, the "no new
+    commits" / "no issues" early returns, and unhandled exceptions) and sends a
+    single event. ``RunMetrics`` defaults ``status`` to ``"error"``, so a run
+    that crashes before a clean exit path is recorded as a failure.
+    """
+    metrics = RunMetrics(mr_url=mr_url)
+    run_start = time.monotonic()
+    try:
+        return await _run_review(mr_url, metrics)
+    finally:
+        metrics.duration_seconds = round(time.monotonic() - run_start, 3)
+        await send_run_analytics(metrics)
+
+
+async def _run_review(mr_url: str, metrics: RunMetrics):
     """Main function to process a GitLab merge request."""
     print(f"🚀 Processing GitLab MR: {mr_url}\n")
 
@@ -207,22 +227,30 @@ async def process_mr(mr_url: str):
         print(f"⚠️  Warning: Failed to initialize some MCP toolkits: {e}")
         print("   Continuing with available tools...\n")
     
+    # Record the model up front so even an early-exit run reports which model was
+    # configured (matches the reviewer's default in langchain_config / CLAUDE.md).
+    metrics.model = os.getenv("DEFAULT_LLM_MODEL", "deepseek/deepseek-v4-pro")
+
     # Parse MR URL
     mr_info = parse_gitlab_mr_url(mr_url)
     if not mr_info:
+        metrics.status = "config_error"
         return 1
-    
+
     # Get GitLab credentials
     gitlab_token = os.getenv("GITLAB_TOKEN")
     if not gitlab_token:
         print("Error: GITLAB_TOKEN not found in environment variables.")
         print("Please set GITLAB_TOKEN in your .env file.")
+        metrics.status = "config_error"
         return 1
-    
+
     gitlab_url = mr_info["domain"]
     project_path = mr_info["project_path"]
     mr_id = mr_info["mr_id"]
-    
+    metrics.project_path = project_path
+    metrics.mr_id = str(mr_id)
+
     print(f"📦 Project: {project_path}")
     print(f"🔢 MR ID: {mr_id}\n")
     
@@ -231,17 +259,22 @@ async def process_mr(mr_url: str):
     mr_data = await get_gitlab_mr_info(gitlab_url, project_path, mr_id, gitlab_token)
     if not mr_data:
         print("Error: Could not fetch MR information.")
+        metrics.status = "error"
         return 1
-    
+
     mr_title = mr_data.get("title", "")
     source_branch = mr_data.get("source_branch", "")
     target_branch = mr_data.get("target_branch", "")
-    
+    metrics.mr_title = mr_title
+    metrics.source_branch = source_branch
+    metrics.target_branch = target_branch
+
     # Get commit SHAs for posting line comments
     diff_refs = mr_data.get("diff_refs", {})
     base_sha = diff_refs.get("base_sha")
     start_sha = diff_refs.get("start_sha")
     head_sha = diff_refs.get("head_sha")
+    metrics.head_sha = head_sha
     
     print(f"📄 Title: {mr_title}")
     print(f"🌿 Source Branch: {source_branch}")
@@ -258,8 +291,11 @@ async def process_mr(mr_url: str):
     last_sha, marker_note_id = await get_review_marker(
         gitlab_url, project_path, mr_id, gitlab_token
     )
+    metrics.last_reviewed_sha = last_sha
     if last_sha and head_sha and last_sha == head_sha:
         print(f"✅ No new commits since last review ({head_sha[:8]}). Nothing to do.")
+        metrics.review_type = "none"
+        metrics.status = "no_op"
         return 0
 
     # Fetch changes
@@ -267,8 +303,10 @@ async def process_mr(mr_url: str):
     changes = await get_gitlab_mr_changes(gitlab_url, project_path, mr_id, gitlab_token)
     if not changes:
         print("Error: Could not fetch MR changes.")
+        metrics.status = "error"
         return 1
 
+    metrics.files_changed_total = len(changes)
     print(f"Found {len(changes)} changed file(s) in the full MR\n")
 
     # Decide which files to actually review. On the first run (no marker) we review the
@@ -276,6 +314,7 @@ async def process_mr(mr_url: str):
     # reviewed commit and the current head. The full `changes` list is still used below to
     # build the shared MR context so reviewers keep full cross-file awareness.
     changes_to_review = changes
+    metrics.review_type = "full"
     if last_sha and head_sha and last_sha != head_sha:
         print(f"🔁 Incremental review: comparing {last_sha[:8]}..{head_sha[:8]}")
         incremental = await get_gitlab_compare(
@@ -288,9 +327,12 @@ async def process_mr(mr_url: str):
             await upsert_review_marker(
                 gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id
             )
+            metrics.review_type = "none"
+            metrics.status = "no_op"
             return 0
         else:
             changes_to_review = incremental
+            metrics.review_type = "incremental"
             print(f"Reviewing {len(changes_to_review)} changed file(s) from new commits\n")
     
     # Get exclusion patterns from environment variable
@@ -388,6 +430,24 @@ async def process_mr(mr_url: str):
         print(f"⚠️  {file_error_count} file(s) failed to review (the run will exit non-zero)")
     print(f"{'=' * 60}")
 
+    # Aggregate per-run analytics from this pass. Files that returned None were
+    # skipped (deleted/excluded/unfetchable); exceptions were counted as failures.
+    metrics.files_reviewed = len(all_comments)
+    metrics.files_failed = file_error_count
+    metrics.files_skipped = max(
+        0, len(changes_to_review) - len(all_comments) - file_error_count
+    )
+    for _file_path, issues in all_comments:
+        metrics.issues_total += len(issues)
+        for issue in issues:
+            severity = (issue.severity or "").strip().lower()
+            if severity == "high":
+                metrics.issues_high += 1
+            elif severity == "medium":
+                metrics.issues_medium += 1
+            elif severity == "low":
+                metrics.issues_low += 1
+
     # Record that we've reviewed up to the current head, so the next pipeline run only
     # reviews newer commits. Done here (after the review pass, before the early-returns
     # below) so even runs that find no issues still advance the marker.
@@ -430,8 +490,10 @@ async def process_mr(mr_url: str):
         filtered_issues = await review_comments_with_agent(
             all_high_severity_issues, config=comment_config
         )
+        metrics.comments_selected = len(filtered_issues)
     else:
         print(f"ℹ️  No high-severity issues to filter")
+        metrics.status = "partial_failure" if file_error_count else "success"
         return 1 if file_error_count else 0
 
     # Post comments to GitLab
@@ -477,6 +539,10 @@ async def process_mr(mr_url: str):
     print(f"📤 Comments posted: {total_posted}")
     print(f"❌ Failed comments: {total_failed}")
     print(f"{'=' * 60}\n")
+
+    metrics.comments_posted = total_posted
+    metrics.comments_failed = total_failed
+    metrics.status = "partial_failure" if (file_error_count or total_failed) else "success"
 
     # Non-zero exit if any file failed to review or any comment failed to post, so
     # GitLab CI reflects the failure instead of showing a green job.
