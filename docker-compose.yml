@@ -97,7 +97,9 @@ services:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=collector
     volumes:
-      - collector-db-data:/var/lib/postgresql/data
+      # Postgres 18+ wants the mount at /var/lib/postgresql (PGDATA is in a
+      # version-specific subdir below it), not /var/lib/postgresql/data.
+      - collector-db-data:/var/lib/postgresql
     networks:
       - codereview-network
     healthcheck:
