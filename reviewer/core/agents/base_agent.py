@@ -11,9 +11,8 @@ from typing import Optional, Type, TypeVar, Generic
 from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import ChatOpenAI
 
-from core.config.langchain_config import get_model_for_agent, get_default_model
+from core.config.langchain_config import get_structured_model_for_agent, get_default_model
 from dto.general import ReviewResponse, ReviewIssue
 
 
@@ -50,11 +49,12 @@ class BaseReviewAgent(ABC, Generic[T]):
         self.temperature = temperature
         self.output_model = output_model
         
-        # Initialize LLM
-        self.llm = get_model_for_agent(
+        # Initialize LLM. This agent's only LLM use is the structured-output
+        # chain (forced tool_choice), so use the structured variant — it turns
+        # reasoning off for models whose thinking mode rejects forced tool_choice.
+        self.llm = get_structured_model_for_agent(
             resolved_model,
             temperature=temperature,
-            streaming=False
         )
         
         # Build chain
@@ -76,9 +76,10 @@ class BaseReviewAgent(ABC, Generic[T]):
         # Get system prompt from subclass
         system_prompt = self.get_system_prompt()
         
-        # Use structured output with the LLM directly
-        # This is the modern approach that avoids prompt template variable issues
-        llm_with_structure = self.llm.with_structured_output(self.output_model)
+        # Use structured output with the LLM directly. Force function_calling so it
+        # routes to the same providers as tool calls (avoids the json-schema/strict
+        # "no endpoints match your data policy" 404 on OpenRouter).
+        llm_with_structure = self.llm.with_structured_output(self.output_model, method="function_calling")
         
         # Create prompt template (no format instructions needed with structured output)
         self.prompt = ChatPromptTemplate.from_messages([

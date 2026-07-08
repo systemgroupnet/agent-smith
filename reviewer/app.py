@@ -9,9 +9,8 @@ load_dotenv()
 from core.config import setup_proxy
 setup_proxy()
 
-# Import MCP session cleanup functions
-from core.MCP.gitlab_mcp_client import close_gitlab_mcp_session
-from core.MCP.atlassian_mcp_client import close_atlassian_mcp_session
+# Import MCP session cleanup (centralized toolkit manager)
+from core.MCP.toolkit_manager import close_mcp_toolkits
 
 app = Flask(__name__,static_folder='assets', static_url_path='/assets')
 
@@ -20,8 +19,7 @@ async def cleanup_mcp_sessions():
     """Clean up MCP sessions on application shutdown."""
     print("\n🔌 Cleaning up MCP sessions...")
     try:
-        await close_gitlab_mcp_session()
-        await close_atlassian_mcp_session()
+        await close_mcp_toolkits()
         print("✅ MCP sessions closed successfully")
     except Exception as e:
         print(f"⚠️  Error closing MCP sessions: {e}")

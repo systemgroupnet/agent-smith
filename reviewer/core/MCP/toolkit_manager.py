@@ -20,7 +20,7 @@ import os
 from typing import List, Optional, Dict, Literal, Awaitable, Callable
 import asyncio
 from langchain_core.tools import BaseTool
-from langchain_mcp import MCPToolkit
+from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
@@ -58,9 +58,9 @@ class MCPToolkitManager:
 
     def __init__(self):
         """Initialize the toolkit manager."""
-        self._gitlab_toolkit: Optional[MCPToolkit] = None
-        self._atlassian_toolkit: Optional[MCPToolkit] = None
-        self._aiand_toolkit: Optional[MCPToolkit] = None
+        self._gitlab_tools: Optional[List[BaseTool]] = None
+        self._atlassian_tools: Optional[List[BaseTool]] = None
+        self._aiand_tools: Optional[List[BaseTool]] = None
         self._exit_stack: Optional[AsyncExitStack] = None
         self._initialized = False
     
@@ -121,8 +121,8 @@ class MCPToolkitManager:
         """
         Initialize all enabled MCP toolkits.
         
-        This method creates and initializes MCPToolkit instances for each
-        enabled MCP server (GitLab, Atlassian).
+        This method opens a session to each enabled MCP server (GitLab,
+        Atlassian, AIAND Source) and loads its tools via langchain-mcp-adapters.
         
         Raises:
             Exception: If toolkit initialization fails
@@ -142,7 +142,7 @@ class MCPToolkitManager:
         # Initialize GitLab toolkit (isolated to prevent cancel scope leakage)
         if self.is_gitlab_enabled():
             await self._initialize_toolkit_isolated(
-                self._initialize_gitlab_toolkit,
+                self._initialize_gitlab_tools,
                 "GitLab MCP"
             )
         else:
@@ -151,7 +151,7 @@ class MCPToolkitManager:
         # Initialize Atlassian toolkit (isolated to prevent cancel scope leakage)
         if self.is_atlassian_enabled():
             await self._initialize_toolkit_isolated(
-                self._initialize_atlassian_toolkit,
+                self._initialize_atlassian_tools,
                 "Atlassian MCP"
             )
         else:
@@ -160,7 +160,7 @@ class MCPToolkitManager:
         # Initialize AIAND Source toolkit (isolated to prevent cancel scope leakage)
         if self.is_aiand_enabled():
             await self._initialize_toolkit_isolated(
-                self._initialize_aiand_toolkit,
+                self._initialize_aiand_tools,
                 "AIAND Source MCP"
             )
         else:
@@ -169,7 +169,7 @@ class MCPToolkitManager:
         self._initialized = True
         print("\n✅ MCP Toolkit Manager initialized\n")
     
-    async def _initialize_gitlab_toolkit(self) -> None:
+    async def _initialize_gitlab_tools(self) -> None:
         """Initialize GitLab MCP toolkit."""
         try:
             url = self._get_gitlab_url()
@@ -193,16 +193,15 @@ class MCPToolkitManager:
             # Create ClientSession with the streams
             session = ClientSession(read_stream, write_stream)
             
-            # Initialize the session
+            # Enter + initialize the session (kept open via the exit stack so the
+            # loaded tools can call it), then load its tools (langchain-mcp-adapters).
             await self._exit_stack.enter_async_context(session)
-            
-            # Create MCPToolkit with the session
-            self._gitlab_toolkit = MCPToolkit(session=session)
-            
-            print(f"  🔄 [GitLab MCP] Initializing toolkit...")
-            await self._gitlab_toolkit.initialize()
-            
-            all_tools = self._gitlab_toolkit.get_tools()
+            await session.initialize()
+
+            print(f"  🔄 [GitLab MCP] Loading tools...")
+            self._gitlab_tools = await load_mcp_tools(session)
+
+            all_tools = self._gitlab_tools
             filtered_tools = [t for t in all_tools if t.name in self.ALLOWED_GITLAB_TOOLS]
             print(f"  ✅ [GitLab MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s) (filtered)")
             
@@ -215,16 +214,16 @@ class MCPToolkitManager:
             if task is not None:
                 task.uncancel()
             print(f"  ❌ [GitLab MCP] Initialization cancelled: {e}")
-            self._gitlab_toolkit = None
+            self._gitlab_tools = None
             # Don't raise - allow partial initialization
         except Exception as e:
             print(f"  ❌ [GitLab MCP] Failed to initialize: {e}")
             import traceback
             print(f"     Traceback: {traceback.format_exc()}")
-            self._gitlab_toolkit = None
+            self._gitlab_tools = None
             # Don't raise - allow partial initialization
     
-    async def _initialize_atlassian_toolkit(self) -> None:
+    async def _initialize_atlassian_tools(self) -> None:
         """Initialize Atlassian MCP toolkit."""
         try:
             url = self._get_atlassian_url()
@@ -248,16 +247,15 @@ class MCPToolkitManager:
             # Create ClientSession with the streams
             session = ClientSession(read_stream, write_stream)
             
-            # Initialize the session
+            # Enter + initialize the session (kept open via the exit stack), then
+            # load its tools (langchain-mcp-adapters).
             await self._exit_stack.enter_async_context(session)
-            
-            # Create MCPToolkit with the session
-            self._atlassian_toolkit = MCPToolkit(session=session)
-            
-            print(f"  🔄 [Atlassian MCP] Initializing toolkit...")
-            await self._atlassian_toolkit.initialize()
-            
-            all_tools = self._atlassian_toolkit.get_tools()
+            await session.initialize()
+
+            print(f"  🔄 [Atlassian MCP] Loading tools...")
+            self._atlassian_tools = await load_mcp_tools(session)
+
+            all_tools = self._atlassian_tools
             filtered_tools = [t for t in all_tools if t.name in self.ALLOWED_ATLASSIAN_TOOLS]
             print(f"  ✅ [Atlassian MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s) (filtered)")
             
@@ -270,16 +268,16 @@ class MCPToolkitManager:
             if task is not None:
                 task.uncancel()
             print(f"  ❌ [Atlassian MCP] Initialization cancelled: {e}")
-            self._atlassian_toolkit = None
+            self._atlassian_tools = None
             # Don't raise - allow partial initialization
         except Exception as e:
             print(f"  ❌ [Atlassian MCP] Failed to initialize: {e}")
             import traceback
             print(f"     Traceback: {traceback.format_exc()}")
-            self._atlassian_toolkit = None
+            self._atlassian_tools = None
             # Don't raise - allow partial initialization
 
-    async def _initialize_aiand_toolkit(self) -> None:
+    async def _initialize_aiand_tools(self) -> None:
         """Initialize AIAND Source MCP toolkit (code index for old/unchanged files)."""
         try:
             url = self._get_aiand_url()
@@ -303,16 +301,15 @@ class MCPToolkitManager:
             # Create ClientSession with the streams
             session = ClientSession(read_stream, write_stream)
 
-            # Initialize the session
+            # Enter + initialize the session (kept open via the exit stack), then
+            # load its tools (langchain-mcp-adapters).
             await self._exit_stack.enter_async_context(session)
+            await session.initialize()
 
-            # Create MCPToolkit with the session
-            self._aiand_toolkit = MCPToolkit(session=session)
+            print(f"  🔄 [AIAND Source MCP] Loading tools...")
+            self._aiand_tools = await load_mcp_tools(session)
 
-            print(f"  🔄 [AIAND Source MCP] Initializing toolkit...")
-            await self._aiand_toolkit.initialize()
-
-            all_tools = self._aiand_toolkit.get_tools()
+            all_tools = self._aiand_tools
             filtered_tools = self._filter_aiand_tools(all_tools)
             print(f"  ✅ [AIAND Source MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s)")
 
@@ -325,13 +322,13 @@ class MCPToolkitManager:
             if task is not None:
                 task.uncancel()
             print(f"  ❌ [AIAND Source MCP] Initialization cancelled: {e}")
-            self._aiand_toolkit = None
+            self._aiand_tools = None
             # Don't raise - allow partial initialization
         except Exception as e:
             print(f"  ❌ [AIAND Source MCP] Failed to initialize: {e}")
             import traceback
             print(f"     Traceback: {traceback.format_exc()}")
-            self._aiand_toolkit = None
+            self._aiand_tools = None
             # Don't raise - allow partial initialization
 
     def _filter_aiand_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
@@ -388,11 +385,11 @@ class MCPToolkitManager:
         Returns:
             List of GitLab MCP tools or empty list if not initialized
         """
-        if self._gitlab_toolkit is None:
+        if self._gitlab_tools is None:
             return []
         
         try:
-            all_tools = self._gitlab_toolkit.get_tools()
+            all_tools = self._gitlab_tools
             # Filter to only allowed tools
             filtered_tools = [
                 tool for tool in all_tools 
@@ -410,11 +407,11 @@ class MCPToolkitManager:
         Returns:
             List of Atlassian MCP tools or empty list if not initialized
         """
-        if self._atlassian_toolkit is None:
+        if self._atlassian_tools is None:
             return []
         
         try:
-            all_tools = self._atlassian_toolkit.get_tools()
+            all_tools = self._atlassian_tools
             # Filter to only allowed tools
             filtered_tools = [
                 tool for tool in all_tools 
@@ -432,11 +429,11 @@ class MCPToolkitManager:
         Returns:
             List of AIAND Source MCP tools or empty list if not initialized
         """
-        if self._aiand_toolkit is None:
+        if self._aiand_tools is None:
             return []
 
         try:
-            all_tools = self._aiand_toolkit.get_tools()
+            all_tools = self._aiand_tools
             return self._filter_aiand_tools(all_tools)
         except Exception as e:
             print(f"  ⚠️  [AIAND Source MCP] Error getting tools: {e}")
@@ -477,17 +474,17 @@ class MCPToolkitManager:
         print("\n🔌 Closing MCP Toolkits...")
         
         # Clear toolkit references first
-        if self._gitlab_toolkit is not None:
+        if self._gitlab_tools is not None:
             print("  ✅ [GitLab MCP] Toolkit closed")
-            self._gitlab_toolkit = None
+            self._gitlab_tools = None
         
-        if self._atlassian_toolkit is not None:
+        if self._atlassian_tools is not None:
             print("  ✅ [Atlassian MCP] Toolkit closed")
-            self._atlassian_toolkit = None
+            self._atlassian_tools = None
 
-        if self._aiand_toolkit is not None:
+        if self._aiand_tools is not None:
             print("  ✅ [AIAND Source MCP] Toolkit closed")
-            self._aiand_toolkit = None
+            self._aiand_tools = None
 
         # Close all async context managers (SSE/HTTP clients)
         if self._exit_stack is not None:

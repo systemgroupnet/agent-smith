@@ -38,6 +38,7 @@ from core.utils.comment_formatter import format_single_issue, extract_high_sever
 from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
+from core.config.langchain_config import get_llm_model
 
 
 async def process_single_file(
@@ -120,21 +121,33 @@ async def process_single_file(
                 tags=["code-review", "file-review"],
             )
 
-        # Review file using LangGraph workflow
+        # Review file using LangGraph workflow. Bounded so one wedged call chain
+        # (LLM endpoint or MCP server gone silent) fails this file — counted as a
+        # file error, non-zero exit, marker not advanced — instead of stalling the
+        # entire run indefinitely.
         print(f"🔍 Reviewing file...")
-        issues = await review_file_with_workflow(
-            file_path=file_path,
-            content=file_content,
-            diff=diff,
-            merge_request_title=mr_title,
-            target_branch=target_branch,
-            source_branch=source_branch,
-            gitlab_token=gitlab_token,
-            gitlab_url=gitlab_url,
-            project_path=project_path,
-            mr_context=mr_context,
-            config=review_config,
-        )
+        file_timeout_s = int(os.getenv("FILE_REVIEW_TIMEOUT_S", "1200"))
+        try:
+            issues = await asyncio.wait_for(
+                review_file_with_workflow(
+                    file_path=file_path,
+                    content=file_content,
+                    diff=diff,
+                    merge_request_title=mr_title,
+                    target_branch=target_branch,
+                    source_branch=source_branch,
+                    gitlab_token=gitlab_token,
+                    gitlab_url=gitlab_url,
+                    project_path=project_path,
+                    mr_context=mr_context,
+                    config=review_config,
+                ),
+                timeout=file_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"review timed out after {file_timeout_s}s (FILE_REVIEW_TIMEOUT_S)"
+            )
 
         if issues is None:
             print(f"⚠️  Could not review {file_path}, skipping...")
@@ -154,10 +167,38 @@ async def process_single_file(
         raise
 
 
+async def llm_preflight() -> bool:
+    """One tiny bounded LLM call before any review work.
+
+    Fails fast (clear message + non-zero exit) when the LLM endpoint is dead —
+    e.g. the internal reverse proxy swallowing requests — instead of hanging
+    partway through a review with GitLab state already touched.
+    """
+    timeout_s = int(os.getenv("LLM_PREFLIGHT_TIMEOUT_S", "60"))
+    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    print(f"🩺 LLM endpoint pre-flight ({base_url})...")
+    try:
+        await asyncio.wait_for(
+            get_llm_model(max_tokens=100).ainvoke("Reply with the single word OK."),
+            timeout=timeout_s,
+        )
+        print("✅ LLM endpoint reachable\n")
+        return True
+    except Exception as e:
+        reason = str(e) or type(e).__name__
+        print(f"❌ LLM endpoint pre-flight failed after <= {timeout_s}s: {reason}")
+        print("   Aborting before review. Check the endpoint/proxy and retry.")
+        return False
+
+
 async def process_mr(mr_url: str):
     """Main function to process a GitLab merge request."""
     print(f"🚀 Processing GitLab MR: {mr_url}\n")
-    
+
+    # Fail fast if the LLM endpoint is unreachable — nothing below works without it.
+    if not await llm_preflight():
+        return 1
+
     # Initialize MCP toolkits
     print("🔌 Initializing MCP toolkits...")
     try:
@@ -404,25 +445,31 @@ async def process_mr(mr_url: str):
     print(f"💬 Posting {len(filtered_issues)} comment(s) to GitLab...\n")
     
     for issue in filtered_issues:
-        print(f"📝 Posting comment for {issue.file_name}:{issue.line}...")
+        # Issues may be ReviewIssue objects (comment-reviewer success path) or plain
+        # dicts (the reviewer's fallback path returns the raw high-severity items),
+        # so read fields defensively — same dict-or-object handling as
+        # comment_formatter.format_single_issue.
+        file_name = issue.get("file_name") if isinstance(issue, dict) else issue.file_name
+        line = issue.get("line") if isinstance(issue, dict) else issue.line
+        print(f"📝 Posting comment for {file_name}:{line}...")
         comment = format_single_issue(issue)
-                
+
         if await post_gitlab_comment(
-            gitlab_url, 
-            project_path, 
-            mr_id, 
-            gitlab_token, 
+            gitlab_url,
+            project_path,
+            mr_id,
+            gitlab_token,
             comment,
-            file_path=issue.file_name,
-            line_number=issue.line,
+            file_path=file_name,
+            line_number=line,
             base_sha=base_sha,
             start_sha=start_sha,
             head_sha=head_sha
         ):
-            print(f"  ✅ Posted comment for line {issue.line}")
+            print(f"  ✅ Posted comment for line {line}")
             total_posted += 1
         else:
-            print(f"  ❌ Failed to post comment for line {issue.line}")
+            print(f"  ❌ Failed to post comment for line {line}")
             total_failed += 1
     
     print(f"\n{'=' * 60}")

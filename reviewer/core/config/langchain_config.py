@@ -1,31 +1,46 @@
 """
 LangChain Configuration Module for OpenRouter Integration
 
-This module provides configuration for using LangChain with OpenRouter as the LLM provider.
-OpenRouter allows access to multiple LLM providers through a single API endpoint.
-
-Based on LangChain docs: https://docs.langchain.com/oss/python/langchain/models
-Uses init_chat_model for provider-agnostic model initialization.
+Builds chat models via the official ``langchain-openrouter`` package
+(``ChatOpenRouter``), which is purpose-built for OpenRouter's schema / reasoning /
+provider-routing contract — unlike ``ChatOpenAI`` pointed at OpenRouter's base_url,
+which mishandles reasoning models and structured output through OpenRouter.
 """
 
+import json
 import os
-from typing import Optional
-from langchain.chat_models import init_chat_model
+from typing import Any, Optional
 from langchain_core.language_models import BaseChatModel
+from langchain_openrouter import ChatOpenRouter
 
 
 def get_default_model() -> str:
     """
-    Return the default LLM model name from the environment.
+    Return the default LLM model id from the environment (OpenRouter format).
 
-    Reads DEFAULT_LLM_MODEL at call time so that changes to the environment
-    variable after import are respected.
-
-    Environment Variables:
-        - DEFAULT_LLM_MODEL: Model identifier in OpenRouter format
-                             (default: deepseek/deepseek-v4-pro)
+    Read at call time so changes to DEFAULT_LLM_MODEL after import are respected.
     """
     return os.getenv("DEFAULT_LLM_MODEL", "deepseek/deepseek-v4-pro")
+
+
+def _get_openrouter_provider() -> Optional[dict]:
+    """
+    Optional OpenRouter provider-routing config, read from OPENROUTER_PROVIDER.
+
+    Set OPENROUTER_PROVIDER to a JSON object to pin/sort providers or enforce a
+    data policy — e.g. '{"order": ["Anthropic"], "allow_fallbacks": true}' or
+    '{"data_collection": "deny"}'. This is the lever for "No endpoints matching
+    your data policy" guardrail errors. Returns None when unset or invalid.
+    """
+    raw = os.getenv("OPENROUTER_PROVIDER", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        print(f"  ⚠️  [langchain_config] Ignoring invalid OPENROUTER_PROVIDER (not valid JSON): {raw}")
+        return None
 
 
 def get_llm_model(
@@ -33,121 +48,116 @@ def get_llm_model(
     temperature: float = 0.0,
     streaming: bool = False,
     max_tokens: Optional[int] = None,
+    reasoning: Optional[dict] = None,
 ) -> BaseChatModel:
     """
-    Get a configured LLM model using OpenRouter.
-    
-    Uses init_chat_model for provider-agnostic initialization, allowing
-    seamless switching between different LLM providers via OpenRouter.
-    
+    Get a ChatOpenRouter model configured for OpenRouter.
+
     Args:
-        model_name: The model to use. When None or omitted, falls back to
-                   DEFAULT_LLM_MODEL env var (default: deepseek/deepseek-v4-pro).
-                   Examples:
-                   - "openai/gpt-4o-mini" (OpenRouter format)
-                   - "deepseek/deepseek-v4-pro"
-                   - "google/gemini-pro"
-        temperature: Model temperature (0.0 = deterministic, 1.0 = creative)
-        streaming: Enable streaming responses
-        max_tokens: Maximum tokens for response (optional)
-    
+        model_name: OpenRouter model id ("provider/model"). Falls back to
+                    DEFAULT_LLM_MODEL when None.
+        temperature: Sampling temperature (0.0 = deterministic).
+        streaming: Enable streaming responses.
+        max_tokens: Maximum tokens for the response (optional).
+        reasoning: Optional OpenRouter reasoning config passed through to
+                   ChatOpenRouter (e.g. {"enabled": False} to turn thinking off).
+
     Returns:
-        Configured BaseChatModel instance for LangChain
-    
+        Configured ChatOpenRouter (a BaseChatModel).
+
     Environment Variables:
-        - OPENROUTER_API_KEY: OpenRouter API key (required)
-        - OPENROUTER_BASE_URL: OpenRouter base URL (default: https://openrouter.ai/api/v1)
-        - DEFAULT_LLM_MODEL: Fallback model when model_name is not provided
+        - OPENROUTER_API_KEY: required.
+        - DEFAULT_LLM_MODEL: fallback model when model_name is not provided.
+        - OPENROUTER_BASE_URL: optional custom endpoint (e.g. internal reverse proxy).
+        - OPENROUTER_PROVIDER: optional JSON provider-routing config.
     """
-    # Get OpenRouter API key
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError(
             "OPENROUTER_API_KEY not found in environment variables. "
             "Please set OPENROUTER_API_KEY in your .env file."
         )
-    
-    # Get OpenRouter base URL (default to standard OpenRouter endpoint)
-    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    
-    # Resolve model: explicit argument takes priority, then env var
+
     model = model_name or get_default_model()
-    
-    # Convert model name to OpenRouter format if needed
-    # OpenRouter uses format: "provider/model-name"
+    # OpenRouter ids are "provider/model"; assume OpenAI if no provider is given.
     if "/" not in model:
-        # If no provider specified, assume OpenAI
         model = f"openai/{model}"
-    
-    # Build configuration kwargs
-    config_kwargs = {
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "api_key": api_key,
         "temperature": temperature,
         "streaming": streaming,
-        "api_key": api_key,
-        "base_url": base_url,
+        # Bound every request so a proxy that swallows a request without ever
+        # answering (observed with the internal reverse proxy) surfaces as a
+        # timeout + SDK retry instead of hanging the review forever.
+        "timeout": int(os.getenv("OPENROUTER_TIMEOUT_MS", "300000")),
     }
-    
     if max_tokens:
-        config_kwargs["max_tokens"] = max_tokens
-    
-    # Use init_chat_model for provider-agnostic initialization
-    # OpenRouter uses OpenAI-compatible API, so we use "openai" as the provider
-    return init_chat_model(
-        model=model,
-        model_provider="openai",  # OpenRouter uses OpenAI-compatible API
-        **config_kwargs
-    )
+        kwargs["max_tokens"] = max_tokens
+
+    # Honor a custom OpenRouter endpoint (e.g. an internal reverse proxy) when set;
+    # if OPENROUTER_BASE_URL is unset, ChatOpenRouter targets OpenRouter directly.
+    base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    provider = _get_openrouter_provider()
+    if provider:
+        kwargs["openrouter_provider"] = provider
+
+    if reasoning is not None:
+        kwargs["reasoning"] = reasoning
+
+    return ChatOpenRouter(**kwargs)
+
+
+def _structured_reasoning_for(model: str) -> Optional[dict]:
+    """
+    Reasoning override for structured-output calls, decided per model.
+
+    ``with_structured_output(method="function_calling")`` sends a forced
+    ``tool_choice`` (a named function). DeepSeek V4-class models reject that
+    while thinking mode is on ("Thinking mode does not support this
+    tool_choice" — historically surfaced as "Function call should not be used
+    with prefix"), so for those models structured calls must run with
+    reasoning disabled. All other models keep their reasoning behavior.
+
+    The model list is comma-separated id prefixes in
+    STRUCTURED_NO_REASONING_MODELS (default "deepseek/").
+
+    Uses {"effort": "none"} rather than {"enabled": false}: the openrouter
+    SDK's ChatRequestReasoning model only knows effort/summary, so an
+    "enabled" key is silently dropped and an empty {} reaches the wire.
+    """
+    raw = os.getenv("STRUCTURED_NO_REASONING_MODELS", "deepseek/")
+    prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+    if any(model.startswith(p) for p in prefixes):
+        return {"effort": "none"}
+    return None
 
 
 def get_reasoning_model(effort: str = "medium", temperature: float = 0.0) -> BaseChatModel:
-    """
-    Get a reasoning model (o1/o3 series) configured for OpenRouter.
-    
-    Args:
-        effort: Reasoning effort level - "low", "medium", or "high"
-        temperature: Model temperature
-    
-    Returns:
-        Configured BaseChatModel for reasoning tasks
-    """
-    # Map effort to appropriate model
+    """Get a reasoning model (o1 series) configured for OpenRouter."""
     effort_to_model = {
         "low": "openai/o1-mini",
-        "medium": "openai/o1-mini", 
-        "high": "openai/o1-preview"
+        "medium": "openai/o1-mini",
+        "high": "openai/o1-preview",
     }
-    
-    model = effort_to_model.get(effort, "openai/o1-mini")
-    return get_llm_model(model, temperature=temperature)
+    return get_llm_model(effort_to_model.get(effort, "openai/o1-mini"), temperature=temperature)
 
 
 def get_fast_model(temperature: float = 0.0) -> BaseChatModel:
-    """
-    Get a fast, cost-effective model for simple tasks.
-    
-    Args:
-        temperature: Model temperature
-        
-    Returns:
-        Configured BaseChatModel for fast inference
-    """
+    """Get a fast, cost-effective model for simple tasks (FAST_LLM_MODEL)."""
     return get_llm_model(os.getenv("FAST_LLM_MODEL", "openai/gpt-4o-mini"), temperature=temperature)
 
 
 def get_smart_model(temperature: float = 0.0) -> BaseChatModel:
-    """
-    Get a powerful model for complex reasoning tasks.
-    
-    Args:
-        temperature: Model temperature
-        
-    Returns:
-        Configured BaseChatModel for complex tasks
-    """
+    """Get a powerful model for complex reasoning tasks (SMART_LLM_MODEL)."""
     return get_llm_model(os.getenv("SMART_LLM_MODEL", "openai/gpt-4o"), temperature=temperature)
 
 
-# Legacy model name mapping for backward compatibility with old agent code
+# Legacy model name mapping for backward compatibility with old agent code.
 MODEL_NAME_MAPPING = {
     "gpt-5-nano": "openai/gpt-4o-mini",  # gpt-5-nano doesn't exist, map to gpt-4o-mini
     "gpt-4o-mini": "openai/gpt-4o-mini",
@@ -163,19 +173,37 @@ def get_model_for_agent(
     temperature: float = 0.0,
     streaming: bool = False,
     max_tokens: Optional[int] = None,
+    reasoning: Optional[dict] = None,
 ) -> BaseChatModel:
     """
-    Get a model configured for a specific agent, handling legacy model names.
-    
-    Args:
-        agent_model_name: The model name specified in the agent (e.g., "gpt-5-nano")
-        temperature: Model temperature
-        streaming: Enable streaming
-        max_tokens: Maximum tokens for response (optional)
-    
-    Returns:
-        Configured BaseChatModel instance
+    Get a model configured for a specific agent, mapping legacy model names to
+    OpenRouter ids.
     """
-    # Map legacy names to actual model names
     actual_model = MODEL_NAME_MAPPING.get(agent_model_name, agent_model_name)
-    return get_llm_model(actual_model, temperature=temperature, streaming=streaming, max_tokens=max_tokens)
+    return get_llm_model(
+        actual_model,
+        temperature=temperature,
+        streaming=streaming,
+        max_tokens=max_tokens,
+        reasoning=reasoning,
+    )
+
+
+def get_structured_model_for_agent(
+    agent_model_name: str,
+    temperature: float = 0.0,
+) -> BaseChatModel:
+    """
+    Model instance for ``with_structured_output(method="function_calling")``
+    calls. Same as get_model_for_agent, except reasoning is disabled for
+    models whose thinking mode rejects a forced tool_choice (see
+    _structured_reasoning_for). Agent-loop calls (tool_choice auto) should
+    keep using get_model_for_agent so reasoning stays on.
+    """
+    actual_model = MODEL_NAME_MAPPING.get(agent_model_name, agent_model_name)
+    return get_llm_model(
+        actual_model,
+        temperature=temperature,
+        streaming=False,
+        reasoning=_structured_reasoning_for(actual_model),
+    )

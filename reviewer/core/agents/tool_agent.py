@@ -24,10 +24,15 @@ from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.runnables import RunnableConfig
-from langchain.agents import create_openai_tools_agent, AgentExecutor
+# In LangChain v1 the legacy agent constructors live in langchain-classic.
+from langchain_classic.agents import create_openai_tools_agent, AgentExecutor
 from langchain_core.tools import BaseTool
 
-from core.config.langchain_config import get_model_for_agent, get_default_model
+from core.config.langchain_config import (
+    get_model_for_agent,
+    get_structured_model_for_agent,
+    get_default_model,
+)
 from core.MCP.toolkit_manager import get_mcp_toolkit_manager
 from dto.general import ReviewResponse
 
@@ -183,6 +188,18 @@ class ToolEnabledAgent:
         if isinstance(output, str) and "Agent stopped due to max iterations" in output:
             print("  ⚠️  [ToolEnabledAgent] hit max_iterations without emitting a final answer")
 
+    def _get_structured_llm(self):
+        """LLM for the salvage structured-output call.
+
+        function_calling routes to the same providers as the agent's tool calls
+        (avoids the json-schema/strict data-policy 404), but it sends a forced
+        tool_choice, which thinking-mode models (DeepSeek V4) reject — so this
+        uses the structured model variant, which disables reasoning for those
+        models only. The agent loop itself stays on self.llm with reasoning on.
+        """
+        llm = get_structured_model_for_agent(self.model_name, temperature=self.temperature)
+        return llm.with_structured_output(self.output_model, method="function_calling")
+
     def _build_structuring_prompt(self, output, steps):
         """Bounded prompt to derive structured output from what the agent gathered,
         used when the agent's own final text isn't parseable JSON (prose, or the
@@ -252,8 +269,7 @@ class ToolEnabledAgent:
                     # structured result from what it actually gathered, via a single
                     # reliable with_structured_output call.
                     print("  ⚠️  [ToolEnabledAgent] No parseable final answer; deriving structured output from gathered context")
-                    structured_llm = self.llm.with_structured_output(self.output_model)
-                    parsed_output = await structured_llm.ainvoke(
+                    parsed_output = await self._get_structured_llm().ainvoke(
                         self._build_structuring_prompt(output, steps)
                     )
                 return parsed_output
@@ -294,8 +310,7 @@ class ToolEnabledAgent:
                 parsed_output = self._parse_text_output(output)
                 if parsed_output is None:
                     print("  ⚠️  [ToolEnabledAgent] No parseable final answer; deriving structured output from gathered context")
-                    structured_llm = self.llm.with_structured_output(self.output_model)
-                    parsed_output = structured_llm.invoke(
+                    parsed_output = self._get_structured_llm().invoke(
                         self._build_structuring_prompt(output, steps)
                     )
                 return parsed_output
