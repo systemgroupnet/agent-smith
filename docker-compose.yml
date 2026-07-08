@@ -75,20 +75,40 @@ services:
     image: codereviewagent-collector:local
     container_name: codereview-collector
     restart: unless-stopped
+    depends_on:
+      collector-db:
+        condition: service_healthy
     environment:
-      - COLLECTOR_DB_PATH=/data/collector.db
+      # Store in the local Postgres (same engine as prod, DevLake-compatible).
+      - COLLECTOR_DATABASE_URL=${COLLECTOR_DATABASE_URL:-postgresql+psycopg://postgres:postgres@collector-db:5432/collector}
       # When set, POST /api/events requires a matching X-Collector-Token header.
       - COLLECTOR_TOKEN=${COLLECTOR_TOKEN:-}
-    volumes:
-      - collector-data:/data
     networks:
       - codereview-network
     ports:
       - "8000:8000"
+
+  collector-db:
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    container_name: codereview-collector-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=collector
+    volumes:
+      - collector-db-data:/var/lib/postgresql/data
+    networks:
+      - codereview-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d collector"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 networks:
   codereview-network:
     driver: bridge
 
 volumes:
-  collector-data:
+  collector-db-data:
