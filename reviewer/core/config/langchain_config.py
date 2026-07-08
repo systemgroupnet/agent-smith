@@ -14,6 +14,23 @@ from langchain_core.language_models import BaseChatModel
 from langchain_openrouter import ChatOpenRouter
 
 
+def int_env(name: str, default: int) -> int:
+    """Read an int env var, falling back to ``default`` on a missing/malformed value.
+
+    A garbled numeric env var (e.g. OPENROUTER_TIMEOUT_MS="5min") must not crash
+    the process — especially for the resilience timeouts, where the crash would
+    defeat the very feature the timeout provides.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        print(f"  ⚠️  [config] Ignoring invalid {name}={raw!r}; using default {default}")
+        return default
+
+
 def get_default_model() -> str:
     """
     Return the default LLM model id from the environment (OpenRouter format).
@@ -91,7 +108,7 @@ def get_llm_model(
         # Bound every request so a proxy that swallows a request without ever
         # answering (observed with the internal reverse proxy) surfaces as a
         # timeout + SDK retry instead of hanging the review forever.
-        "timeout": int(os.getenv("OPENROUTER_TIMEOUT_MS", "300000")),
+        "timeout": int_env("OPENROUTER_TIMEOUT_MS", 300000),
     }
     if max_tokens:
         kwargs["max_tokens"] = max_tokens

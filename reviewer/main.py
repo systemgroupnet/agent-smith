@@ -34,11 +34,11 @@ from core.utils.gitlab_helpers import (
     upsert_review_marker,
 )
 from core.agents.file_reviewer import review_file_with_workflow, review_comments_with_agent
-from core.utils.comment_formatter import format_single_issue, extract_high_severity_issues
+from core.utils.comment_formatter import format_single_issue, extract_high_severity_issues, get_severity
 from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
-from core.config.langchain_config import get_llm_model
+from core.config.langchain_config import get_llm_model, int_env
 from core.analytics import send_run_analytics
 from dto.analytics import RunMetrics
 
@@ -128,7 +128,7 @@ async def process_single_file(
         # file error, non-zero exit, marker not advanced — instead of stalling the
         # entire run indefinitely.
         print(f"🔍 Reviewing file...")
-        file_timeout_s = int(os.getenv("FILE_REVIEW_TIMEOUT_S", "1200"))
+        file_timeout_s = int_env("FILE_REVIEW_TIMEOUT_S", 1200)
         try:
             issues = await asyncio.wait_for(
                 review_file_with_workflow(
@@ -176,7 +176,7 @@ async def llm_preflight() -> bool:
     e.g. the internal reverse proxy swallowing requests — instead of hanging
     partway through a review with GitLab state already touched.
     """
-    timeout_s = int(os.getenv("LLM_PREFLIGHT_TIMEOUT_S", "60"))
+    timeout_s = int_env("LLM_PREFLIGHT_TIMEOUT_S", 60)
     base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     print(f"🩺 LLM endpoint pre-flight ({base_url})...")
     try:
@@ -377,7 +377,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     # Process files concurrently in batches of 5
     all_comments = []
     file_error_count = 0  # files whose review raised — drives the non-zero exit code
-    batch_size = int(os.getenv("FILE_BATCH_SIZE", "5"))
+    batch_size = max(1, int_env("FILE_BATCH_SIZE", 5))
     total_batches = (len(changes_to_review) + batch_size - 1) // batch_size
 
     print(f"🔄 Processing {len(changes_to_review)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently\n")
@@ -440,7 +440,10 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     for _file_path, issues in all_comments:
         metrics.issues_total += len(issues)
         for issue in issues:
-            severity = (issue.severity or "").strip().lower()
+            # Issues may be ReviewIssue objects (comment-reviewer path) or plain
+            # dicts (the reviewer's fallback path), so read severity via the shared
+            # dict-or-object helper — same convention as the posting loop below.
+            severity = (get_severity(issue) or "").strip().lower()
             if severity == "high":
                 metrics.issues_high += 1
             elif severity == "medium":

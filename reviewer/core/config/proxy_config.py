@@ -31,28 +31,25 @@ def setup_proxy():
     proxy_username = os.getenv("PROXY_USERNAME")
     proxy_password = os.getenv("PROXY_PASSWORD")
     
-    # Get GitLab and Atlassian domains to exclude from proxy
+    # Get GitLab, Atlassian, and collector domains to exclude from proxy. The
+    # collector is an internal service; without excluding it, an outbound
+    # corporate proxy (HTTP_PROXY) would try to route the analytics POST through
+    # itself and fail (non-fatal, but it silently loses the event).
     gitlab_url = os.getenv("GITLAB_URL", "")
     jira_url = os.getenv("JIRA_URL", "")
     confluence_url = os.getenv("CONFLUENCE_URL", "")
-    
-    # Build NO_PROXY list to exclude GitLab and Atlassian from using proxy
+    collector_url = os.getenv("COLLECTOR_URL", "")
+
+    # Build NO_PROXY list to exclude internal services from using the proxy
+    from urllib.parse import urlparse
     no_proxy_domains = []
-    if gitlab_url:
-        # Extract domain from URL (e.g., https://gitlab.example.com -> gitlab.example.com)
-        from urllib.parse import urlparse
-        parsed = urlparse(gitlab_url)
-        if parsed.netloc:
-            no_proxy_domains.append(parsed.netloc)
-    if jira_url:
-        parsed = urlparse(jira_url)
-        if parsed.netloc:
-            no_proxy_domains.append(parsed.netloc)
-    if confluence_url:
-        parsed = urlparse(confluence_url)
-        if parsed.netloc:
-            no_proxy_domains.append(parsed.netloc)
-    
+    for url in (gitlab_url, jira_url, confluence_url, collector_url):
+        if url:
+            # e.g. https://gitlab.example.com -> gitlab.example.com
+            netloc = urlparse(url).netloc
+            if netloc:
+                no_proxy_domains.append(netloc)
+
     # Also add common localhost and internal domains
     no_proxy_domains.extend(["localhost", "127.0.0.1", ".local"])
     
