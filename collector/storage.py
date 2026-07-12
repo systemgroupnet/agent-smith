@@ -78,6 +78,11 @@ review_runs = Table(
     Column("duration_seconds", Float),
     *[Column(name, String) for name in _TYPED_TEXT_FIELDS],
     *[Column(name, Integer) for name in _TYPED_INT_FIELDS],
+    # Errors captured during the run: count (for monitoring/alerting) + the full
+    # structured array (for debugging drill-down). none_as_null so a run with no
+    # errors stores SQL NULL, not a JSON `null` scalar.
+    Column("error_count", Integer),
+    Column("errors", JSONB(none_as_null=True)),
     Column("raw_json", JSONB, nullable=False),
     Index("idx_review_runs_project_mr", "project_path", "mr_id"),
     Index("idx_review_runs_timestamp", "timestamp"),
@@ -126,10 +131,14 @@ def insert_event(payload: dict[str, Any]) -> int:
     in ``raw_json`` regardless. Non-int values for int columns are coerced to NULL
     rather than rejected, so a malformed field can't drop the whole event.
     """
+    errors = payload.get("errors")
+    errors = errors if isinstance(errors, list) else None
     values: dict[str, Any] = {
         "received_at": datetime.now(timezone.utc).isoformat(),
         "raw_json": payload,
         "duration_seconds": _as_float(payload.get("duration_seconds")),
+        "errors": errors,
+        "error_count": len(errors) if errors is not None else 0,
     }
     for name in _TYPED_TEXT_FIELDS:
         val = payload.get(name)

@@ -30,16 +30,19 @@ def _comment_retry_delays() -> List[float]:
     return delays or [1.0, 2.0, 5.0, 10.0, 30.0]
 
 
-def _post_json_with_retry(url: str, headers: dict, data: dict, label: str) -> Optional[Dict]:
+def _post_json_with_retry(
+    url: str, headers: dict, data: dict, label: str
+) -> Tuple[Optional[Dict], Optional[str]]:
     """POST JSON, retrying transient failures (and 400s — GitLab occasionally
     returns a transient 400) on the configured backoff schedule. Never retries
-    auth/not-found (401/403/404). Returns parsed JSON on success, else None."""
+    auth/not-found (401/403/404). Returns ``(parsed_json, None)`` on success or
+    ``(None, error_message)`` after exhausting retries."""
     delays = _comment_retry_delays()
     for attempt in range(len(delays) + 1):
         try:
             response = requests.post(url, headers=headers, json=data, timeout=30)
             response.raise_for_status()
-            return response.json()
+            return response.json(), None
         except requests.RequestException as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             # Retry network errors (no status), 400/409/429, and 5xx; a 401/403/404
@@ -53,9 +56,13 @@ def _post_json_with_retry(url: str, headers: dict, data: dict, label: str) -> Op
                 )
                 time.sleep(delay)
                 continue
-            print(f"  ❌ [GitLab API] {label} failed: {e}")
-            return None
-    return None
+            # Include the response body when present — GitLab's 400 explains why
+            # (e.g. the line isn't part of the diff), which is what we want to debug.
+            body = getattr(getattr(e, "response", None), "text", "") or ""
+            msg = f"HTTP {status}: {e}" + (f" — {body[:500]}" if body else "")
+            print(f"  ❌ [GitLab API] {label} failed: {msg}")
+            return None, msg
+    return None, f"{label} failed"
 
 
 # Machine-readable token embedded in the review marker note on the MR. The
@@ -95,6 +102,9 @@ class GitLabAPIClient:
             "PRIVATE-TOKEN": token,
             "Content-Type": "application/json"
         }
+        # Last POST error message (set by the create_* helpers), so callers can
+        # surface why a comment failed without changing their return types.
+        self.last_error: Optional[str] = None
     
     def _build_api_url(self, endpoint: str) -> str:
         """Build full API URL."""
@@ -190,7 +200,10 @@ class GitLabAPIClient:
         """
         project_id = quote(project_path, safe="")
         url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes")
-        return _post_json_with_retry(url, self.headers, {"body": body}, "create note")
+        result, self.last_error = _post_json_with_retry(
+            url, self.headers, {"body": body}, "create note"
+        )
+        return result
     
     def update_merge_request_note(
         self, project_path: str, mr_iid: str, note_id: int, body: str
@@ -298,7 +311,10 @@ class GitLabAPIClient:
         data: Dict = {"body": body}
         if position:
             data["position"] = position
-        return _post_json_with_retry(url, self.headers, data, "create discussion")
+        result, self.last_error = _post_json_with_retry(
+            url, self.headers, data, "create discussion"
+        )
+        return result
 
 
 def get_gitlab_api_client(gitlab_url: str, token: str) -> GitLabAPIClient:
@@ -381,10 +397,10 @@ async def post_gitlab_comment(
     base_sha: Optional[str] = None,
     start_sha: Optional[str] = None,
     head_sha: Optional[str] = None
-) -> bool:
+) -> Optional[str]:
     """
     Post a comment to GitLab MR using REST API.
-    
+
     Args:
         gitlab_url: GitLab instance URL
         project_path: Project path (e.g., "group/project")
@@ -396,13 +412,14 @@ async def post_gitlab_comment(
         base_sha: Base commit SHA (required for inline comments)
         start_sha: Start commit SHA (required for inline comments)
         head_sha: Head commit SHA (required for inline comments)
-        
+
     Returns:
-        True if comment posted successfully, False otherwise
+        None if the comment was posted (inline or via the general-note fallback),
+        otherwise an error message string describing why it failed.
     """
     print(f"  🔍 [GitLab] Posting comment via REST API...")
     api_client = get_gitlab_api_client(gitlab_url, token)
-    
+
     try:
         if file_path and line_number:
             # Create a discussion with position (inline comment)
@@ -417,24 +434,26 @@ async def post_gitlab_comment(
             result = api_client.create_merge_request_discussion(
                 project_path, mr_id, comment, position
             )
-            if result is None:
-                # The inline post kept failing — usually the line isn't part of the
-                # MR diff (a context line), which is deterministic, so retries won't
-                # help. Fall back to a general MR note (prefixed with the location)
-                # so the finding is preserved rather than dropped.
-                print(f"  ↩️  [GitLab] Inline post failed for {file_path}:{line_number}; posting as a general note instead")
-                located = f"**`{file_path}:{line_number}`**\n\n{comment}"
-                result = api_client.create_merge_request_note(project_path, mr_id, located)
-        else:
-            # General note
-            result = api_client.create_merge_request_note(
-                project_path, mr_id, comment
-            )
+            if result is not None:
+                return None
+            # The inline post kept failing — usually the line isn't part of the
+            # MR diff (a context line), which is deterministic, so retries won't
+            # help. Fall back to a general MR note (prefixed with the location)
+            # so the finding is preserved rather than dropped.
+            inline_error = api_client.last_error
+            print(f"  ↩️  [GitLab] Inline post failed for {file_path}:{line_number}; posting as a general note instead")
+            located = f"**`{file_path}:{line_number}`**\n\n{comment}"
+            result = api_client.create_merge_request_note(project_path, mr_id, located)
+            if result is not None:
+                return None
+            return f"inline post failed ({inline_error}); fallback note also failed ({api_client.last_error})"
 
-        return result is not None
+        # General note
+        result = api_client.create_merge_request_note(project_path, mr_id, comment)
+        return None if result is not None else (api_client.last_error or "note post failed")
     except Exception as e:
         print(f"  ❌ Failed to post comment: {e}")
-        return False
+        return f"{type(e).__name__}: {e}"
 
 
 async def get_gitlab_compare(

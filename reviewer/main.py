@@ -40,7 +40,7 @@ from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
 from core.config.langchain_config import get_llm_model, int_env
 from core.analytics import send_run_analytics
-from dto.analytics import RunMetrics
+from dto.analytics import RunMetrics, record_error
 
 
 async def process_single_file(
@@ -206,6 +206,11 @@ async def process_mr(mr_url: str):
     run_start = time.monotonic()
     try:
         return await _run_review(mr_url, metrics)
+    except Exception as e:
+        # Capture the fatal error into the event (status defaults to "error")
+        # before it propagates, so unhandled crashes are debuggable in the collector.
+        record_error(metrics, "fatal", str(e), exc=e)
+        raise
     finally:
         metrics.duration_seconds = round(time.monotonic() - run_start, 3)
         await send_run_analytics(metrics)
@@ -226,6 +231,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     except Exception as e:
         print(f"⚠️  Warning: Failed to initialize some MCP toolkits: {e}")
         print("   Continuing with available tools...\n")
+        record_error(metrics, "mcp_init", str(e), exc=e)
     
     # Record the model up front so even an early-exit run reports which model was
     # configured (matches the reviewer's default in langchain_config / CLAUDE.md).
@@ -438,6 +444,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             if isinstance(result, Exception):
                 print(f"❌ Exception during file processing: {result}")
                 file_error_count += 1
+                record_error(metrics, "file_review", str(result), exc=result)
                 continue
             if result is not None:
                 all_comments.append(result)
@@ -547,7 +554,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         print(f"📝 Posting comment for {file_name}:{line}...")
         comment = format_single_issue(issue)
 
-        if await post_gitlab_comment(
+        post_error = await post_gitlab_comment(
             gitlab_url,
             project_path,
             mr_id,
@@ -558,12 +565,14 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             base_sha=base_sha,
             start_sha=start_sha,
             head_sha=head_sha
-        ):
+        )
+        if post_error is None:
             print(f"  ✅ Posted comment for line {line}")
             total_posted += 1
         else:
             print(f"  ❌ Failed to post comment for line {line}")
             total_failed += 1
+            record_error(metrics, "comment_post", post_error, context=f"{file_name}:{line}")
     
     print(f"\n{'=' * 60}")
     print(f"✨ Review completed!")

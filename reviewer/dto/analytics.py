@@ -13,11 +13,18 @@ rather than rejecting them.
 """
 
 import os
+import traceback as _traceback
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+
+# Bound the error payload so a pathological run can't send a giant event.
+_MAX_RUN_ERRORS = 100
+_MAX_MESSAGE_CHARS = 2000
+_MAX_TRACEBACK_CHARS = 8000
 
 
 # Bump when the meaning of existing fields changes (not merely when adding new
@@ -104,3 +111,38 @@ class RunMetrics(BaseModel):
     # Defaults to "error" so an unexpected crash is recorded as a failure unless
     # a clean exit path explicitly overwrites it.
     status: str = "error"
+
+    # Structured errors captured during the run (comment-post failures, file
+    # review failures, MCP init, fatal), each: {stage, context, message,
+    # traceback, at}. Collected so failures can be debugged and monitored later
+    # instead of only living in the CI log. Populated via record_error().
+    errors: list = Field(default_factory=list)
+
+
+def record_error(
+    metrics: "RunMetrics",
+    stage: str,
+    message,
+    *,
+    context: Optional[str] = None,
+    exc: Optional[BaseException] = None,
+) -> None:
+    """Append one structured error to ``metrics.errors`` (best-effort, bounded).
+
+    ``stage`` is a coarse bucket ("comment_post", "file_review", "mcp_init",
+    "fatal"); ``context`` locates it (e.g. a file path or ``file:line``); ``exc``,
+    when given, contributes the traceback for debugging. Silently no-ops past the
+    per-run cap so a failing run can't produce an unbounded event.
+    """
+    if len(metrics.errors) >= _MAX_RUN_ERRORS:
+        return
+    entry = {
+        "stage": stage,
+        "context": context,
+        "message": str(message)[:_MAX_MESSAGE_CHARS],
+        "at": _utc_now_iso(),
+    }
+    if exc is not None:
+        tb = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
+        entry["traceback"] = tb[-_MAX_TRACEBACK_CHARS:]
+    metrics.errors.append(entry)
