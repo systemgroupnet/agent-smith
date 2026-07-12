@@ -5,10 +5,57 @@ This module provides utility functions for interacting with GitLab API
 using direct REST API calls, including the GitLab REST API client.
 """
 
+import os
 import re
+import time
 from typing import Optional, Dict, List, Tuple
 from urllib.parse import quote
 import requests
+
+
+def _comment_retry_delays() -> List[float]:
+    """Backoff schedule (seconds) for retrying comment POSTs. Default 1,2,5,10,30
+    — override with GITLAB_COMMENT_RETRY_DELAYS (comma-separated). The number of
+    entries is the number of retries after the first attempt."""
+    raw = os.getenv("GITLAB_COMMENT_RETRY_DELAYS", "1,2,5,10,30")
+    delays: List[float] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            delays.append(float(part))
+        except ValueError:
+            continue
+    return delays or [1.0, 2.0, 5.0, 10.0, 30.0]
+
+
+def _post_json_with_retry(url: str, headers: dict, data: dict, label: str) -> Optional[Dict]:
+    """POST JSON, retrying transient failures (and 400s — GitLab occasionally
+    returns a transient 400) on the configured backoff schedule. Never retries
+    auth/not-found (401/403/404). Returns parsed JSON on success, else None."""
+    delays = _comment_retry_delays()
+    for attempt in range(len(delays) + 1):
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            # Retry network errors (no status), 400/409/429, and 5xx; a 401/403/404
+            # is deterministic so we stop immediately.
+            retryable = status is None or status in (400, 409, 429) or status >= 500
+            if attempt < len(delays) and retryable:
+                delay = delays[attempt]
+                print(
+                    f"  ⏳ [GitLab] {label} failed (HTTP {status}); retrying in {delay:g}s "
+                    f"(attempt {attempt + 1}/{len(delays)})"
+                )
+                time.sleep(delay)
+                continue
+            print(f"  ❌ [GitLab API] {label} failed: {e}")
+            return None
+    return None
 
 
 # Machine-readable token embedded in the review marker note on the MR. The
@@ -141,19 +188,9 @@ class GitLabAPIClient:
         Returns:
             Created note data or None if failed
         """
-        try:
-            project_id = quote(project_path, safe="")
-            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes")
-            
-            data = {"body": body}
-            response = requests.post(url, headers=self.headers, json=data, timeout=30)
-            response.raise_for_status()
-            
-            return response.json()
-            
-        except Exception as e:
-            print(f"  ❌ [GitLab API] Error creating note: {e}")
-            return None
+        project_id = quote(project_path, safe="")
+        url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes")
+        return _post_json_with_retry(url, self.headers, {"body": body}, "create note")
     
     def update_merge_request_note(
         self, project_path: str, mr_iid: str, note_id: int, body: str
@@ -256,22 +293,12 @@ class GitLabAPIClient:
         Returns:
             Created discussion data or None if failed
         """
-        try:
-            project_id = quote(project_path, safe="")
-            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/discussions")
-            
-            data = {"body": body}
-            if position:
-                data["position"] = position
-            
-            response = requests.post(url, headers=self.headers, json=data, timeout=30)
-            response.raise_for_status()
-            
-            return response.json()
-            
-        except Exception as e:
-            print(f"  ❌ [GitLab API] Error creating discussion: {e}")
-            return None
+        project_id = quote(project_path, safe="")
+        url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/discussions")
+        data: Dict = {"body": body}
+        if position:
+            data["position"] = position
+        return _post_json_with_retry(url, self.headers, data, "create discussion")
 
 
 def get_gitlab_api_client(gitlab_url: str, token: str) -> GitLabAPIClient:
@@ -390,12 +417,20 @@ async def post_gitlab_comment(
             result = api_client.create_merge_request_discussion(
                 project_path, mr_id, comment, position
             )
+            if result is None:
+                # The inline post kept failing — usually the line isn't part of the
+                # MR diff (a context line), which is deterministic, so retries won't
+                # help. Fall back to a general MR note (prefixed with the location)
+                # so the finding is preserved rather than dropped.
+                print(f"  ↩️  [GitLab] Inline post failed for {file_path}:{line_number}; posting as a general note instead")
+                located = f"**`{file_path}:{line_number}`**\n\n{comment}"
+                result = api_client.create_merge_request_note(project_path, mr_id, located)
         else:
             # General note
             result = api_client.create_merge_request_note(
                 project_path, mr_id, comment
             )
-        
+
         return result is not None
     except Exception as e:
         print(f"  ❌ Failed to post comment: {e}")
