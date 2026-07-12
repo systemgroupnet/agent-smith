@@ -550,8 +550,10 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         # it posted what it could, by design; only real file errors exit non-zero.
         if provider_blocked:
             metrics.status = "config_error"
+        elif timed_out:
+            metrics.status = "timeout"
         else:
-            metrics.status = "partial_failure" if (file_error_count or timed_out) else "success"
+            metrics.status = "partial_failure" if file_error_count else "success"
         return 1 if file_error_count else 0
 
     # Post comments to GitLab
@@ -604,8 +606,10 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     metrics.comments_failed = total_failed
     if provider_blocked:
         metrics.status = "config_error"
+    elif timed_out:
+        metrics.status = "timeout"
     else:
-        metrics.status = "partial_failure" if (file_error_count or total_failed or timed_out) else "success"
+        metrics.status = "partial_failure" if (file_error_count or total_failed) else "success"
 
     # Non-zero exit if any file failed to review or any comment failed to post, so
     # GitLab CI reflects the failure instead of showing a green job. A timeout

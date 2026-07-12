@@ -107,7 +107,8 @@ class RunMetrics(BaseModel):
     # not reviewed; the marker is held so a re-run picks them up).
     timed_out: bool = False
 
-    # "success" | "partial_failure" | "no_op" | "config_error" | "error".
+    # "success" | "partial_failure" | "timeout" | "no_op" | "config_error" | "error".
+    # "timeout" = the overall-timeout budget truncated the review (see timed_out).
     # Defaults to "error" so an unexpected crash is recorded as a failure unless
     # a clean exit path explicitly overwrites it.
     status: str = "error"
