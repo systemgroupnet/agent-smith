@@ -12,6 +12,7 @@ from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
+from core.utils.llm_retry import maybe_print_traceback
 from core.prompts import get_pbook_reviewer_prompt
 from dto.general import ReviewResponse
 
@@ -97,8 +98,7 @@ async def run_pbook_review(context: PbookContext, config: Optional[RunnableConfi
     except Exception as e:
         elapsed_time = time.time() - start_time
         print(f"  ❌ Pbook review failed after {elapsed_time:.2f}s: {e}")
-        import traceback
-        print(f"     Traceback: {traceback.format_exc()}")
+        maybe_print_traceback(e)
         # Surface the failure instead of swallowing it into an empty result, so
         # this file is recorded as errored and the run exits non-zero. Other
         # files are unaffected (they are reviewed concurrently and isolated).

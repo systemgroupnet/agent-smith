@@ -12,6 +12,7 @@ from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
+from core.utils.llm_retry import maybe_print_traceback
 from core.prompts import get_scss_reviewer_prompt
 from dto.general import ReviewResponse
 
@@ -96,8 +97,7 @@ async def run_scss_review(context: ScssContext, config: Optional[RunnableConfig]
     except Exception as e:
         elapsed_time = time.time() - start_time
         print(f"  ❌ SCSS review failed after {elapsed_time:.2f}s: {e}")
-        import traceback
-        print(f"     Traceback: {traceback.format_exc()}")
+        maybe_print_traceback(e)
         # Surface the failure instead of swallowing it into an empty result, so
         # this file is recorded as errored and the run exits non-zero. Other
         # files are unaffected (they are reviewed concurrently and isolated).

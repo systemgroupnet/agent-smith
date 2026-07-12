@@ -33,6 +33,18 @@ _HARD_LIMIT_SIGNATURES = (
     "payment required",
 )
 
+# Account/model configuration blocks: OpenRouter has no provider that satisfies
+# the account's data policy / guardrail for the configured model. Deterministic
+# (every request fails identically) and not a code bug — never retry, and surface
+# a concise, actionable message instead of a stack trace.
+_CONFIG_BLOCK_SIGNATURES = (
+    "no endpoints available matching your guardrail",
+    "no endpoints found matching your data policy",
+    "guardrail restrictions and data policy",
+    "no allowed providers",
+    "data policy",
+)
+
 # Transient signatures worth retrying.
 _TRANSIENT_SIGNATURES = (
     "access denied by security policy",
@@ -82,13 +94,47 @@ def is_hard_limit_error(err: BaseException) -> bool:
     return any(sig in msg for sig in _HARD_LIMIT_SIGNATURES)
 
 
+def is_provider_config_error(err: BaseException) -> bool:
+    """True for OpenRouter data-policy / guardrail 'no matching endpoints' blocks —
+    an account/model configuration issue, deterministic and not a code bug."""
+    msg = str(err).lower()
+    return any(sig in msg for sig in _CONFIG_BLOCK_SIGNATURES)
+
+
+def is_provider_hard_block(err: BaseException) -> bool:
+    """Account-level hard block (data-policy/guardrail OR limit/quota): every
+    request will fail identically, so the run should stop, not grind through
+    every file."""
+    return is_hard_limit_error(err) or is_provider_config_error(err)
+
+
 def is_retryable_llm_error(err: BaseException) -> bool:
     """Retryable iff the error looks transient AND is not a hard limit/quota
-    denial. Hard-limit check wins, so a quota 403 is never treated as transient."""
-    if is_hard_limit_error(err):
+    denial or a config block. Hard blocks win, so a quota/guardrail error is
+    never treated as transient."""
+    if is_hard_limit_error(err) or is_provider_config_error(err):
         return False
     msg = str(err).lower()
     return any(sig in msg for sig in _TRANSIENT_SIGNATURES)
+
+
+def maybe_print_traceback(exc: BaseException, *, indent: str = "     ") -> None:
+    """Print a traceback for an *unexpected* error, but replace it with a concise,
+    actionable one-liner for known account-level blocks (data-policy/guardrail,
+    limit/quota) — those are configuration issues, not code bugs, so the stack is
+    noise. Must be called from within the ``except`` block handling ``exc``."""
+    if is_provider_config_error(exc):
+        print(
+            f"{indent}↳ OpenRouter has no provider matching your data policy/guardrail for the "
+            f"configured model. Fix at openrouter.ai/settings/privacy, or change DEFAULT_LLM_MODEL "
+            f"/ OPENROUTER_PROVIDER. (not a code error)"
+        )
+        return
+    if is_hard_limit_error(exc):
+        print(f"{indent}↳ Provider hard limit/quota reached — not a code error; retry after reset or raise the limit.")
+        return
+    import traceback
+    print(f"{indent}Traceback: {traceback.format_exc()}")
 
 
 async def with_llm_retry(operation, *, label: str = "LLM call"):

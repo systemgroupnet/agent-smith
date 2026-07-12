@@ -39,6 +39,7 @@ from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
 from core.config.langchain_config import get_llm_model, int_env
+from core.utils.llm_retry import is_provider_hard_block
 from core.analytics import send_run_analytics
 from dto.analytics import RunMetrics, record_error
 
@@ -394,6 +395,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     overall_timeout_s = int_env("OVERALL_TIMEOUT_S", 1500)  # 25 min
     overall_deadline = time.monotonic() + overall_timeout_s
     timed_out = False
+    # Set when a file fails with an account-level provider block (data-policy /
+    # guardrail / quota): every other file would fail identically, so we stop.
+    provider_blocked = False
 
     print(f"🔄 Processing {len(changes_to_review)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently")
     print(f"⏳ Overall review budget: {overall_timeout_s}s\n")
@@ -445,11 +449,24 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                 print(f"❌ Exception during file processing: {result}")
                 file_error_count += 1
                 record_error(metrics, "file_review", str(result), exc=result)
+                if is_provider_hard_block(result):
+                    provider_blocked = True
                 continue
             if result is not None:
                 all_comments.append(result)
-        
+
         print(f"\n✅ Batch {batch_num + 1}/{total_batches} completed")
+
+        if provider_blocked:
+            # Account-level block (data-policy/guardrail or quota) — every remaining
+            # file would fail the same way. Stop and surface it clearly instead of
+            # emitting the same error for the whole MR.
+            print(
+                "\n🛑 Aborting remaining files — the LLM provider is refusing all requests "
+                "(OpenRouter data-policy/guardrail or quota). Fix the account/model config "
+                "(openrouter.ai/settings/privacy, DEFAULT_LLM_MODEL, OPENROUTER_PROVIDER) and re-run."
+            )
+            break
     
     print(f"\n{'=' * 60}")
     print(f"✅ Review pass done: {len(all_comments)} file(s) reviewed successfully")
@@ -531,7 +548,10 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         print(f"ℹ️  No high-severity issues to filter")
         # A timeout truncation is a partial review (marker held), but it exits 0 —
         # it posted what it could, by design; only real file errors exit non-zero.
-        metrics.status = "partial_failure" if (file_error_count or timed_out) else "success"
+        if provider_blocked:
+            metrics.status = "config_error"
+        else:
+            metrics.status = "partial_failure" if (file_error_count or timed_out) else "success"
         return 1 if file_error_count else 0
 
     # Post comments to GitLab
@@ -582,7 +602,10 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
 
     metrics.comments_posted = total_posted
     metrics.comments_failed = total_failed
-    metrics.status = "partial_failure" if (file_error_count or total_failed or timed_out) else "success"
+    if provider_blocked:
+        metrics.status = "config_error"
+    else:
+        metrics.status = "partial_failure" if (file_error_count or total_failed or timed_out) else "success"
 
     # Non-zero exit if any file failed to review or any comment failed to post, so
     # GitLab CI reflects the failure instead of showing a green job. A timeout
