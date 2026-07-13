@@ -1,11 +1,20 @@
 """
 Markdown Content Loader Utility
 
-This module loads markdown files from GitLab repository:
-1. Root .aid/{agent_type}.md (project-wide instructions)
-2. Module-specific .aid/{agent_type}.md (module-specific instructions)
+This module loads per-agent instruction markdown from the reviewed GitLab repo,
+in two tiers, both derived from the reviewed file's path:
 
-Markdown content is merged with module content appended after root content.
+1. Repo-root ``.aid/{agent_type}.md`` — project-wide instructions kept in the
+   repository's top-level ``.aid/`` (e.g. acme-shop keeps ``html.md`` /
+   ``scss.md`` there). Fetched from the *real* repo root, not the file's first
+   path segment.
+2. Module ``{module}/.aid/{agent_type}.md`` — instructions for the file's
+   top-level module (e.g. ``procurement/.aid/service.md``). The module is the
+   file's first path segment (an explicit ``module_name`` overrides it).
+
+Content is merged with the module tier appended after the root tier, so
+module-specific guidance is read last (wins) while still inheriting the
+project-wide baseline. Both tiers are optional — a missing file is non-fatal.
 """
 
 from typing import Optional
@@ -108,48 +117,58 @@ async def load_md_content(
     gitlab_token: str
 ) -> str:
     """
-    Load markdown content for a specific agent type.
-    
-    This function:
-    1. Extracts root directory from file_path
-    2. Fetches root .aid/{agent_type}.md
-    3. Fetches module .aid/{agent_type}.md from {module_name}/.aid/ (if module_name provided)
-    4. Merges content (module appended after root with separator)
-    5. Returns raw markdown content
-    
+    Load markdown instructions for a specific agent type from the reviewed repo.
+
+    Fetches two tiers and merges them (module appended after root, so
+    module-specific guidance is read last):
+    1. Repo-root ``.aid/{agent_type}.md`` (project-wide baseline).
+    2. Module ``{module}/.aid/{agent_type}.md``, where ``module`` is the explicit
+       ``module_name`` when valid, otherwise the file's first path segment.
+
+    Both tiers are optional; a file that resolves to neither yields "" (the
+    reviewer then simply runs without extra instructions). This deliberately does
+    NOT prefix the root tier with the file's first segment (the previous behavior
+    never consulted the true repo root) and never doubles the module segment.
+
     Args:
         agent_type: Type of agent (e.g., "service", "sql", "dataview")
         file_path: Path to the file being reviewed
-        module_name: Module name (e.g., "auth", "sales")
+        module_name: Explicit module override; when falsy/"N/A"/unknown the
+            module is derived from the file path's first segment
         gitlab_url: GitLab instance URL
         project_path: Project path in GitLab
         source_branch: Branch to fetch from
         gitlab_token: GitLab access token
-        
+
     Returns:
-        Raw markdown content for the agent
+        Raw merged markdown content for the agent ("" when nothing was found)
     """
     print(f"  📋 Loading markdown content for agent type: {agent_type}")
-    
-    # Extract root directory from file path
-    root_dir = extract_root_directory(file_path)
-    if not root_dir:
-        print(f"  ⚠️  Warning: Could not extract root directory from file path: {file_path}")
-        return ""
-    
-    print(f"  📁 Root directory: {root_dir}")
-    
-    # Construct paths to markdown files
-    root_md_path = f"{root_dir}/.aid/{agent_type}.md"
-    module_md_path = None
 
-    if module_name and "unknown" not in module_name:
-        module_md_path = f"{root_dir}/{module_name}/.aid/{agent_type}.md"
-    
+    if not file_path:
+        print(f"  ⚠️  Warning: empty file path; cannot locate .aid instructions")
+        return ""
+
+    # Tier 1: project-wide instructions at the repository root (".aid/").
+    root_md_path = f".aid/{agent_type}.md"
+
+    # Tier 2: the file's top-level module (".../{module}/.aid/"). Prefer an
+    # explicitly-passed module_name; otherwise use the first path segment. A file
+    # sitting directly at the repo root (no directory) has no module tier.
+    parts = [p for p in file_path.split("/") if p]
+    module_dir: Optional[str] = None
+    if module_name and module_name != "N/A" and "unknown" not in module_name.lower():
+        module_dir = module_name
+    elif len(parts) >= 2:
+        module_dir = parts[0]
+
+    module_md_path = f"{module_dir}/.aid/{agent_type}.md" if module_dir else None
+
+    print(f"  📁 Repo-root instructions: {root_md_path}")
     if module_md_path:
-        print(f"  📁 Module markdown path: {module_md_path}")
-    
-    # Fetch root markdown content
+        print(f"  📁 Module instructions:    {module_md_path}")
+
+    # Fetch repo-root instructions.
     root_content = await fetch_md_file(
         root_md_path,
         gitlab_url,
@@ -157,8 +176,8 @@ async def load_md_content(
         source_branch,
         gitlab_token
     )
-    
-    # Fetch module markdown content if module_name provided
+
+    # Fetch module instructions (if this file has a module tier).
     module_content = None
     if module_md_path:
         module_content = await fetch_md_file(
@@ -168,14 +187,14 @@ async def load_md_content(
             source_branch,
             gitlab_token
         )
-    
-    # Merge content
+
+    # Merge content (module appended after root with a separator).
     merged_content = merge_md_content(root_content or "", module_content or "")
-    
+
     # Log result
     if merged_content:
         print(f"  ✅ Loaded markdown content for {agent_type}")
     else:
         print(f"  ℹ️  No markdown content found for {agent_type}")
-    
+
     return merged_content
