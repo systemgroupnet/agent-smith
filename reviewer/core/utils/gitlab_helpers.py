@@ -30,18 +30,34 @@ def _comment_retry_delays() -> List[float]:
     return delays or [1.0, 2.0, 5.0, 10.0, 30.0]
 
 
+def _is_positional_400(body: str) -> bool:
+    """True when a GitLab 400 body is the deterministic inline-position error.
+
+    Creating an inline (positioned) discussion 400s with a ``line_code`` error
+    (``can't be blank`` / ``must be a valid line code``) when the target line
+    isn't a valid position in the MR diff. That won't change on retry, so we fail
+    fast and let the caller fall back to a general note instead of burning the
+    whole backoff schedule."""
+    b = (body or "").lower()
+    return "line_code" in b or "must be a valid line code" in b
+
+
 def _post_json_with_retry(
     url: str, headers: dict, data: dict, label: str,
     warnings_sink: Optional[List[dict]] = None,
 ) -> Tuple[Optional[Dict], Optional[str]]:
-    """POST JSON, retrying transient failures (and 400s — GitLab occasionally
-    returns a transient 400) on the configured backoff schedule. Never retries
-    auth/not-found (401/403/404). Returns ``(parsed_json, None)`` on success or
-    ``(None, error_message)`` after exhausting retries.
+    """POST JSON, retrying transient failures on the configured backoff schedule.
+    Returns ``(parsed_json, None)`` on success or ``(None, error_message)`` after
+    exhausting retries.
 
-    When ``warnings_sink`` is provided, each retried attempt appends one dict
-    ``{label, status, attempt, max_attempts, delay, message}`` to it so the caller
-    can surface transient comment-post failures as analytics warnings."""
+    Retries network errors (no status), 409/429, 5xx, and *transient* 400s. Does
+    NOT retry auth/not-found (401/403/404) or a deterministic inline-position 400
+    (blank/invalid ``line_code`` — see :func:`_is_positional_400`); those fail
+    fast so the caller can fall back immediately.
+
+    When ``warnings_sink`` is provided, each retried attempt appends one preformatted
+    ``{stage, message}`` dict to it so the caller can surface transient comment-post
+    failures as analytics warnings."""
     delays = _comment_retry_delays()
     for attempt in range(len(delays) + 1):
         try:
@@ -50,9 +66,18 @@ def _post_json_with_retry(
             return response.json(), None
         except requests.RequestException as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
-            # Retry network errors (no status), 400/409/429, and 5xx; a 401/403/404
-            # is deterministic so we stop immediately.
-            retryable = status is None or status in (400, 409, 429) or status >= 500
+            # Read the body once — GitLab explains a 400 here (e.g. the line isn't
+            # part of the diff), which decides retryability and aids debugging.
+            body = getattr(getattr(e, "response", None), "text", "") or ""
+            # A positional 400 (invalid/blank line_code) is deterministic — treat
+            # it like 401/403/404 (no retry). Other 400s may be transient.
+            positional_400 = status == 400 and _is_positional_400(body)
+            retryable = (
+                status is None
+                or status in (409, 429)
+                or (status == 400 and not positional_400)
+                or (status is not None and status >= 500)
+            )
             if attempt < len(delays) and retryable:
                 delay = delays[attempt]
                 print(
@@ -60,27 +85,112 @@ def _post_json_with_retry(
                     f"(attempt {attempt + 1}/{len(delays)})"
                 )
                 if warnings_sink is not None:
-                    body_snip = getattr(getattr(e, "response", None), "text", "") or ""
                     warnings_sink.append({
-                        "label": label,
-                        "status": status,
-                        "attempt": attempt + 1,
-                        "max_attempts": len(delays) + 1,
-                        "delay": delay,
+                        "stage": "comment_post_retry",
                         "message": (
-                            f"HTTP {status}: {e}"
-                            + (f" — {body_snip[:300]}" if body_snip else "")
-                        )[:500],
+                            f"{label} attempt {attempt + 1}/{len(delays) + 1} failed "
+                            f"(HTTP {status}); retried after {delay:g}s: HTTP {status}: {e}"
+                            + (f" — {body[:300]}" if body else "")
+                        )[:600],
                     })
                 time.sleep(delay)
                 continue
-            # Include the response body when present — GitLab's 400 explains why
-            # (e.g. the line isn't part of the diff), which is what we want to debug.
-            body = getattr(getattr(e, "response", None), "text", "") or ""
             msg = f"HTTP {status}: {e}" + (f" — {body[:500]}" if body else "")
             print(f"  ❌ [GitLab API] {label} failed: {msg}")
             return None, msg
     return None, f"{label} failed"
+
+
+def build_diff_position_map(diff_text: str) -> Dict[int, Optional[int]]:
+    """Parse a unified diff into the new-file lines GitLab accepts as inline
+    positions.
+
+    Returns ``{new_line: old_line}`` where ``old_line`` is ``None`` for an added
+    line (new side only) and an int for a context/unchanged line. GitLab requires
+    **both** sides in the position for a context line — omitting ``old_line`` there
+    is what triggers the ``line_code can't be blank`` 400 we were hitting. Lines
+    that are not in any hunk are absent from the map: they are not valid inline
+    positions at all (comment must fall back to a general note).
+    """
+    positions: Dict[int, Optional[int]] = {}
+    if not diff_text:
+        return positions
+
+    old_ln = new_ln = 0
+    in_hunk = False
+    for raw in diff_text.split("\n"):
+        if raw.startswith("@@"):
+            m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw)
+            if m:
+                old_ln, new_ln = int(m.group(1)), int(m.group(2))
+                in_hunk = True
+            else:
+                in_hunk = False
+            continue
+        if not in_hunk or raw == "":
+            continue
+        tag = raw[0]
+        if tag == "+":            # added line — valid on the new side alone
+            positions[new_ln] = None
+            new_ln += 1
+        elif tag == "-":          # removed line — old side only; skip
+            old_ln += 1
+        elif tag == "\\":         # "\ No newline at end of file"
+            continue
+        else:                     # context line — needs both old & new
+            positions[new_ln] = old_ln
+            old_ln += 1
+            new_ln += 1
+    return positions
+
+
+def resolve_inline_position(
+    file_name: Optional[str],
+    line,
+    position_maps: Dict[str, Dict[int, Optional[int]]],
+) -> Tuple[Optional[str], Optional[int], bool]:
+    """Map a review issue (file_name, line) to a valid GitLab inline position.
+
+    The model's ``file_name`` may be a bare name or a full path, and its ``line``
+    may not be a line GitLab accepts inline. Resolve against the authoritative MR
+    diff (``position_maps``: real-new-path -> {new_line: old_line|None}, built with
+    :func:`build_diff_position_map`):
+
+    * Match the file to exactly one changed path (exact, then unique suffix, then
+      unique basename; ambiguous matches are treated as unresolved).
+    * If the line is a valid position in that file's diff, return it with the
+      correct ``old_line`` (int for a context line, None for an added line).
+
+    Returns ``(real_path, old_line, in_diff)``. ``in_diff`` False means the line is
+    not part of the MR diff and must be posted as a general note, not inline.
+    """
+    if not file_name or line is None:
+        return file_name, None, False
+
+    pos_map = position_maps.get(file_name)
+    real_path = file_name
+    if pos_map is None:
+        # Not an exact changed-path; try unique suffix / basename matches.
+        base = file_name.rsplit("/", 1)[-1]
+        matches = [
+            p for p in position_maps
+            if p == file_name or p.endswith("/" + file_name) or p.rsplit("/", 1)[-1] == base
+        ]
+        if len(matches) == 1:  # unique — safe to use; ambiguous -> give up
+            real_path = matches[0]
+            pos_map = position_maps[real_path]
+
+    if not pos_map:
+        return real_path, None, False
+
+    try:
+        line_int = int(line)
+    except (TypeError, ValueError):
+        return real_path, None, False
+
+    if line_int in pos_map:
+        return real_path, pos_map[line_int], True
+    return real_path, None, False
 
 
 # Machine-readable token embedded in the review marker note on the MR. The
@@ -96,6 +206,8 @@ __all__ = [
     'get_gitlab_mr_changes',
     'get_file_content',
     'post_gitlab_comment',
+    'build_diff_position_map',
+    'resolve_inline_position',
     'get_gitlab_compare',
     'get_review_marker',
     'upsert_review_marker',
@@ -473,6 +585,8 @@ async def post_gitlab_comment(
     base_sha: Optional[str] = None,
     start_sha: Optional[str] = None,
     head_sha: Optional[str] = None,
+    old_line: Optional[int] = None,
+    old_path: Optional[str] = None,
     warnings_sink: Optional[List[dict]] = None,
 ) -> Optional[str]:
     """
@@ -484,11 +598,14 @@ async def post_gitlab_comment(
         mr_id: Merge request IID
         token: GitLab access token
         comment: Comment text (markdown supported)
-        file_path: Optional file path for inline comments
-        line_number: Optional line number for inline comments
+        file_path: Optional file path for inline comments (the NEW-side path)
+        line_number: Optional NEW-side line number for inline comments
         base_sha: Base commit SHA (required for inline comments)
         start_sha: Start commit SHA (required for inline comments)
         head_sha: Head commit SHA (required for inline comments)
+        old_line: OLD-side line number — REQUIRED by GitLab to position an inline
+            comment on a context (unchanged) line; omit/None for an added line
+        old_path: OLD-side path (defaults to file_path); only used with old_line
         warnings_sink: Optional list; each retried POST attempt appends one entry
             (so the caller can record transient failures as analytics warnings)
 
@@ -508,8 +625,13 @@ async def post_gitlab_comment(
                 "head_sha": head_sha,
                 "position_type": "text",
                 "new_path": file_path,
-                "new_line": line_number
+                "new_line": line_number,
             }
+            # A context (unchanged) line needs BOTH sides or GitLab rejects the
+            # note with a blank line_code; an added line uses the new side alone.
+            if old_line is not None:
+                position["old_path"] = old_path or file_path
+                position["old_line"] = old_line
             result = api_client.create_merge_request_discussion(
                 project_path, mr_id, comment, position, warnings_sink=warnings_sink
             )
@@ -526,6 +648,17 @@ async def post_gitlab_comment(
                 project_path, mr_id, located, warnings_sink=warnings_sink
             )
             if result is not None:
+                # Record the fall-back once (not the raw inline retries) so the
+                # collector still shows how often inline positioning fails without
+                # the per-attempt noise.
+                if warnings_sink is not None:
+                    warnings_sink.append({
+                        "stage": "comment_post_fallback",
+                        "message": (
+                            f"inline comment failed for {file_path}:{line_number} "
+                            f"({inline_error}); posted as a general MR note instead"
+                        )[:600],
+                    })
                 return None
             return f"inline post failed ({inline_error}); fallback note also failed ({api_client.last_error})"
 

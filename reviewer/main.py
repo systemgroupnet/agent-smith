@@ -29,6 +29,8 @@ from core.utils.gitlab_helpers import (
     get_gitlab_mr_changes,
     get_file_content,
     post_gitlab_comment,
+    build_diff_position_map,
+    resolve_inline_position,
     get_gitlab_compare,
     get_review_marker,
     upsert_review_marker,
@@ -560,12 +562,23 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     print(f"\n{'=' * 60}")
     print(f"📤 Posting comments to GitLab MR...")
     print(f"{'=' * 60}\n")
-    
+
+    # Build inline-position maps from the FULL MR diff (GitLab inline positions are
+    # against the MR diff_refs, not the incremental compare). Maps each changed
+    # file's real new-path -> {new_line: old_line|None}, so we post inline on the
+    # exact right line (with old_line for context lines, which GitLab requires) and
+    # fall back to a general note when the model's line isn't part of the diff.
+    position_maps: dict = {}
+    for change in changes:
+        p = change.get("new_path") or change.get("old_path")
+        if p:
+            position_maps[p] = build_diff_position_map(change.get("diff", "") or "")
+
     total_posted = 0
     total_failed = 0
-    
+
     print(f"💬 Posting {len(filtered_issues)} comment(s) to GitLab...\n")
-    
+
     for issue in filtered_issues:
         # Issues may be ReviewIssue objects (comment-reviewer success path) or plain
         # dicts (the reviewer's fallback path returns the raw high-severity items),
@@ -576,30 +589,52 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         print(f"📝 Posting comment for {file_name}:{line}...")
         comment = format_single_issue(issue)
 
+        real_path, old_line, in_diff = resolve_inline_position(file_name, line, position_maps)
+
         # Each retried POST attempt lands here as a warning (transient failure the
         # post recovered from); a permanent failure is recorded as an error below.
         retry_warnings: list = []
-        post_error = await post_gitlab_comment(
-            gitlab_url,
-            project_path,
-            mr_id,
-            gitlab_token,
-            comment,
-            file_path=file_name,
-            line_number=line,
-            base_sha=base_sha,
-            start_sha=start_sha,
-            head_sha=head_sha,
-            warnings_sink=retry_warnings,
-        )
+        if in_diff:
+            # Valid inline position resolved from the diff — post on the exact line
+            # (old_line set => context line, needs both sides).
+            post_error = await post_gitlab_comment(
+                gitlab_url,
+                project_path,
+                mr_id,
+                gitlab_token,
+                comment,
+                file_path=real_path,
+                line_number=int(line),
+                base_sha=base_sha,
+                start_sha=start_sha,
+                head_sha=head_sha,
+                old_line=old_line,
+                warnings_sink=retry_warnings,
+            )
+        else:
+            # The model's line isn't part of the MR diff, so an inline position is
+            # impossible; post a general note prefixed with the location instead of
+            # attempting (and failing) an inline post.
+            located = f"**`{file_name}:{line}`**\n\n{comment}" if line is not None else comment
+            post_error = await post_gitlab_comment(
+                gitlab_url,
+                project_path,
+                mr_id,
+                gitlab_token,
+                located,
+                warnings_sink=retry_warnings,
+            )
+            record_warning(
+                metrics,
+                "comment_not_in_diff",
+                f"{file_name}:{line} is not a line in the MR diff; posted as a general note",
+                context=f"{file_name}:{line}",
+            )
         for w in retry_warnings:
             record_warning(
                 metrics,
-                "comment_post_retry",
-                f"{w.get('label', 'post')} attempt "
-                f"{w.get('attempt')}/{w.get('max_attempts')} failed "
-                f"(HTTP {w.get('status')}); retried after {w.get('delay')}s: "
-                f"{w.get('message')}",
+                w.get("stage", "comment_post"),
+                w.get("message", ""),
                 context=f"{file_name}:{line}",
             )
         if post_error is None:
