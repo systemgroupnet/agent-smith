@@ -17,8 +17,14 @@ module-specific guidance is read last (wins) while still inheriting the
 project-wide baseline. Both tiers are optional — a missing file is non-fatal.
 """
 
+import asyncio
 from typing import Optional
 from core.utils.gitlab_helpers import get_gitlab_api_client
+
+# Cache of the repo-wide-fallback ``.aid`` dir per (gitlab_url, project, branch),
+# so the layout is discovered at most once per run. Value is the single module
+# dir to use as a project-wide default, or None when the repo is not "centralized".
+_repo_wide_aid_cache: dict = {}
 
 
 def extract_root_directory(file_path: str) -> str:
@@ -107,6 +113,68 @@ async def fetch_md_file(
         return None
 
 
+async def discover_repo_wide_aid_dir(
+    gitlab_url: str,
+    project_path: str,
+    source_branch: str,
+    gitlab_token: str,
+) -> Optional[str]:
+    """Find a repo's single, project-wide ``.aid`` directory, if it has one.
+
+    Distinguishes the two layouts we support without any repo-side config:
+
+    * *Distributed* (e.g. acme-shop): a repo-root ``.aid/`` and/or several
+      per-module ``.aid/`` dirs. Returns None — the root + per-module lookup in
+      ``load_md_content`` already covers it, so there is no project-wide default.
+    * *Centralized* (e.g. a production project): exactly one ``.aid/`` in the whole repo,
+      living in a module dir (``main/.aid``) rather than at the root. Returns that
+      dir, so files anywhere in the repo can fall back to it.
+
+    A repo-root ``.aid`` short-circuits this to None (distributed) after a single
+    tree call. Result is cached per (gitlab_url, project, branch). Best-effort:
+    any API failure yields None (no fallback), never raising.
+    """
+    key = (gitlab_url, project_path, source_branch)
+    if key in _repo_wide_aid_cache:
+        return _repo_wide_aid_cache[key]
+
+    result: Optional[str] = None
+    try:
+        client = get_gitlab_api_client(gitlab_url, gitlab_token)
+        top = await asyncio.to_thread(
+            client.list_repository_tree, project_path, "", source_branch, False
+        )
+        if top:
+            top_dirs = [e.get("name") for e in top if e.get("type") == "tree"]
+            has_root_aid = ".aid" in top_dirs
+            if not has_root_aid:
+                # No project-wide root .aid; see which top-level dirs carry one.
+                candidates = [d for d in top_dirs if d and d != ".aid"]
+                subs = await asyncio.gather(*[
+                    asyncio.to_thread(
+                        client.list_repository_tree, project_path, d, source_branch, False
+                    )
+                    for d in candidates
+                ])
+                aid_dirs = [
+                    d for d, sub in zip(candidates, subs)
+                    if sub and any(
+                        e.get("name") == ".aid" and e.get("type") == "tree" for e in sub
+                    )
+                ]
+                # Only a *single* module-level .aid counts as a project-wide
+                # default; 0 means none, 2+ is distributed-without-root (ambiguous).
+                if len(aid_dirs) == 1:
+                    result = aid_dirs[0]
+                    print(f"  📁 Repo-wide .aid dir detected: {result}/.aid")
+    except Exception as e:
+        print(f"  ⚠️  Warning: could not discover repo-wide .aid layout: {e}")
+        result = None
+
+    _repo_wide_aid_cache[key] = result
+    return result
+
+
 async def load_md_content(
     agent_type: str,
     file_path: str,
@@ -190,6 +258,25 @@ async def load_md_content(
 
     # Merge content (module appended after root with a separator).
     merged_content = merge_md_content(root_content or "", module_content or "")
+
+    # Repo-wide fallback: a "centralized" repo keeps a single .aid for the whole
+    # project in one module dir (e.g. a production project's main/.aid) instead of a root
+    # + per-module layout (e.g. acme-shop). If nothing resolved above and the
+    # repo has exactly one such .aid dir, load that as the project-wide default.
+    # (No-op for a distributed repo — discovery returns None there.)
+    if not merged_content:
+        fallback_dir = await discover_repo_wide_aid_dir(
+            gitlab_url, project_path, source_branch, gitlab_token
+        )
+        if fallback_dir and fallback_dir != module_dir:
+            fallback_content = await fetch_md_file(
+                f"{fallback_dir}/.aid/{agent_type}.md",
+                gitlab_url,
+                project_path,
+                source_branch,
+                gitlab_token,
+            )
+            merged_content = merge_md_content(fallback_content or "", "")
 
     # Log result
     if merged_content:

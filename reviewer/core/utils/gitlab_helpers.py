@@ -283,6 +283,58 @@ class GitLabAPIClient:
             print(f"  ❌ [GitLab API] Error listing notes: {e}")
             return None
 
+    def list_repository_tree(
+        self,
+        project_path: str,
+        path: str = "",
+        ref: Optional[str] = None,
+        recursive: bool = False,
+        per_page: int = 100,
+    ) -> Optional[List[Dict]]:
+        """
+        List a directory in the repository tree.
+
+        Args:
+            project_path: Project path (e.g., "group/project")
+            path: Directory path to list (empty = repo root)
+            ref: Branch/tag/SHA to read from
+            recursive: Whether to recurse into subdirectories
+            per_page: Page size
+
+        Returns:
+            List of entries ({name, type: "tree"|"blob", path, ...}); [] when the
+            path does not exist (404); None on an unexpected error.
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/repository/tree")
+            entries: List[Dict] = []
+            page = 1
+            while True:
+                params: Dict = {
+                    "path": path,
+                    "per_page": per_page,
+                    "recursive": "true" if recursive else "false",
+                    "page": page,
+                }
+                if ref:
+                    params["ref"] = ref
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                if response.status_code == 404:
+                    return []  # path not present on this ref
+                response.raise_for_status()
+                batch = response.json()
+                if not batch:
+                    break
+                entries.extend(batch)
+                if len(batch) < per_page or page >= 50:  # last page / safety cap
+                    break
+                page += 1
+            return entries
+        except Exception as e:
+            print(f"  ⚠️  [GitLab API] Error listing tree '{path}': {e}")
+            return None
+
     def compare_commits(self, project_path: str, from_sha: str, to_sha: str) -> Optional[Dict]:
         """
         Compare two commits/refs and return the diff between them.
