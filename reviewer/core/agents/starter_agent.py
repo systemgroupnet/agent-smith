@@ -18,10 +18,12 @@ from core.prompts import get_starter_agent_prompt
 from core.workflow.state import StarterResponse
 
 
-# Create the starter agent instance (for non-frontend files)
+# Create the starter agent instance (for non-frontend files).
+# Uses the default LLM (DEFAULT_LLM_MODEL) — no per-agent model override, so it
+# can't hit an account guardrail on a provider-specific model like the rest of
+# the reviewers.
 _starter_agent = StructuredOutputAgent(
     system_prompt=get_starter_agent_prompt(),
-    model_name="openai/gpt-5-nano",
     temperature=0.0,
     output_model=StarterResponse
 )
