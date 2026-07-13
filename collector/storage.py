@@ -1,10 +1,17 @@
 """PostgreSQL storage for review-run analytics events (SQLAlchemy Core).
 
-One ``review_runs`` table: typed columns for the fields a dashboard will filter
-and group on (project, status, review_type, counts, duration, timestamps) plus a
-``raw_json`` JSONB column holding the exact event the reviewer sent. The JSONB
-column makes the store lenient — unknown or future fields are preserved without
-a migration, and missing fields simply land as NULL in their typed column.
+Two tables:
+
+* ``review_runs`` — one row per review run: typed columns for the fields a
+  dashboard will filter and group on (project, status, review_type, counts,
+  duration, timestamps), denormalized ``error_count``/``warning_count`` for
+  alerting, plus a ``raw_json`` JSONB column holding the exact event the reviewer
+  sent. The JSONB column makes the store lenient — unknown or future fields are
+  preserved without a migration, and missing fields land as NULL in their column.
+* ``run_events`` — one row per captured error/warning, discriminated by
+  ``severity`` and keyed to the run (``run_id`` + ``review_run_id``). Kept
+  separate from the runs so failures/warnings are queryable and joinable on their
+  own (debugging, alerting, DevLake).
 
 PostgreSQL only (so DevLake can ingest the data); the backend URL comes from
 ``COLLECTOR_DATABASE_URL`` (e.g. ``postgresql+psycopg://user:pass@host:5432/collector``).
@@ -78,14 +85,37 @@ review_runs = Table(
     Column("duration_seconds", Float),
     *[Column(name, String) for name in _TYPED_TEXT_FIELDS],
     *[Column(name, Integer) for name in _TYPED_INT_FIELDS],
-    # Errors captured during the run: count (for monitoring/alerting) + the full
-    # structured array (for debugging drill-down). none_as_null so a run with no
-    # errors stores SQL NULL, not a JSON `null` scalar.
+    # Denormalized counts for monitoring/alerting (the full structured events live
+    # in the run_events table, one row per error/warning, keyed to this run).
     Column("error_count", Integer),
-    Column("errors", JSONB(none_as_null=True)),
+    Column("warning_count", Integer),
     Column("raw_json", JSONB, nullable=False),
     Index("idx_review_runs_project_mr", "project_path", "mr_id"),
     Index("idx_review_runs_timestamp", "timestamp"),
+)
+
+# Errors and warnings captured during a run, one row each, discriminated by
+# ``severity`` and tied to the run via ``run_id`` (the reviewer's uuid) and
+# ``review_run_id`` (review_runs.id). Kept in a dedicated table — not as a JSONB
+# column on review_runs — so failures/warnings are queryable and joinable on
+# their own (debugging, alerting, DevLake). The full payload still lives in
+# review_runs.raw_json.
+run_events = Table(
+    "run_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("received_at", String, nullable=False),  # server-side ingest time (ISO UTC)
+    Column("run_id", String),          # reviewer run uuid (review_runs.run_id)
+    Column("review_run_id", Integer),  # review_runs.id of the owning run
+    Column("severity", String, nullable=False),  # "error" | "warning"
+    Column("stage", String),           # coarse bucket: comment_post, file_review, ...
+    Column("context", String),         # locator, e.g. "path/to/file.go:42"
+    Column("message", String),
+    Column("traceback", String),
+    Column("occurred_at", String),     # event time from the reviewer (entry "at")
+    Index("idx_run_events_run_id", "run_id"),
+    Index("idx_run_events_review_run_id", "review_run_id"),
+    Index("idx_run_events_severity", "severity"),
 )
 
 _engine = None
@@ -125,20 +155,25 @@ def run_migrations() -> None:
 
 
 def insert_event(payload: dict[str, Any]) -> int:
-    """Persist one analytics event. Returns the new row id.
+    """Persist one analytics event. Returns the new review_runs row id.
 
-    Lenient: any missing typed field is stored as NULL; the full payload is kept
-    in ``raw_json`` regardless. Non-int values for int columns are coerced to NULL
-    rather than rejected, so a malformed field can't drop the whole event.
+    Writes the run row (with denormalized error_count/warning_count) and one
+    run_events row per error/warning, in a single transaction. Lenient: any
+    missing typed field is stored as NULL and the full payload is kept in
+    ``raw_json`` regardless, so a malformed field can't drop the whole event.
     """
     errors = payload.get("errors")
-    errors = errors if isinstance(errors, list) else None
+    errors = errors if isinstance(errors, list) else []
+    warnings = payload.get("warnings")
+    warnings = warnings if isinstance(warnings, list) else []
+
+    received_at = datetime.now(timezone.utc).isoformat()
     values: dict[str, Any] = {
-        "received_at": datetime.now(timezone.utc).isoformat(),
+        "received_at": received_at,
         "raw_json": payload,
         "duration_seconds": _as_float(payload.get("duration_seconds")),
-        "errors": errors,
-        "error_count": len(errors) if errors is not None else 0,
+        "error_count": len(errors),
+        "warning_count": len(warnings),
     }
     for name in _TYPED_TEXT_FIELDS:
         val = payload.get(name)
@@ -146,9 +181,49 @@ def insert_event(payload: dict[str, Any]) -> int:
     for name in _TYPED_INT_FIELDS:
         values[name] = _as_int(payload.get(name))
 
+    run_id = values.get("run_id")
+
     with get_engine().begin() as conn:
         result = conn.execute(review_runs.insert().values(**values))
-        return int(result.inserted_primary_key[0])
+        review_run_id = int(result.inserted_primary_key[0])
+
+        event_rows = [
+            _event_row(e, "error", run_id, review_run_id, received_at)
+            for e in errors if isinstance(e, dict)
+        ] + [
+            _event_row(w, "warning", run_id, review_run_id, received_at)
+            for w in warnings if isinstance(w, dict)
+        ]
+        if event_rows:
+            conn.execute(run_events.insert(), event_rows)
+
+    return review_run_id
+
+
+def _event_row(
+    entry: dict[str, Any],
+    default_severity: str,
+    run_id: Any,
+    review_run_id: int,
+    received_at: str,
+) -> dict[str, Any]:
+    """Map one reviewer error/warning entry to a run_events row (all lenient)."""
+    def _text(v: Any) -> Optional[str]:
+        return None if v is None else str(v)
+
+    severity = entry.get("severity")
+    severity = str(severity) if severity in ("error", "warning") else default_severity
+    return {
+        "received_at": received_at,
+        "run_id": _text(run_id),
+        "review_run_id": review_run_id,
+        "severity": severity,
+        "stage": _text(entry.get("stage")),
+        "context": _text(entry.get("context")),
+        "message": _text(entry.get("message")),
+        "traceback": _text(entry.get("traceback")),
+        "occurred_at": _text(entry.get("at")),
+    }
 
 
 def list_events(
@@ -185,6 +260,28 @@ def list_events(
 def count_events() -> int:
     with get_engine().connect() as conn:
         return int(conn.execute(select(func.count()).select_from(review_runs)).scalar_one())
+
+
+def list_run_events(
+    limit: int = 100,
+    offset: int = 0,
+    run_id: Optional[str] = None,
+    severity: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Return recent run_events (errors + warnings), newest first, as plain dicts.
+
+    Optional filters: ``run_id`` (a specific run) and ``severity`` ("error"/"warning").
+    """
+    stmt = select(run_events)
+    if run_id:
+        stmt = stmt.where(run_events.c.run_id == run_id)
+    if severity:
+        stmt = stmt.where(run_events.c.severity == severity)
+    stmt = stmt.order_by(run_events.c.id.desc()).limit(limit).offset(offset)
+
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _as_int(value: Any) -> Optional[int]:

@@ -12,6 +12,7 @@ read API or the database later.
 |--------|---------------|---------|
 | `POST` | `/api/events` | Ingest one run event (JSON body). Returns `201 {"status":"stored","id":N}`. |
 | `GET`  | `/api/events` | List recent events, newest first. Query params: `limit` (1–500, default 50), `offset`, `project`. |
+| `GET`  | `/api/run-events` | List captured errors/warnings, newest first. Query params: `limit` (1–500, default 100), `offset`, `run_id`, `severity` (`error`/`warning`). |
 | `GET`  | `/health`     | Liveness + stored-event count. |
 
 The payload is validated **leniently**: it must be a JSON object, but unknown or
@@ -24,17 +25,26 @@ for the fields the reviewer currently sends.
 
 ## Storage
 
-**PostgreSQL** (required; no SQLite fallback), via `COLLECTOR_DATABASE_URL`. One
-`review_runs` table: typed columns for the fields a dashboard filters/groups on
-(project, status, review_type, counts, duration, timestamps, `reviewer_version`)
-plus a `raw_json` **JSONB** column preserving the full payload.
+**PostgreSQL** (required; no SQLite fallback), via `COLLECTOR_DATABASE_URL`. Two
+tables:
+
+- `review_runs` — one row per run: typed columns for the fields a dashboard
+  filters/groups on (project, status, review_type, counts, duration, timestamps,
+  `reviewer_version`), denormalized `error_count`/`warning_count` for alerting,
+  plus a `raw_json` **JSONB** column preserving the full payload.
+- `run_events` — one row per captured error/warning (`severity` `error`/`warning`,
+  `stage`, `context`, `message`, `traceback`, `occurred_at`), keyed to the run by
+  `run_id` + `review_run_id`. Kept separate from the runs so failures/warnings are
+  queryable and joinable on their own (debugging, alerting, DevLake).
 
 Schema is managed by **Alembic** (`migrations/`). `storage.run_migrations()`
 applies `alembic upgrade head` at startup (called from `main.py` at import), so a
 fresh database is created and an existing one is upgraded automatically. The
 initial revision is guarded to adopt a table created by the earlier
-`create_all`-based collector without dropping data. To run migrations by hand:
-`COLLECTOR_DATABASE_URL=… alembic upgrade head` (from `collector/`).
+`create_all`-based collector without dropping data; revision `0004` backfills the
+old `review_runs.errors` JSONB into `run_events` before dropping that column. To
+run migrations by hand: `COLLECTOR_DATABASE_URL=… alembic upgrade head` (from
+`collector/`).
 
 ## Configuration
 

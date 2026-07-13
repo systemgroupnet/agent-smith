@@ -31,12 +31,17 @@ def _comment_retry_delays() -> List[float]:
 
 
 def _post_json_with_retry(
-    url: str, headers: dict, data: dict, label: str
+    url: str, headers: dict, data: dict, label: str,
+    warnings_sink: Optional[List[dict]] = None,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     """POST JSON, retrying transient failures (and 400s — GitLab occasionally
     returns a transient 400) on the configured backoff schedule. Never retries
     auth/not-found (401/403/404). Returns ``(parsed_json, None)`` on success or
-    ``(None, error_message)`` after exhausting retries."""
+    ``(None, error_message)`` after exhausting retries.
+
+    When ``warnings_sink`` is provided, each retried attempt appends one dict
+    ``{label, status, attempt, max_attempts, delay, message}`` to it so the caller
+    can surface transient comment-post failures as analytics warnings."""
     delays = _comment_retry_delays()
     for attempt in range(len(delays) + 1):
         try:
@@ -54,6 +59,19 @@ def _post_json_with_retry(
                     f"  ⏳ [GitLab] {label} failed (HTTP {status}); retrying in {delay:g}s "
                     f"(attempt {attempt + 1}/{len(delays)})"
                 )
+                if warnings_sink is not None:
+                    body_snip = getattr(getattr(e, "response", None), "text", "") or ""
+                    warnings_sink.append({
+                        "label": label,
+                        "status": status,
+                        "attempt": attempt + 1,
+                        "max_attempts": len(delays) + 1,
+                        "delay": delay,
+                        "message": (
+                            f"HTTP {status}: {e}"
+                            + (f" — {body_snip[:300]}" if body_snip else "")
+                        )[:500],
+                    })
                 time.sleep(delay)
                 continue
             # Include the response body when present — GitLab's 400 explains why
@@ -186,22 +204,26 @@ class GitLabAPIClient:
             print(f"  ❌ [GitLab API] Error fetching file content: {e}")
             return None
     
-    def create_merge_request_note(self, project_path: str, mr_iid: str, body: str) -> Optional[Dict]:
+    def create_merge_request_note(
+        self, project_path: str, mr_iid: str, body: str,
+        warnings_sink: Optional[List[dict]] = None,
+    ) -> Optional[Dict]:
         """
         Create a general note/comment on the merge request.
-        
+
         Args:
             project_path: Project path (e.g., "group/project")
             mr_iid: Merge request IID
             body: Comment text (markdown supported)
-            
+            warnings_sink: Optional list that collects one entry per retried attempt
+
         Returns:
             Created note data or None if failed
         """
         project_id = quote(project_path, safe="")
         url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes")
         result, self.last_error = _post_json_with_retry(
-            url, self.headers, {"body": body}, "create note"
+            url, self.headers, {"body": body}, "create note", warnings_sink=warnings_sink
         )
         return result
     
@@ -292,17 +314,19 @@ class GitLabAPIClient:
         project_path: str,
         mr_iid: str,
         body: str,
-        position: Optional[Dict] = None
+        position: Optional[Dict] = None,
+        warnings_sink: Optional[List[dict]] = None,
     ) -> Optional[Dict]:
         """
         Create a discussion/thread on the merge request.
-        
+
         Args:
             project_path: Project path (e.g., "group/project")
             mr_iid: Merge request IID
             body: Comment text (markdown supported)
             position: Position object for inline comments (optional)
-            
+            warnings_sink: Optional list that collects one entry per retried attempt
+
         Returns:
             Created discussion data or None if failed
         """
@@ -312,7 +336,7 @@ class GitLabAPIClient:
         if position:
             data["position"] = position
         result, self.last_error = _post_json_with_retry(
-            url, self.headers, data, "create discussion"
+            url, self.headers, data, "create discussion", warnings_sink=warnings_sink
         )
         return result
 
@@ -396,7 +420,8 @@ async def post_gitlab_comment(
     line_number: Optional[int] = None,
     base_sha: Optional[str] = None,
     start_sha: Optional[str] = None,
-    head_sha: Optional[str] = None
+    head_sha: Optional[str] = None,
+    warnings_sink: Optional[List[dict]] = None,
 ) -> Optional[str]:
     """
     Post a comment to GitLab MR using REST API.
@@ -412,6 +437,8 @@ async def post_gitlab_comment(
         base_sha: Base commit SHA (required for inline comments)
         start_sha: Start commit SHA (required for inline comments)
         head_sha: Head commit SHA (required for inline comments)
+        warnings_sink: Optional list; each retried POST attempt appends one entry
+            (so the caller can record transient failures as analytics warnings)
 
     Returns:
         None if the comment was posted (inline or via the general-note fallback),
@@ -432,7 +459,7 @@ async def post_gitlab_comment(
                 "new_line": line_number
             }
             result = api_client.create_merge_request_discussion(
-                project_path, mr_id, comment, position
+                project_path, mr_id, comment, position, warnings_sink=warnings_sink
             )
             if result is not None:
                 return None
@@ -443,13 +470,17 @@ async def post_gitlab_comment(
             inline_error = api_client.last_error
             print(f"  ↩️  [GitLab] Inline post failed for {file_path}:{line_number}; posting as a general note instead")
             located = f"**`{file_path}:{line_number}`**\n\n{comment}"
-            result = api_client.create_merge_request_note(project_path, mr_id, located)
+            result = api_client.create_merge_request_note(
+                project_path, mr_id, located, warnings_sink=warnings_sink
+            )
             if result is not None:
                 return None
             return f"inline post failed ({inline_error}); fallback note also failed ({api_client.last_error})"
 
         # General note
-        result = api_client.create_merge_request_note(project_path, mr_id, comment)
+        result = api_client.create_merge_request_note(
+            project_path, mr_id, comment, warnings_sink=warnings_sink
+        )
         return None if result is not None else (api_client.last_error or "note post failed")
     except Exception as e:
         print(f"  ❌ Failed to post comment: {e}")

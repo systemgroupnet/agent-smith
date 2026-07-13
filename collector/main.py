@@ -87,6 +87,26 @@ def get_events():
     return jsonify({"count": len(events), "events": events})
 
 
+@app.route("/api/run-events", methods=["GET"])
+def get_run_events():
+    """List captured errors/warnings (newest first). Filters: ?run_id, ?severity."""
+    limit = _clamp_int(request.args.get("limit"), default=100, low=1, high=500)
+    offset = _clamp_int(request.args.get("offset"), default=0, low=0, high=1_000_000)
+    run_id = request.args.get("run_id") or None
+    severity = request.args.get("severity") or None
+    if severity is not None and severity not in ("error", "warning"):
+        return jsonify({"error": "severity must be 'error' or 'warning'"}), 400
+
+    try:
+        events = storage.list_run_events(
+            limit=limit, offset=offset, run_id=run_id, severity=severity
+        )
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to read run events: {e}"}), 500
+
+    return jsonify({"count": len(events), "run_events": events})
+
+
 if __name__ == "__main__":
     # Local dev only; in Docker the CMD runs gunicorn against main:app.
     port = int(os.getenv("PORT", "8000"))

@@ -41,7 +41,7 @@ from core.config.tracing import build_thread_id, build_run_config
 from core.config.langchain_config import get_llm_model, int_env
 from core.utils.llm_retry import is_provider_hard_block
 from core.analytics import send_run_analytics
-from dto.analytics import RunMetrics, record_error
+from dto.analytics import RunMetrics, record_error, record_warning
 
 
 async def process_single_file(
@@ -576,6 +576,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         print(f"📝 Posting comment for {file_name}:{line}...")
         comment = format_single_issue(issue)
 
+        # Each retried POST attempt lands here as a warning (transient failure the
+        # post recovered from); a permanent failure is recorded as an error below.
+        retry_warnings: list = []
         post_error = await post_gitlab_comment(
             gitlab_url,
             project_path,
@@ -586,8 +589,19 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             line_number=line,
             base_sha=base_sha,
             start_sha=start_sha,
-            head_sha=head_sha
+            head_sha=head_sha,
+            warnings_sink=retry_warnings,
         )
+        for w in retry_warnings:
+            record_warning(
+                metrics,
+                "comment_post_retry",
+                f"{w.get('label', 'post')} attempt "
+                f"{w.get('attempt')}/{w.get('max_attempts')} failed "
+                f"(HTTP {w.get('status')}); retried after {w.get('delay')}s: "
+                f"{w.get('message')}",
+                context=f"{file_name}:{line}",
+            )
         if post_error is None:
             print(f"  ✅ Posted comment for line {line}")
             total_posted += 1

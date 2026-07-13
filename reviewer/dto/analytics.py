@@ -21,8 +21,9 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-# Bound the error payload so a pathological run can't send a giant event.
-_MAX_RUN_ERRORS = 100
+# Bound the error/warning payload so a pathological run can't send a giant event
+# (each severity list is capped independently).
+_MAX_RUN_EVENTS = 100
 _MAX_MESSAGE_CHARS = 2000
 _MAX_TRACEBACK_CHARS = 8000
 
@@ -114,10 +115,40 @@ class RunMetrics(BaseModel):
     status: str = "error"
 
     # Structured errors captured during the run (comment-post failures, file
-    # review failures, MCP init, fatal), each: {stage, context, message,
-    # traceback, at}. Collected so failures can be debugged and monitored later
-    # instead of only living in the CI log. Populated via record_error().
+    # review failures, MCP init, fatal), each: {severity, stage, context,
+    # message, traceback, at}. Collected so failures can be debugged and monitored
+    # later instead of only living in the CI log. Populated via record_error().
     errors: list = Field(default_factory=list)
+
+    # Structured warnings — recoverable/transient events the run survived, most
+    # notably each retried GitLab comment-post attempt (stage "comment_post_retry").
+    # Same shape as ``errors`` (severity="warning"). The collector stores errors
+    # and warnings together in a dedicated table, keyed to the run.
+    warnings: list = Field(default_factory=list)
+
+
+def _record_event(
+    target: list,
+    severity: str,
+    stage: str,
+    message,
+    context: Optional[str],
+    exc: Optional[BaseException],
+) -> None:
+    """Append one structured event (error/warning) to ``target`` (bounded)."""
+    if len(target) >= _MAX_RUN_EVENTS:
+        return
+    entry = {
+        "severity": severity,
+        "stage": stage,
+        "context": context,
+        "message": str(message)[:_MAX_MESSAGE_CHARS],
+        "at": _utc_now_iso(),
+    }
+    if exc is not None:
+        tb = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
+        entry["traceback"] = tb[-_MAX_TRACEBACK_CHARS:]
+    target.append(entry)
 
 
 def record_error(
@@ -135,15 +166,22 @@ def record_error(
     when given, contributes the traceback for debugging. Silently no-ops past the
     per-run cap so a failing run can't produce an unbounded event.
     """
-    if len(metrics.errors) >= _MAX_RUN_ERRORS:
-        return
-    entry = {
-        "stage": stage,
-        "context": context,
-        "message": str(message)[:_MAX_MESSAGE_CHARS],
-        "at": _utc_now_iso(),
-    }
-    if exc is not None:
-        tb = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
-        entry["traceback"] = tb[-_MAX_TRACEBACK_CHARS:]
-    metrics.errors.append(entry)
+    _record_event(metrics.errors, "error", stage, message, context, exc)
+
+
+def record_warning(
+    metrics: "RunMetrics",
+    stage: str,
+    message,
+    *,
+    context: Optional[str] = None,
+    exc: Optional[BaseException] = None,
+) -> None:
+    """Append one structured warning to ``metrics.warnings`` (best-effort, bounded).
+
+    Same shape/semantics as :func:`record_error` but for recoverable events the
+    run survived — e.g. a GitLab comment-post attempt that failed and was then
+    retried (``stage="comment_post_retry"``). A traceback is rarely useful here,
+    so ``exc`` is usually omitted.
+    """
+    _record_event(metrics.warnings, "warning", stage, message, context, exc)
