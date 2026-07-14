@@ -148,7 +148,7 @@ def resolve_inline_position(
     file_name: Optional[str],
     line,
     position_maps: Dict[str, Dict[int, Optional[int]]],
-) -> Tuple[Optional[str], Optional[int], bool]:
+) -> Tuple[Optional[str], Optional[int], bool, bool]:
     """Map a review issue (file_name, line) to a valid GitLab inline position.
 
     The model's ``file_name`` may be a bare name or a full path, and its ``line``
@@ -161,11 +161,18 @@ def resolve_inline_position(
     * If the line is a valid position in that file's diff, return it with the
       correct ``old_line`` (int for a context line, None for an added line).
 
-    Returns ``(real_path, old_line, in_diff)``. ``in_diff`` False means the line is
-    not part of the MR diff and must be posted as a general note, not inline.
+    Returns ``(real_path, old_line, in_diff, file_in_mr)``:
+
+    * ``in_diff`` False means the line is not a valid inline position (post a
+      general note, not inline).
+    * ``file_in_mr`` False means ``file_name`` matched **no** changed path in the
+      MR at all. Each reviewer reviews a real changed file but self-reports
+      ``file_name`` per issue and can fabricate it (e.g. a Go MR yielding a bogus
+      Python ``src/core/engine.py`` finding), so a file that isn't in the MR is a
+      reliable hallucination signal — the caller drops it instead of posting.
     """
-    if not file_name or line is None:
-        return file_name, None, False
+    if not file_name:
+        return file_name, None, False, False
 
     pos_map = position_maps.get(file_name)
     real_path = file_name
@@ -180,17 +187,24 @@ def resolve_inline_position(
             real_path = matches[0]
             pos_map = position_maps[real_path]
 
-    if not pos_map:
-        return real_path, None, False
+    # ``pos_map is None`` iff nothing matched: the file is not part of this MR.
+    # (A real changed file with no parseable hunks maps to {} — present, empty —
+    # so it is still recognised as in-MR and posted as a general note.)
+    file_in_mr = pos_map is not None
+    if not file_in_mr:
+        return real_path, None, False, False
+
+    if line is None:
+        return real_path, None, False, True
 
     try:
         line_int = int(line)
     except (TypeError, ValueError):
-        return real_path, None, False
+        return real_path, None, False, True
 
     if line_int in pos_map:
-        return real_path, pos_map[line_int], True
-    return real_path, None, False
+        return real_path, pos_map[line_int], True, True
+    return real_path, None, False, True
 
 
 # Machine-readable token embedded in the review marker note on the MR. The
@@ -211,6 +225,7 @@ __all__ = [
     'get_gitlab_compare',
     'get_review_marker',
     'upsert_review_marker',
+    'add_mr_label',
     'MARKER_TOKEN',
 ]
 
@@ -368,6 +383,37 @@ class GitLabAPIClient:
 
         except Exception as e:
             print(f"  ❌ [GitLab API] Error updating note: {e}")
+            return None
+
+    def add_merge_request_labels(
+        self, project_path: str, mr_iid: str, labels: str
+    ) -> Optional[Dict]:
+        """
+        Add one or more labels (comma-separated) to the merge request.
+
+        Uses GitLab's ``add_labels`` param, which is **incremental** — it does not
+        touch labels already on the MR — and **auto-creates** any referenced label
+        the project doesn't have yet, so no repo-side setup is required.
+
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+            labels: Comma-separated label name(s) to add
+
+        Returns:
+            Updated MR data or None if failed (sets ``last_error``).
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}")
+            response = requests.put(
+                url, headers=self.headers, json={"add_labels": labels}, timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            print(f"  ❌ [GitLab API] Error adding MR labels: {e}")
             return None
 
     def list_merge_request_notes(self, project_path: str, mr_iid: str) -> Optional[List[Dict]]:
@@ -761,4 +807,39 @@ async def upsert_review_marker(
         return result is not None
     except Exception as e:
         print(f"  ❌ Failed to write review marker: {e}")
+        return False
+
+
+async def add_mr_label(
+    gitlab_url: str,
+    project_path: str,
+    mr_id: str,
+    token: str,
+    label: str,
+) -> bool:
+    """
+    Add a label to the merge request (non-fatal).
+
+    GitLab's ``add_labels`` is incremental (won't remove labels already on the MR)
+    and auto-creates the label if the project doesn't have it, so this needs no
+    repo-side setup and behaves the same for every reviewed repo. Never raises.
+
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        mr_id: Merge request IID
+        token: GitLab access token
+        label: Label name to add
+
+    Returns:
+        True if the label was added successfully, False otherwise.
+    """
+    if not label:
+        return False
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    try:
+        result = api_client.add_merge_request_labels(project_path, mr_id, label)
+        return result is not None
+    except Exception as e:
+        print(f"  ❌ Failed to add MR label {label!r}: {e}")
         return False

@@ -43,3 +43,24 @@ class CommentReviewResponse(BaseModel):
     selected_issues: list[ReviewIssue]  # Top 10 most critical
     filtered_count: int  # Number of issues filtered out
     reasoning: str  # Brief explanation of selection criteria applied
+
+
+class EffortEstimate(BaseModel):
+    """How hard the whole MR is for a HUMAN reviewer, 1 (trivial) .. 5 (very hard).
+
+    Lenient like the other outputs: a model that returns a string, a float, or an
+    out-of-range number is coerced/clamped into 1..5 rather than fail-validating."""
+    effort: int = 3
+    reasoning: str = ""
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _clamp_effort(cls, value):
+        if isinstance(value, bool):
+            n = 3
+        elif isinstance(value, (int, float)):
+            n = int(value)
+        else:
+            match = re.search(r"[1-5]", str(value) if value is not None else "")
+            n = int(match.group()) if match else 3
+        return max(1, min(5, n))

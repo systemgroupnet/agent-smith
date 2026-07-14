@@ -38,6 +38,7 @@ from .pbook_prompts import get_pbook_reviewer_prompt
 from .dataview_prompts import get_dataview_reviewer_prompt
 from .starter_prompts import get_starter_agent_prompt
 from .comment_prompts import get_comment_reviewer_prompt
+from .effort_prompts import get_effort_estimator_prompt
 
 
 __all__ = [
@@ -56,4 +57,6 @@ __all__ = [
     "get_starter_agent_prompt",
     # Comment review prompts
     "get_comment_reviewer_prompt",
+    # Effort estimation prompts
+    "get_effort_estimator_prompt",
 ]

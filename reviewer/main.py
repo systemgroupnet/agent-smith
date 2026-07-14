@@ -34,8 +34,10 @@ from core.utils.gitlab_helpers import (
     get_gitlab_compare,
     get_review_marker,
     upsert_review_marker,
+    add_mr_label,
 )
 from core.agents.file_reviewer import review_file_with_workflow, review_comments_with_agent
+from core.agents.effort_agent import estimate_review_effort
 from core.utils.comment_formatter import format_single_issue, extract_high_severity_issues, get_severity
 from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
@@ -343,7 +345,35 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             changes_to_review = incremental
             metrics.review_type = "incremental"
             print(f"Reviewing {len(changes_to_review)} changed file(s) from new commits\n")
-    
+
+    # Kick off the review-effort estimate concurrently with the file reviews. Placed
+    # here (after the incremental early-returns above) so it only starts once we're
+    # actually going to review — no orphaned task on a "no new commits"/"no code
+    # changes" exit. It only needs MR metadata (file list, per-file line counts, dir
+    # tree, scope) computed from the FULL `changes`, not the review results, so it
+    # overlaps the much-longer review pass for ~no added wall-clock. Awaited (and its
+    # "Review effort N/5" label applied) in the labeling section below; non-fatal.
+    # Skipped when disabled or when an effort label is already on the MR (no
+    # re-estimation on incremental re-runs).
+    existing_labels = [str(lbl) for lbl in (mr_data.get("labels") or [])]
+    effort_estimate_enabled = os.getenv(
+        "EFFORT_ESTIMATE_ENABLED", "true"
+    ).strip().lower() not in ("false", "0", "no", "off", "")
+    effort_already_labeled = any(
+        lbl.startswith("Review effort ") and lbl.endswith("/5") for lbl in existing_labels
+    )
+    effort_task = None
+    if effort_estimate_enabled and not effort_already_labeled:
+        effort_config = build_run_config(
+            thread_id,
+            run_name="effort_estimate",
+            extra_metadata={"mr_id": mr_id, "project_path": project_path, "commit": head_sha},
+            tags=["code-review", "effort-estimate"],
+        )
+        effort_task = asyncio.create_task(estimate_review_effort(changes, config=effort_config))
+    elif effort_already_labeled:
+        print("🧮 Review-effort label already set — skipping estimation\n")
+
     # Get exclusion patterns from environment variable
     exclusion_patterns_str = os.getenv("REVIEW_EXCLUDE_PATTERNS", "")
     exclusion_patterns = [p.strip() for p in exclusion_patterns_str.split(",") if p.strip()]
@@ -521,6 +551,46 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     elif head_sha and file_error_count:
         print(f"⏭️  Not advancing review marker — {file_error_count} file(s) failed; a re-run will retry them")
 
+    # The review pass is done — label the MR so it's visible the agent ran, and
+    # apply the review-effort estimate. All non-fatal (a label failure never
+    # affects the review). Skipped when a provider block aborted the run (no real
+    # review happened) — then also drop the effort task rather than leave it
+    # running. GitLab's add_labels is incremental and auto-creates labels, so this
+    # needs no repo-side setup. A label already on the MR is not re-added.
+    async def _label_mr(label: str) -> None:
+        if label in existing_labels:
+            print(f"🏷️  MR already labeled '{label}' — skipping")
+            return
+        if await add_mr_label(gitlab_url, project_path, mr_id, gitlab_token, label):
+            existing_labels.append(label)
+            print(f"🏷️  Labeled MR as '{label}'")
+        else:
+            record_warning(
+                metrics, "mr_label", f"failed to add '{label}' label to the MR", context=label
+            )
+
+    if provider_blocked:
+        if effort_task is not None:
+            effort_task.cancel()
+            try:
+                await effort_task
+            except BaseException:
+                pass
+    else:
+        # ai-reviewed (override via MR_REVIEW_LABEL; empty disables it)
+        review_label = os.getenv("MR_REVIEW_LABEL", "ai-reviewed").strip()
+        if review_label:
+            await _label_mr(review_label)
+
+        # Review effort N/5 — await the estimate started at the top of the run.
+        if effort_task is not None:
+            try:
+                effort = await effort_task
+            except Exception:
+                effort = None
+            if effort:
+                await _label_mr(f"Review effort {effort}/5")
+
     # Filter high-severity issues using comment reviewer agent
     print(f"\n{'=' * 60}")
     print(f"🔍 Filtering high-severity comments...")
@@ -589,7 +659,26 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         print(f"📝 Posting comment for {file_name}:{line}...")
         comment = format_single_issue(issue)
 
-        real_path, old_line, in_diff = resolve_inline_position(file_name, line, position_maps)
+        real_path, old_line, in_diff, file_in_mr = resolve_inline_position(
+            file_name, line, position_maps
+        )
+
+        # Drop issues whose file isn't part of this MR at all. Each reviewer
+        # reviews one real changed file but self-reports file_name on every issue
+        # and can fabricate it — observed: a Go MR produced a bogus Python
+        # "src/core/engine.py:142" shell-injection finding for a file that does
+        # not exist in the repo. Such a file can never be an inline position, and
+        # posting it as a general note only surfaces the hallucination, so skip it
+        # and record a warning for analytics instead.
+        if not file_in_mr:
+            print(f"  🚫 Skipping {file_name}:{line} — not a file in this MR (likely hallucinated)")
+            record_warning(
+                metrics,
+                "comment_dropped_unknown_file",
+                f"{file_name}:{line} references a file that is not part of this MR; dropped as a likely hallucination",
+                context=f"{file_name}:{line}",
+            )
+            continue
 
         # Each retried POST attempt lands here as a warning (transient failure the
         # post recovered from); a permanent failure is recorded as an error below.
