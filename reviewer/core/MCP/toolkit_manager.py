@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import functools
 import os
 from typing import List, Optional, Dict, Literal, Awaitable, Callable
 import asyncio
@@ -28,6 +29,53 @@ from contextlib import AsyncExitStack
 
 # Transport types
 TransportType = Literal["sse", "streamable-http"]
+
+
+def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
+    """Make each MCP tool's call non-fatal to the review.
+
+    Every MCP server has a single ClientSession shared by all concurrent file
+    reviews. When the server drops that session (``McpError: Session terminated``
+    — idle/restart/overload), an unwrapped tool call *raises*, and that exception
+    propagates out of the agent loop and crashes the whole file review (and, once
+    the session is dead, every remaining call in the run fails the same way). But
+    MCP tools only supply *optional* extra context, so a dead server should
+    degrade the review, not abort it. Here we wrap each tool's coroutine so a
+    failure returns an error string the agent reads as a normal tool observation —
+    it then finishes from the file content + diff it already has (or the tool-agent
+    salvage path) instead of throwing. The message tells the model not to retry, so
+    a dead session doesn't burn the agent's iteration budget hammering it.
+    """
+    wrapped: List[BaseTool] = []
+    for tool in tools:
+        original = getattr(tool, "coroutine", None)
+        if original is None:
+            wrapped.append(tool)
+            continue
+
+        def _make(tool_name: str, call):
+            @functools.wraps(call)
+            async def _resilient(*args, **kwargs):
+                try:
+                    return await call(*args, **kwargs)
+                except asyncio.CancelledError:
+                    raise  # never swallow cancellation (timeouts/shutdown)
+                except Exception as e:  # noqa: BLE001 — degrade any MCP failure
+                    msg = (
+                        f"ERROR: the '{tool_name}' tool is unavailable right now "
+                        f"({type(e).__name__}: {e}). Do not retry it; continue the "
+                        f"review using the file content and diff already provided."
+                    )
+                    print(f"  ⚠️  [MCP] {msg}")
+                    return msg
+            return _resilient
+
+        try:
+            tool.coroutine = _make(tool.name, original)
+        except Exception as e:  # pragma: no cover — if the tool model is frozen
+            print(f"  ⚠️  [MCP] Could not wrap tool {getattr(tool, 'name', '?')}: {e}")
+        wrapped.append(tool)
+    return wrapped
 
 
 class MCPToolkitManager:
@@ -199,7 +247,7 @@ class MCPToolkitManager:
             await session.initialize()
 
             print(f"  🔄 [GitLab MCP] Loading tools...")
-            self._gitlab_tools = await load_mcp_tools(session)
+            self._gitlab_tools = _wrap_tools_resilient(await load_mcp_tools(session))
 
             all_tools = self._gitlab_tools
             filtered_tools = [t for t in all_tools if t.name in self.ALLOWED_GITLAB_TOOLS]
@@ -253,7 +301,7 @@ class MCPToolkitManager:
             await session.initialize()
 
             print(f"  🔄 [Atlassian MCP] Loading tools...")
-            self._atlassian_tools = await load_mcp_tools(session)
+            self._atlassian_tools = _wrap_tools_resilient(await load_mcp_tools(session))
 
             all_tools = self._atlassian_tools
             filtered_tools = [t for t in all_tools if t.name in self.ALLOWED_ATLASSIAN_TOOLS]
@@ -307,7 +355,7 @@ class MCPToolkitManager:
             await session.initialize()
 
             print(f"  🔄 [AIAND Source MCP] Loading tools...")
-            self._aiand_tools = await load_mcp_tools(session)
+            self._aiand_tools = _wrap_tools_resilient(await load_mcp_tools(session))
 
             all_tools = self._aiand_tools
             filtered_tools = self._filter_aiand_tools(all_tools)
