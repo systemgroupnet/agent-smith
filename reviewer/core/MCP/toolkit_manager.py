@@ -53,7 +53,13 @@ def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
             wrapped.append(tool)
             continue
 
-        def _make(tool_name: str, call):
+        # MCP adapter tools declare response_format="content_and_artifact", so
+        # LangChain requires their result to be a (content, artifact) 2-tuple — a
+        # bare string raises "a two-tuple ... is expected", which would itself crash
+        # the review. Match the tool's declared shape in the error path too.
+        response_format = getattr(tool, "response_format", "content")
+
+        def _make(tool_name: str, call, resp_format: str):
             @functools.wraps(call)
             async def _resilient(*args, **kwargs):
                 try:
@@ -67,11 +73,14 @@ def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
                         f"review using the file content and diff already provided."
                     )
                     print(f"  ⚠️  [MCP] {msg}")
+                    # Return the shape the tool's response_format requires.
+                    if resp_format == "content_and_artifact":
+                        return msg, None
                     return msg
             return _resilient
 
         try:
-            tool.coroutine = _make(tool.name, original)
+            tool.coroutine = _make(tool.name, original, response_format)
         except Exception as e:  # pragma: no cover — if the tool model is frozen
             print(f"  ⚠️  [MCP] Could not wrap tool {getattr(tool, 'name', '?')}: {e}")
         wrapped.append(tool)
