@@ -1,6 +1,6 @@
 """PostgreSQL storage for review-run analytics events (SQLAlchemy Core).
 
-Two tables:
+Four tables:
 
 * ``review_runs`` — one row per review run: typed columns for the fields a
   dashboard will filter and group on (project, status, review_type, counts,
@@ -12,6 +12,13 @@ Two tables:
   ``severity`` and keyed to the run (``run_id`` + ``review_run_id``). Kept
   separate from the runs so failures/warnings are queryable and joinable on their
   own (debugging, alerting, DevLake).
+* ``review_comments`` — one row per review comment the reviewer actually posted
+  to a GitLab MR (from the ``posted_comments`` array of the run event), keyed to
+  the run and, via the GitLab ``note_id``, to any reaction scores.
+* ``comment_scores`` — one row per human 1–5 rating: the reviewer seeds each
+  posted comment with the :one:..:five: award emojis, a human clicks one, and
+  GitLab's emoji webhook (``POST /api/webhooks/gitlab``) delivers the award here.
+  Joined to ``review_comments`` on ``note_id``.
 
 PostgreSQL only (so DevLake can ingest the data); the backend URL comes from
 ``COLLECTOR_DATABASE_URL`` (e.g. ``postgresql+psycopg://user:pass@host:5432/collector``).
@@ -30,6 +37,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import (
+    BigInteger,
     Column,
     Float,
     Index,
@@ -42,6 +50,7 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # Typed columns pulled out of each payload for querying. Everything (including
 # these) is also preserved verbatim in raw_json.
@@ -118,6 +127,57 @@ run_events = Table(
     Index("idx_run_events_severity", "severity"),
 )
 
+# One row per review comment the reviewer posted to a GitLab MR, from the
+# ``posted_comments`` array of the run event. ``note_id`` is the GitLab note id
+# — globally unique per instance and the value emoji webhooks report as
+# ``object_attributes.awardable_id`` — so it is the join key for scores.
+review_comments = Table(
+    "review_comments",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("received_at", String, nullable=False),  # server-side ingest time (ISO UTC)
+    Column("run_id", String),           # reviewer run uuid (review_runs.run_id)
+    Column("review_run_id", Integer),   # review_runs.id of the owning run
+    Column("project_path", String),
+    Column("mr_id", String),            # MR IID, as the reviewer reports it
+    Column("note_id", BigInteger, nullable=False),  # GitLab note id (webhook awardable_id)
+    Column("discussion_id", String),    # set for inline comments (discussion threads)
+    Column("comment_type", String),     # "inline" | "note"
+    Column("file", String),
+    Column("line", Integer),
+    Column("severity", String),
+    Column("mr_author_username", String),  # whose MR the comment is on
+    Index("idx_review_comments_run_id", "run_id"),
+    Index("idx_review_comments_note_id", "note_id", unique=True),
+    Index("idx_review_comments_project_mr", "project_path", "mr_id"),
+)
+
+# One row per human 1–5 rating of a review comment, gathered via GitLab's emoji
+# webhook: awarding :one:..:five: on a note upserts a row (unique per
+# note+user+emoji, so webhook redeliveries are idempotent); revoking deletes it,
+# so the table always holds the *current* scores. Self-awards (the reviewer
+# seeding the scale on its own note) are filtered out before this table.
+comment_scores = Table(
+    "comment_scores",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("received_at", String, nullable=False),  # server-side ingest time (ISO UTC)
+    Column("note_id", BigInteger, nullable=False),  # joins review_comments.note_id
+    Column("project_id", Integer),   # numeric GitLab project id (webhook payload)
+    Column("mr_iid", Integer),       # from the webhook's merge_request object
+    Column("user_id", Integer),      # reacting GitLab user
+    Column("username", String),      # reacting user's @handle
+    Column("user_name", String),     # reacting user's display name
+    Column("emoji", String),         # "one" .. "five"
+    Column("score", Integer),        # 1 .. 5
+    Column("awarded_at", String),    # award time from GitLab (object_attributes.created_at)
+    Index("idx_comment_scores_note_id", "note_id"),
+    Index("uq_comment_scores_note_user_emoji", "note_id", "user_id", "emoji", unique=True),
+)
+
+# Emoji-name → score mapping for the rating scale the reviewer seeds.
+_SCORE_EMOJIS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+
 _engine = None
 
 
@@ -183,6 +243,13 @@ def insert_event(payload: dict[str, Any]) -> int:
 
     run_id = values.get("run_id")
 
+    posted = payload.get("posted_comments")
+    posted = posted if isinstance(posted, list) else []
+    project_path = values.get("project_path")
+    mr_id = values.get("mr_id")
+    mr_author = payload.get("mr_author_username")
+    mr_author = None if mr_author is None else str(mr_author)
+
     with get_engine().begin() as conn:
         result = conn.execute(review_runs.insert().values(**values))
         review_run_id = int(result.inserted_primary_key[0])
@@ -197,7 +264,51 @@ def insert_event(payload: dict[str, Any]) -> int:
         if event_rows:
             conn.execute(run_events.insert(), event_rows)
 
+        comment_rows = []
+        for c in posted:
+            if not isinstance(c, dict):
+                continue
+            note_id = _as_int(c.get("note_id"))
+            if note_id is None:  # a comment we can't key reactions to is useless here
+                continue
+            comment_rows.append({
+                "received_at": received_at,
+                "run_id": _text(run_id),
+                "review_run_id": review_run_id,
+                "project_path": project_path,
+                "mr_id": mr_id,
+                "note_id": note_id,
+                "discussion_id": _text(c.get("discussion_id")),
+                "comment_type": _text(c.get("comment_type")),
+                "file": _text(c.get("file")),
+                "line": _as_int(c.get("line")),
+                "severity": _text(c.get("severity")),
+                "mr_author_username": mr_author,
+            })
+        if comment_rows:
+            # A run can be re-emitted (retries) and note ids are stable, so upsert
+            # on note_id keeps this idempotent rather than erroring on the unique idx.
+            stmt = pg_insert(review_comments).values(comment_rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["note_id"],
+                set_={
+                    "run_id": stmt.excluded.run_id,
+                    "review_run_id": stmt.excluded.review_run_id,
+                    "comment_type": stmt.excluded.comment_type,
+                    "file": stmt.excluded.file,
+                    "line": stmt.excluded.line,
+                    "severity": stmt.excluded.severity,
+                    "mr_author_username": stmt.excluded.mr_author_username,
+                },
+            )
+            conn.execute(stmt)
+
     return review_run_id
+
+
+def _text(value: Any) -> Optional[str]:
+    """Lenient text coercion: None stays None, everything else becomes str."""
+    return None if value is None else str(value)
 
 
 def _event_row(
@@ -208,9 +319,6 @@ def _event_row(
     received_at: str,
 ) -> dict[str, Any]:
     """Map one reviewer error/warning entry to a run_events row (all lenient)."""
-    def _text(v: Any) -> Optional[str]:
-        return None if v is None else str(v)
-
     severity = entry.get("severity")
     severity = str(severity) if severity in ("error", "warning") else default_severity
     return {
@@ -282,6 +390,140 @@ def list_run_events(
     with get_engine().connect() as conn:
         rows = conn.execute(stmt).mappings().all()
     return [dict(row) for row in rows]
+
+
+def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ingest one GitLab emoji-webhook event into ``comment_scores``.
+
+    Returns a small status dict describing what was done (for the HTTP response
+    and logging). All paths are lenient — a malformed or irrelevant event is
+    *ignored* (never raises) so GitLab sees a 2xx and doesn't disable the hook.
+
+    Handled cases (in order):
+      * not an ``emoji`` event, or not on a ``Note`` → ``ignored`` (wrong kind);
+      * not one of our rating emojis (:one:..:five:) → ``ignored`` (other emoji);
+      * a self-award (reactor is the note's author, i.e. the reviewer seeding the
+        scale) → ``ignored`` (self-award);
+      * ``award`` → upsert the score (idempotent on note+user+emoji);
+      * ``revoke`` → delete the matching score.
+    """
+    if not isinstance(payload, dict):
+        return {"status": "ignored", "reason": "not an object"}
+    if payload.get("object_kind") != "emoji":
+        return {"status": "ignored", "reason": "not an emoji event"}
+
+    attrs = payload.get("object_attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    if attrs.get("awardable_type") != "Note":
+        return {"status": "ignored", "reason": "not a note reaction"}
+
+    emoji = attrs.get("name")
+    score = _SCORE_EMOJIS.get(emoji)
+    if score is None:
+        return {"status": "ignored", "reason": f"non-rating emoji: {emoji}"}
+
+    note_id = _as_int(attrs.get("awardable_id"))
+    if note_id is None:
+        return {"status": "ignored", "reason": "no awardable_id"}
+
+    # event_type carries award/revoke; object_attributes.action mirrors it.
+    action = payload.get("event_type") or attrs.get("action")
+
+    user = payload.get("user")
+    user = user if isinstance(user, dict) else {}
+    reactor_id = _as_int(user.get("id"))
+
+    # Drop the reviewer's own seed reactions: the award is by the same user who
+    # authored the note (the bot). We compare the reacting user to the note author.
+    note = payload.get("note")
+    note = note if isinstance(note, dict) else {}
+    author_id = _as_int(note.get("author_id"))
+    if action == "award" and reactor_id is not None and reactor_id == author_id:
+        return {"status": "ignored", "reason": "self-award (seed reaction)"}
+
+    mr = payload.get("merge_request")
+    mr = mr if isinstance(mr, dict) else {}
+
+    if action == "revoke":
+        with get_engine().begin() as conn:
+            conn.execute(
+                comment_scores.delete().where(
+                    (comment_scores.c.note_id == note_id)
+                    & (comment_scores.c.user_id == reactor_id)
+                    & (comment_scores.c.emoji == emoji)
+                )
+            )
+        return {"status": "revoked", "note_id": note_id, "emoji": emoji, "score": score}
+
+    # Default: treat as an award (upsert; idempotent on note+user+emoji).
+    row = {
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "note_id": note_id,
+        "project_id": _as_int(payload.get("project_id")),
+        "mr_iid": _as_int(mr.get("iid")),
+        "user_id": reactor_id,
+        "username": _text(user.get("username")),
+        "user_name": _text(user.get("name")),
+        "emoji": emoji,
+        "score": score,
+        "awarded_at": _text(attrs.get("created_at")),
+    }
+    with get_engine().begin() as conn:
+        stmt = pg_insert(comment_scores).values([row])
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["note_id", "user_id", "emoji"],
+            set_={
+                "received_at": stmt.excluded.received_at,
+                "project_id": stmt.excluded.project_id,
+                "mr_iid": stmt.excluded.mr_iid,
+                "username": stmt.excluded.username,
+                "user_name": stmt.excluded.user_name,
+                "score": stmt.excluded.score,
+                "awarded_at": stmt.excluded.awarded_at,
+            },
+        )
+        conn.execute(stmt)
+    return {"status": "recorded", "note_id": note_id, "emoji": emoji, "score": score}
+
+
+def list_review_comments(
+    limit: int = 100,
+    offset: int = 0,
+    run_id: Optional[str] = None,
+    project_path: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Return posted review comments (newest first), each with its current scores.
+
+    Each comment dict carries a ``scores`` list (the rows from ``comment_scores``
+    for that note) plus a convenience ``score_count`` and ``score_avg``.
+    """
+    stmt = select(review_comments)
+    if run_id:
+        stmt = stmt.where(review_comments.c.run_id == run_id)
+    if project_path:
+        stmt = stmt.where(review_comments.c.project_path == project_path)
+    stmt = stmt.order_by(review_comments.c.id.desc()).limit(limit).offset(offset)
+
+    with get_engine().connect() as conn:
+        comments = [dict(r) for r in conn.execute(stmt).mappings().all()]
+        note_ids = [c["note_id"] for c in comments]
+        scores_by_note: dict[int, list] = {}
+        if note_ids:
+            srows = conn.execute(
+                select(comment_scores)
+                .where(comment_scores.c.note_id.in_(note_ids))
+                .order_by(comment_scores.c.id.asc())
+            ).mappings().all()
+            for s in srows:
+                scores_by_note.setdefault(s["note_id"], []).append(dict(s))
+
+    for c in comments:
+        scores = scores_by_note.get(c["note_id"], [])
+        c["scores"] = scores
+        c["score_count"] = len(scores)
+        vals = [s["score"] for s in scores if s.get("score") is not None]
+        c["score_avg"] = round(sum(vals) / len(vals), 2) if vals else None
+    return comments
 
 
 def _as_int(value: Any) -> Optional[int]:

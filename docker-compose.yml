@@ -83,6 +83,9 @@ services:
       - COLLECTOR_DATABASE_URL=${COLLECTOR_DATABASE_URL:-postgresql+psycopg://postgres:postgres@collector-db:5432/collector}
       # When set, POST /api/events requires a matching X-Collector-Token header.
       - COLLECTOR_TOKEN=${COLLECTOR_TOKEN:-}
+      # When set, POST /api/webhooks/gitlab requires a matching X-Gitlab-Token
+      # header (the secret token configured on the GitLab emoji webhook).
+      - GITLAB_WEBHOOK_SECRET=${GITLAB_WEBHOOK_SECRET:-}
     networks:
       - codereview-network
     ports:

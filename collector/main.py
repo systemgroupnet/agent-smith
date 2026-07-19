@@ -7,9 +7,18 @@ reviewer emits one analytics event per MR-review run (see
 PostgreSQL database and exposes a read API a future dashboard can build on.
 
 Endpoints:
-  POST /api/events   ingest one event (JSON body). Optionally token-guarded.
-  GET  /api/events   list recent events, newest first (?limit, ?offset, ?project).
-  GET  /health       liveness + stored-event count.
+  POST /api/events            ingest one event (JSON body). Optionally token-guarded.
+  GET  /api/events            list recent events, newest first (?limit, ?offset, ?project).
+  GET  /api/run-events        list captured errors/warnings (?run_id, ?severity).
+  POST /api/webhooks/gitlab   receive GitLab emoji-reaction events → comment scores.
+  GET  /api/review-comments   list posted review comments with their human scores.
+  GET  /health                liveness + stored-event count.
+
+The webhook endpoint powers the review-evaluation loop: the reviewer seeds each
+posted comment with the :one:..:five: award emojis; a human clicks one; GitLab
+posts an "Emoji Hook" event here; we store it as a 1–5 score keyed to the
+comment's note id. Configure the hook in the GitLab project (Settings →
+Webhooks) with the "Emoji events" trigger enabled.
 
 Contract note: the payload is validated leniently. Each service has its own
 Docker build context and cannot import the other's models, so the contract is
@@ -45,6 +54,16 @@ def _token_ok() -> bool:
     if not expected:
         return True
     return request.headers.get("X-Collector-Token") == expected
+
+
+def _gitlab_webhook_token_ok() -> bool:
+    """When GITLAB_WEBHOOK_SECRET is set, require a matching X-Gitlab-Token header
+    on webhook deliveries (GitLab sends the configured secret in that header).
+    Unset → open (fine on a trusted network / when relying on a hard-to-guess URL)."""
+    expected = os.getenv("GITLAB_WEBHOOK_SECRET")
+    if not expected:
+        return True
+    return request.headers.get("X-Gitlab-Token") == expected
 
 
 @app.route("/health", methods=["GET"])
@@ -105,6 +124,50 @@ def get_run_events():
         return jsonify({"error": f"failed to read run events: {e}"}), 500
 
     return jsonify({"count": len(events), "run_events": events})
+
+
+@app.route("/api/webhooks/gitlab", methods=["POST"])
+def gitlab_webhook():
+    """Receive GitLab webhook events; store emoji reactions as comment scores.
+
+    Only "Emoji Hook" events on notes with our rating emojis change state; every
+    other event (or a malformed body) is acknowledged and ignored. We always
+    return 2xx on an accepted delivery so GitLab does not disable the hook — a
+    storage failure is the only thing that yields 500 (GitLab will retry)."""
+    if not _gitlab_webhook_token_ok():
+        return jsonify({"error": "unauthorized"}), 401
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "request body must be a JSON object"}), 400
+
+    try:
+        result = storage.record_emoji_event(payload)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to store emoji event: {e}"}), 500
+
+    return jsonify(result)
+
+
+@app.route("/api/review-comments", methods=["GET"])
+def get_review_comments():
+    """List posted review comments with their current human scores (newest first).
+
+    Filters: ?run_id, ?project. Each comment includes a ``scores`` array plus a
+    ``score_count`` and ``score_avg``."""
+    limit = _clamp_int(request.args.get("limit"), default=100, low=1, high=500)
+    offset = _clamp_int(request.args.get("offset"), default=0, low=0, high=1_000_000)
+    run_id = request.args.get("run_id") or None
+    project = request.args.get("project") or None
+
+    try:
+        comments = storage.list_review_comments(
+            limit=limit, offset=offset, run_id=run_id, project_path=project
+        )
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to read review comments: {e}"}), 500
+
+    return jsonify({"count": len(comments), "review_comments": comments})
 
 
 if __name__ == "__main__":
