@@ -103,6 +103,20 @@ class RunMetrics(BaseModel):
     comments_posted: int = 0
     comments_failed: int = 0
 
+    # GitLab username of the MR author — the human whose code was reviewed and
+    # who is most likely to score the review comments. Stored per run (not per
+    # comment) since every comment in a run belongs to the same MR.
+    mr_author_username: Optional[str] = None
+
+    # One entry per comment actually posted to the MR this run, so the collector
+    # can key human emoji-reaction scores (gathered via its GitLab webhook
+    # endpoint) back to a specific comment and run. Entry shape:
+    # {note_id, discussion_id, comment_type: "inline"|"note", file, line,
+    # severity}. ``note_id`` is the GitLab note id — the same value an emoji
+    # webhook event reports as ``object_attributes.awardable_id``, which is the
+    # join key. Bounded in practice by the comment-reviewer filter (~10/run).
+    posted_comments: list = Field(default_factory=list)
+
     duration_seconds: Optional[float] = None
     # True when the overall-timeout budget truncated the review (some files were
     # not reviewed; the marker is held so a re-run picks them up).

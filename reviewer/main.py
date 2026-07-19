@@ -29,12 +29,14 @@ from core.utils.gitlab_helpers import (
     get_gitlab_mr_changes,
     get_file_content,
     post_gitlab_comment,
+    add_note_award_emojis,
     build_diff_position_map,
     resolve_inline_position,
     get_gitlab_compare,
     get_review_marker,
     upsert_review_marker,
     add_mr_label,
+    SCORE_REACTION_EMOJIS,
 )
 from core.agents.file_reviewer import review_file_with_workflow, review_comments_with_agent
 from core.agents.effort_agent import estimate_review_effort
@@ -279,6 +281,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     metrics.mr_title = mr_title
     metrics.source_branch = source_branch
     metrics.target_branch = target_branch
+    # The MR author's username rides along with the posted-comment records so
+    # the collector's evaluation tables know whose MR each scored comment is on.
+    metrics.mr_author_username = (mr_data.get("author") or {}).get("username")
 
     # Get commit SHAs for posting line comments
     diff_refs = mr_data.get("diff_refs", {})
@@ -647,6 +652,13 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     total_posted = 0
     total_failed = 0
 
+    # Seed each posted comment with the :one:..:five: rating reactions so humans
+    # can score it with one click (the collector's GitLab webhook stores the
+    # scores). Default-on; set COMMENT_REACTIONS_ENABLED falsy to skip seeding.
+    reactions_enabled = os.getenv(
+        "COMMENT_REACTIONS_ENABLED", "true"
+    ).strip().lower() not in ("false", "0", "no", "off", "")
+
     print(f"💬 Posting {len(filtered_issues)} comment(s) to GitLab...\n")
 
     for issue in filtered_issues:
@@ -656,6 +668,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         # comment_formatter.format_single_issue.
         file_name = issue.get("file_name") if isinstance(issue, dict) else issue.file_name
         line = issue.get("line") if isinstance(issue, dict) else issue.line
+        severity = get_severity(issue)
         print(f"📝 Posting comment for {file_name}:{line}...")
         comment = format_single_issue(issue)
 
@@ -686,7 +699,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         if in_diff:
             # Valid inline position resolved from the diff — post on the exact line
             # (old_line set => context line, needs both sides).
-            post_error = await post_gitlab_comment(
+            posted_note, post_error = await post_gitlab_comment(
                 gitlab_url,
                 project_path,
                 mr_id,
@@ -705,7 +718,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             # impossible; post a general note prefixed with the location instead of
             # attempting (and failing) an inline post.
             located = f"**`{file_name}:{line}`**\n\n{comment}" if line is not None else comment
-            post_error = await post_gitlab_comment(
+            posted_note, post_error = await post_gitlab_comment(
                 gitlab_url,
                 project_path,
                 mr_id,
@@ -729,6 +742,38 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         if post_error is None:
             print(f"  ✅ Posted comment for line {line}")
             total_posted += 1
+            note_id = (posted_note or {}).get("note_id")
+            if note_id is None:
+                # Posted but the response carried no note id — reactions can't be
+                # keyed to it, so the comment can't be scored. Surface why.
+                record_warning(
+                    metrics,
+                    "comment_reaction",
+                    "posted comment returned no note id; rating reactions skipped",
+                    context=f"{file_name}:{line}",
+                )
+            else:
+                metrics.posted_comments.append({
+                    "note_id": note_id,
+                    "discussion_id": posted_note.get("discussion_id"),
+                    "comment_type": posted_note.get("comment_type"),
+                    "file": real_path or file_name,  # canonical MR path when resolved
+                    "line": line,
+                    "severity": severity,
+                })
+                if reactions_enabled:
+                    failed_emojis = await add_note_award_emojis(
+                        gitlab_url, project_path, mr_id, gitlab_token, note_id
+                    )
+                    if failed_emojis:
+                        record_warning(
+                            metrics,
+                            "comment_reaction",
+                            f"failed to seed rating reaction(s) {', '.join(':' + n + ':' for n in failed_emojis)} on note {note_id}",
+                            context=f"{file_name}:{line}",
+                        )
+                    else:
+                        print(f"  🗳️  Seeded 1-5 rating reactions on note {note_id}")
         else:
             print(f"  ❌ Failed to post comment for line {line}")
             total_failed += 1

@@ -212,6 +212,13 @@ def resolve_inline_position(
 # runs only review the new commits instead of the whole MR diff.
 MARKER_TOKEN = "code-review-agent:last-reviewed-sha"
 
+# Award-emoji names (GitLab names, no colons) seeded on every posted review
+# comment as a 1..5 rating scale — :one: .. :five:. A human clicking one of
+# them awards the same emoji as themselves, which GitLab delivers to the
+# collector's webhook endpoint as that comment's score. Order matters: GitLab
+# renders reactions in first-award order, so seeding 1→5 keeps the scale sorted.
+SCORE_REACTION_EMOJIS = ("one", "two", "three", "four", "five")
+
 
 __all__ = [
     'GitLabAPIClient',
@@ -220,6 +227,7 @@ __all__ = [
     'get_gitlab_mr_changes',
     'get_file_content',
     'post_gitlab_comment',
+    'add_note_award_emojis',
     'build_diff_position_map',
     'resolve_inline_position',
     'get_gitlab_compare',
@@ -227,6 +235,7 @@ __all__ = [
     'upsert_review_marker',
     'add_mr_label',
     'MARKER_TOKEN',
+    'SCORE_REACTION_EMOJIS',
 ]
 
 
@@ -550,6 +559,36 @@ class GitLabAPIClient:
         )
         return result
 
+    def create_mr_note_award_emoji(
+        self, project_path: str, mr_iid: str, note_id: int, name: str
+    ) -> Optional[Dict]:
+        """
+        Award one emoji reaction on an MR note/comment.
+
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+            note_id: ID of the note to react to
+            name: Emoji name without colons (e.g. "one", "thumbsup")
+
+        Returns:
+            Created award-emoji data or None if failed. Single attempt, no
+            retry — a reaction only seeds the rating scale, so losing one
+            degrades the evaluation UI but must never slow down the review.
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(
+                f"/projects/{project_id}/merge_requests/{mr_iid}/notes/{note_id}/award_emoji"
+            )
+            response = requests.post(url, headers=self.headers, json={"name": name}, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            print(f"  ❌ [GitLab API] Error awarding :{name}: on note {note_id}: {e}")
+            return None
+
 
 def get_gitlab_api_client(gitlab_url: str, token: str) -> GitLabAPIClient:
     """
@@ -620,6 +659,26 @@ async def get_file_content(gitlab_url: str, project_path: str, file_path: str, b
     return api_client.get_file_content(project_path, file_path, branch)
 
 
+def _posted_from_discussion(result: Dict) -> Dict:
+    """Extract the posted-comment identity from a created-discussion response.
+
+    A positioned discussion's JSON is ``{"id": <discussion_id>, "notes": [{...}]}``
+    — the note id (what emoji-award webhooks report as ``awardable_id``) lives on
+    the first (only) note of the new discussion."""
+    notes = result.get("notes") or []
+    first = notes[0] if notes and isinstance(notes[0], dict) else {}
+    return {
+        "note_id": first.get("id"),
+        "discussion_id": result.get("id"),
+        "comment_type": "inline",
+    }
+
+
+def _posted_from_note(result: Dict) -> Dict:
+    """Extract the posted-comment identity from a created-note response."""
+    return {"note_id": result.get("id"), "discussion_id": None, "comment_type": "note"}
+
+
 async def post_gitlab_comment(
     gitlab_url: str,
     project_path: str,
@@ -634,7 +693,7 @@ async def post_gitlab_comment(
     old_line: Optional[int] = None,
     old_path: Optional[str] = None,
     warnings_sink: Optional[List[dict]] = None,
-) -> Optional[str]:
+) -> Tuple[Optional[Dict], Optional[str]]:
     """
     Post a comment to GitLab MR using REST API.
 
@@ -656,8 +715,11 @@ async def post_gitlab_comment(
             (so the caller can record transient failures as analytics warnings)
 
     Returns:
-        None if the comment was posted (inline or via the general-note fallback),
-        otherwise an error message string describing why it failed.
+        ``(posted, error)``: on success ``posted`` identifies the created comment
+        — ``{"note_id", "discussion_id", "comment_type": "inline"|"note"}`` (the
+        note id is what reaction seeding and the collector's emoji webhook key
+        on) — and ``error`` is None. On failure ``posted`` is None and ``error``
+        describes why (inline or via the general-note fallback).
     """
     print(f"  🔍 [GitLab] Posting comment via REST API...")
     api_client = get_gitlab_api_client(gitlab_url, token)
@@ -682,7 +744,7 @@ async def post_gitlab_comment(
                 project_path, mr_id, comment, position, warnings_sink=warnings_sink
             )
             if result is not None:
-                return None
+                return _posted_from_discussion(result), None
             # The inline post kept failing — usually the line isn't part of the
             # MR diff (a context line), which is deterministic, so retries won't
             # help. Fall back to a general MR note (prefixed with the location)
@@ -705,17 +767,41 @@ async def post_gitlab_comment(
                             f"({inline_error}); posted as a general MR note instead"
                         )[:600],
                     })
-                return None
-            return f"inline post failed ({inline_error}); fallback note also failed ({api_client.last_error})"
+                return _posted_from_note(result), None
+            return None, f"inline post failed ({inline_error}); fallback note also failed ({api_client.last_error})"
 
         # General note
         result = api_client.create_merge_request_note(
             project_path, mr_id, comment, warnings_sink=warnings_sink
         )
-        return None if result is not None else (api_client.last_error or "note post failed")
+        if result is not None:
+            return _posted_from_note(result), None
+        return None, (api_client.last_error or "note post failed")
     except Exception as e:
         print(f"  ❌ Failed to post comment: {e}")
-        return f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}: {e}"
+
+
+async def add_note_award_emojis(
+    gitlab_url: str,
+    project_path: str,
+    mr_id: str,
+    token: str,
+    note_id: int,
+    names=SCORE_REACTION_EMOJIS,
+) -> List[str]:
+    """Seed award-emoji reactions on an MR note, in order (the rating scale).
+
+    Best-effort: each emoji is a single POST with no retry — a missing reaction
+    only degrades the evaluation UI, never the review. Returns the emoji names
+    that failed so the caller can record them as analytics warnings.
+    """
+    api_client = get_gitlab_api_client(gitlab_url, token)
+    failed: List[str] = []
+    for name in names:
+        if api_client.create_mr_note_award_emoji(project_path, mr_id, note_id, name) is None:
+            failed.append(name)
+    return failed
 
 
 async def get_gitlab_compare(
