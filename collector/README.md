@@ -34,7 +34,12 @@ to the comment's GitLab note id, so review quality can be measured over time.
 3. The collector maps the emoji (`one`…`five`) to a score `1`…`5` and upserts a
    `comment_scores` row keyed on `(note_id, user_id, emoji)` — so redeliveries are
    idempotent and a `revoke` deletes the score. The reviewer's own **seed
-   reactions are ignored** (the reacting user is the note's author).
+   reactions are ignored** (the reacting user is the note's author), and a
+   reaction on a note that **isn't a tracked review comment** — the review marker
+   note (`🤖 … reviewed up to commit …`) or any other MR note — is ignored too, so
+   only ratings of real review comments are stored. Each score also records the
+   `project_path` (from the webhook's `project.path_with_namespace`) so ratings
+   are attributable to a project by name.
 
 Enable it in the GitLab project: **Settings → Webhooks**, URL
 `https://<collector-host>/api/webhooks/gitlab`, trigger **Emoji events** (and set
@@ -67,9 +72,12 @@ tables:
   `file`, `line`, `severity`, `mr_author_username`, keyed to the run. Upserted on
   `note_id` so a re-emitted run is idempotent.
 - `comment_scores` — one row per human 1–5 rating gathered from the emoji webhook:
-  `note_id` (joins `review_comments`), reacting `user_id`/`username`/`user_name`,
-  `emoji` (`one`…`five`), `score` (1–5), `awarded_at`. **Unique** on
-  `(note_id, user_id, emoji)` (idempotent upsert; `revoke` deletes the row).
+  `note_id` (joins `review_comments`), `project_id`/`project_path` (the project the
+  comment lives on), `mr_id`, reacting `user_id`/`username`/`user_name`, `emoji`
+  (`one`…`five`), `score` (1–5), `awarded_at`. **Unique** on
+  `(note_id, user_id, emoji)` (idempotent upsert; `revoke` deletes the row). Only
+  ratings of tracked review comments are stored — reactions on the review marker
+  note or other MR notes are ignored.
 
 Schema is managed by **Alembic** (`migrations/`). `storage.run_migrations()`
 applies `alembic upgrade head` at startup (called from `main.py` at import), so a
@@ -77,8 +85,10 @@ fresh database is created and an existing one is upgraded automatically. The
 initial revision is guarded to adopt a table created by the earlier
 `create_all`-based collector without dropping data; revision `0004` backfills the
 old `review_runs.errors` JSONB into `run_events` before dropping that column;
-revision `0005` adds `review_comments` + `comment_scores`. To run migrations by
-hand: `COLLECTOR_DATABASE_URL=… alembic upgrade head` (from `collector/`).
+revision `0005` adds `review_comments` + `comment_scores`; revision `0006` adds
+`comment_scores.project_path`; revision `0007` renames `comment_scores.mr_iid`
+→ `mr_id`. To run migrations by hand:
+`COLLECTOR_DATABASE_URL=… alembic upgrade head` (from `collector/`).
 
 ## Configuration
 

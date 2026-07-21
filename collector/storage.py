@@ -156,7 +156,9 @@ review_comments = Table(
 # webhook: awarding :one:..:five: on a note upserts a row (unique per
 # note+user+emoji, so webhook redeliveries are idempotent); revoking deletes it,
 # so the table always holds the *current* scores. Self-awards (the reviewer
-# seeding the scale on its own note) are filtered out before this table.
+# seeding the scale on its own note) and awards on notes that are not tracked
+# review comments (the review marker note, any other MR note) are filtered out
+# before this table.
 comment_scores = Table(
     "comment_scores",
     metadata,
@@ -164,7 +166,8 @@ comment_scores = Table(
     Column("received_at", String, nullable=False),  # server-side ingest time (ISO UTC)
     Column("note_id", BigInteger, nullable=False),  # joins review_comments.note_id
     Column("project_id", Integer),   # numeric GitLab project id (webhook payload)
-    Column("mr_iid", Integer),       # from the webhook's merge_request object
+    Column("project_path", String),  # human-readable project (webhook project.path_with_namespace)
+    Column("mr_id", Integer),        # MR IID from the webhook's merge_request object
     Column("user_id", Integer),      # reacting GitLab user
     Column("username", String),      # reacting user's @handle
     Column("user_name", String),     # reacting user's display name
@@ -311,6 +314,22 @@ def _text(value: Any) -> Optional[str]:
     return None if value is None else str(value)
 
 
+def _review_comment_exists(note_id: int) -> bool:
+    """True if ``note_id`` is a review comment the reviewer posted (and recorded).
+
+    Used to keep ``comment_scores`` limited to ratings of real review comments —
+    reactions on the review marker note or any other MR note have no matching
+    row here and are ignored.
+    """
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(review_comments.c.id)
+            .where(review_comments.c.note_id == note_id)
+            .limit(1)
+        ).first()
+    return row is not None
+
+
 def _event_row(
     entry: dict[str, Any],
     default_severity: str,
@@ -404,8 +423,13 @@ def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
       * not one of our rating emojis (:one:..:five:) → ``ignored`` (other emoji);
       * a self-award (reactor is the note's author, i.e. the reviewer seeding the
         scale) → ``ignored`` (self-award);
-      * ``award`` → upsert the score (idempotent on note+user+emoji);
-      * ``revoke`` → delete the matching score.
+      * ``revoke`` → delete the matching score (also clears any orphan rows);
+      * an award on a note we did **not** post as a review comment — the review
+        marker note ("reviewed up to commit …") or any other MR note — →
+        ``ignored`` (not a tracked review comment), so scores stay attached only
+        to real review comments;
+      * ``award`` on a tracked comment → upsert the score (idempotent on
+        note+user+emoji).
     """
     if not isinstance(payload, dict):
         return {"status": "ignored", "reason": "not an object"}
@@ -455,12 +479,26 @@ def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
             )
         return {"status": "revoked", "note_id": note_id, "emoji": emoji, "score": score}
 
+    # Only record ratings on notes we actually posted as review comments. A
+    # reaction on the review marker note ("🤖 … reviewed up to commit …") or any
+    # other MR note is not a rating of a review comment, so it is ignored rather
+    # than stored as an orphan score. The review_comments row lands with the run
+    # event at the end of the run — before a human sits down to review and rate
+    # the MR — so a genuine rating finds its comment here.
+    if not _review_comment_exists(note_id):
+        return {"status": "ignored", "reason": "not a tracked review comment"}
+
+    project = payload.get("project")
+    project = project if isinstance(project, dict) else {}
+    project_path = _text(project.get("path_with_namespace")) or _text(project.get("name"))
+
     # Default: treat as an award (upsert; idempotent on note+user+emoji).
     row = {
         "received_at": datetime.now(timezone.utc).isoformat(),
         "note_id": note_id,
         "project_id": _as_int(payload.get("project_id")),
-        "mr_iid": _as_int(mr.get("iid")),
+        "project_path": project_path,
+        "mr_id": _as_int(mr.get("iid")),
         "user_id": reactor_id,
         "username": _text(user.get("username")),
         "user_name": _text(user.get("name")),
@@ -475,7 +513,8 @@ def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
             set_={
                 "received_at": stmt.excluded.received_at,
                 "project_id": stmt.excluded.project_id,
-                "mr_iid": stmt.excluded.mr_iid,
+                "project_path": stmt.excluded.project_path,
+                "mr_id": stmt.excluded.mr_id,
                 "username": stmt.excluded.username,
                 "user_name": stmt.excluded.user_name,
                 "score": stmt.excluded.score,
