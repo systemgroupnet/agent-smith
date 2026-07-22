@@ -602,9 +602,60 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     print(f"{'=' * 60}\n")
     
     all_high_severity_issues = extract_high_severity_issues(all_comments)
-    
+
     print(f"📊 Found {len(all_high_severity_issues)} high-severity issues across all files")
-    
+
+    # Build inline-position maps from the FULL MR diff (GitLab inline positions are
+    # against the MR diff_refs, not the incremental compare). Maps each changed
+    # file's real new-path -> {new_line: old_line|None}. Used twice: by the in-diff
+    # gate right below, and by the posting loop to place inline comments on the
+    # exact right line (with old_line for context lines, which GitLab requires).
+    position_maps: dict = {}
+    for change in changes:
+        p = change.get("new_path") or change.get("old_path")
+        if p:
+            position_maps[p] = build_diff_position_map(change.get("diff", "") or "")
+
+    # Deterministic in-diff gate. Reviewers see the whole file (for context) but
+    # self-report file_name/line per issue, so issues on unchanged code — or with a
+    # fabricated file / miscounted line — slip through. Resolve every issue against
+    # the authoritative MR diff BEFORE the comment reviewer: a line outside the
+    # diff hunks can never be a valid inline comment, so drop it here instead of
+    # letting it take one of the ~10 comment slots and end up as a noisy general
+    # note. Each drop is recorded as a warning for analytics.
+    in_diff_issues = []
+    for issue in all_high_severity_issues:
+        file_name = issue.get("file_name") if isinstance(issue, dict) else issue.file_name
+        line = issue.get("line") if isinstance(issue, dict) else issue.line
+        _real_path, _old_line, in_diff, file_in_mr = resolve_inline_position(
+            file_name, line, position_maps
+        )
+        if in_diff:
+            in_diff_issues.append(issue)
+        elif not file_in_mr:
+            print(f"  🚫 Dropping issue {file_name}:{line} — file not in this MR (likely hallucinated)")
+            record_warning(
+                metrics,
+                "issue_dropped_unknown_file",
+                f"{file_name}:{line} references a file that is not part of this MR; dropped before comment filtering",
+                context=f"{file_name}:{line}",
+            )
+        else:
+            print(f"  🚫 Dropping issue {file_name}:{line} — line not in the MR diff")
+            record_warning(
+                metrics,
+                "issue_dropped_not_in_diff",
+                f"{file_name}:{line} is not a line in the MR diff; dropped before comment filtering",
+                context=f"{file_name}:{line}",
+            )
+    dropped_count = len(all_high_severity_issues) - len(in_diff_issues)
+    if dropped_count:
+        print(
+            f"🚧 In-diff gate: dropped {dropped_count} issue(s) not on MR diff lines; "
+            f"{len(in_diff_issues)} remain"
+        )
+    all_high_severity_issues = in_diff_issues
+
     # Apply comment reviewer agent if there are high-severity issues
     if all_high_severity_issues:
         comment_config = build_run_config(
@@ -638,17 +689,11 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     print(f"📤 Posting comments to GitLab MR...")
     print(f"{'=' * 60}\n")
 
-    # Build inline-position maps from the FULL MR diff (GitLab inline positions are
-    # against the MR diff_refs, not the incremental compare). Maps each changed
-    # file's real new-path -> {new_line: old_line|None}, so we post inline on the
-    # exact right line (with old_line for context lines, which GitLab requires) and
-    # fall back to a general note when the model's line isn't part of the diff.
-    position_maps: dict = {}
-    for change in changes:
-        p = change.get("new_path") or change.get("old_path")
-        if p:
-            position_maps[p] = build_diff_position_map(change.get("diff", "") or "")
-
+    # position_maps (built before the in-diff gate above) drive inline placement.
+    # Every issue reaching this loop already passed the gate, but the comment
+    # reviewer synthesizes its output and may rewrite file_name/line, so the
+    # resolution below — with its unknown-file drop and general-note fallback —
+    # stays as a safety net.
     total_posted = 0
     total_failed = 0
 
