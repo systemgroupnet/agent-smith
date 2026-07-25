@@ -10,15 +10,22 @@ Endpoints:
   POST /api/events            ingest one event (JSON body). Optionally token-guarded.
   GET  /api/events            list recent events, newest first (?limit, ?offset, ?project).
   GET  /api/run-events        list captured errors/warnings (?run_id, ?severity).
-  POST /api/webhooks/gitlab   receive GitLab emoji-reaction events → comment scores.
-  GET  /api/review-comments   list posted review comments with their human scores.
+  POST /api/webhooks/gitlab   receive GitLab emoji + comment events.
+  GET  /api/review-comments   list posted review comments with scores and replies.
+  GET  /api/comment-replies   list human replies to the agent's review comments.
   GET  /health                liveness + stored-event count.
 
-The webhook endpoint powers the review-evaluation loop: the reviewer seeds each
-posted comment with the :one:..:five: award emojis; a human clicks one; GitLab
-posts an "Emoji Hook" event here; we store it as a 1–5 score keyed to the
-comment's note id. Configure the hook in the GitLab project (Settings →
-Webhooks) with the "Emoji events" trigger enabled.
+The webhook endpoint powers the review-evaluation loop, on two triggers:
+
+* **Emoji events** — the reviewer seeds each posted comment with the
+  :one:..:five: award emojis; a human clicks one; GitLab posts an "Emoji Hook"
+  event here and we store it as a 1–5 score keyed to the comment's note id.
+* **Comments** — when a human replies in the thread of a comment the agent left,
+  GitLab posts a "Note Hook" event; we match its ``discussion_id`` to a tracked
+  review comment and store the reply. Notes elsewhere on the MR are ignored.
+
+Configure the hook in the GitLab project (Settings → Webhooks) with the "Emoji
+events" and "Comments" triggers enabled.
 
 Contract note: the payload is validated leniently. Each service has its own
 Docker build context and cannot import the other's models, so the contract is
@@ -128,12 +135,15 @@ def get_run_events():
 
 @app.route("/api/webhooks/gitlab", methods=["POST"])
 def gitlab_webhook():
-    """Receive GitLab webhook events; store emoji reactions as comment scores.
+    """Receive GitLab webhook events feeding the review-evaluation loop.
 
-    Only "Emoji Hook" events on notes with our rating emojis change state; every
-    other event (or a malformed body) is acknowledged and ignored. We always
-    return 2xx on an accepted delivery so GitLab does not disable the hook — a
-    storage failure is the only thing that yields 500 (GitLab will retry)."""
+    Two triggers post here. "Emoji events" carry a rating reaction on one of our
+    notes → a 1–5 comment score. "Comments" carry a note; when it sits in the
+    thread of a comment the agent posted, it is a human replying to the agent →
+    a comment_replies row. Every other event (or a malformed body) is
+    acknowledged and ignored. We always return 2xx on an accepted delivery so
+    GitLab does not disable the hook — a storage failure is the only thing that
+    yields 500 (GitLab will retry)."""
     if not _gitlab_webhook_token_ok():
         return jsonify({"error": "unauthorized"}), 401
 
@@ -142,9 +152,9 @@ def gitlab_webhook():
         return jsonify({"error": "request body must be a JSON object"}), 400
 
     try:
-        result = storage.record_emoji_event(payload)
+        result = storage.record_webhook_event(payload)
     except Exception as e:  # noqa: BLE001
-        return jsonify({"error": f"failed to store emoji event: {e}"}), 500
+        return jsonify({"error": f"failed to store webhook event: {e}"}), 500
 
     return jsonify(result)
 
@@ -168,6 +178,33 @@ def get_review_comments():
         return jsonify({"error": f"failed to read review comments: {e}"}), 500
 
     return jsonify({"count": len(comments), "review_comments": comments})
+
+
+@app.route("/api/comment-replies", methods=["GET"])
+def get_comment_replies():
+    """List human replies to the agent's review comments (newest first).
+
+    Filters: ?run_id, ?project, ?note_id (the parent agent comment)."""
+    limit = _clamp_int(request.args.get("limit"), default=100, low=1, high=500)
+    offset = _clamp_int(request.args.get("offset"), default=0, low=0, high=1_000_000)
+    run_id = request.args.get("run_id") or None
+    project = request.args.get("project") or None
+    note_id_raw = request.args.get("note_id")
+    note_id = None
+    if note_id_raw:
+        try:
+            note_id = int(note_id_raw)
+        except ValueError:
+            return jsonify({"error": "note_id must be an integer"}), 400
+
+    try:
+        replies = storage.list_comment_replies(
+            limit=limit, offset=offset, run_id=run_id, project_path=project, note_id=note_id
+        )
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to read comment replies: {e}"}), 500
+
+    return jsonify({"count": len(replies), "comment_replies": replies})
 
 
 if __name__ == "__main__":

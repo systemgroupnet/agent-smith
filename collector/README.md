@@ -6,10 +6,13 @@ Ingests one **analytics event per review run** emitted by the reviewer and store
 it in PostgreSQL. A dashboard (e.g. DevLake/Grafana) can be built on top of the
 read API or the database later.
 
-It also runs the **comment-evaluation loop**: the reviewer seeds every posted
-review comment with the `:one:`…`:five:` award emojis, a human clicks one to rate
-it, and GitLab's emoji webhook posts the reaction here. The score is stored keyed
-to the comment's GitLab note id, so review quality can be measured over time.
+It also runs the **comment-evaluation loop**, fed by two GitLab webhooks on one
+endpoint. The reviewer seeds every posted review comment with the `:one:`…`:five:`
+award emojis; a human clicks one to rate it and GitLab's **emoji** webhook posts
+the reaction here, stored keyed to the comment's GitLab note id. When a human
+**replies in the thread** of one of those comments, GitLab's **comment** webhook
+delivers the reply and it is stored against the same comment — so both the
+numeric score and the written feedback on each finding can be measured over time.
 
 ## Endpoints
 
@@ -18,8 +21,9 @@ to the comment's GitLab note id, so review quality can be measured over time.
 | `POST` | `/api/events` | Ingest one run event (JSON body). Returns `201 {"status":"stored","id":N}`. |
 | `GET`  | `/api/events` | List recent events, newest first. Query params: `limit` (1–500, default 50), `offset`, `project`. |
 | `GET`  | `/api/run-events` | List captured errors/warnings, newest first. Query params: `limit` (1–500, default 100), `offset`, `run_id`, `severity` (`error`/`warning`). |
-| `POST` | `/api/webhooks/gitlab` | Receive GitLab webhook events; store emoji reactions on review comments as 1–5 scores. Optionally guarded by `X-Gitlab-Token` (see `GITLAB_WEBHOOK_SECRET`). |
-| `GET`  | `/api/review-comments` | List posted review comments with their current human scores (each carries a `scores` array + `score_count`/`score_avg`). Query params: `limit` (1–500, default 100), `offset`, `run_id`, `project`. |
+| `POST` | `/api/webhooks/gitlab` | Receive GitLab webhook events: **emoji** reactions on review comments → 1–5 scores, and **comments** in a review comment's thread → replies. Optionally guarded by `X-Gitlab-Token` (see `GITLAB_WEBHOOK_SECRET`). |
+| `GET`  | `/api/review-comments` | List posted review comments with their current human scores and replies (each carries a `scores` array + `score_count`/`score_avg`, and a `replies` array + `reply_count`). Query params: `limit` (1–500, default 100), `offset`, `run_id`, `project`. |
+| `GET`  | `/api/comment-replies` | List human replies to the agent's review comments, newest first. Query params: `limit` (1–500, default 100), `offset`, `run_id`, `project`, `note_id` (the parent agent comment). |
 | `GET`  | `/health`     | Liveness + stored-event count. |
 
 ### Comment-evaluation loop
@@ -41,9 +45,40 @@ to the comment's GitLab note id, so review quality can be measured over time.
    `project_path` (from the webhook's `project.path_with_namespace`) so ratings
    are attributable to a project by name.
 
-Enable it in the GitLab project: **Settings → Webhooks**, URL
-`https://<collector-host>/api/webhooks/gitlab`, trigger **Emoji events** (and set
-the secret token to match `GITLAB_WEBHOOK_SECRET` if configured).
+### Replies to review comments
+
+Ratings say *how good* a comment was; replies say *why*. Every comment the
+reviewer posts is a GitLab **thread** (an inline discussion, or an unpositioned
+discussion for the general-note fallback), and every note in a thread carries the
+same `discussion_id` — which the reviewer already records in `posted_comments`.
+So:
+
+1. A human replies to one of the agent's comments in the MR.
+2. GitLab fires a **Comments** webhook (`X-Gitlab-Event: Note Hook`) to the same
+   `POST /api/webhooks/gitlab` endpoint; the collector routes it by
+   `object_kind` (`emoji` → scores, `note` → replies).
+3. The reply's `discussion_id` is looked up against `review_comments`. A match
+   means it is a reply in that comment's thread, and identifies which agent
+   comment it answers — so the reply is stored in `comment_replies` with
+   `parent_note_id` and the parent's `run_id`. **No GitLab API call is needed**
+   and no token is required on the collector.
+
+Everything else is ignored: comments in threads the agent didn't start, replies
+between humans elsewhere on the MR, notes on issues rather than merge requests,
+GitLab **system** notes (label/assignee chatter), and the agent's **own**
+comments, which fire this hook too but open a thread rather than reply to one.
+An edited reply re-fires the hook with the same note id and upserts, so each
+reply is one row holding its current text.
+
+One ordering caveat: a reply can only be matched once the run event that carries
+the parent comment has arrived (it is sent at the end of the review run, seconds
+after the comment is posted). A reply that somehow beat it — or arrived while the
+collector was down — is ignored rather than queued.
+
+Enable both in the GitLab project: **Settings → Webhooks**, URL
+`https://<collector-host>/api/webhooks/gitlab`, triggers **Emoji events** and
+**Comments** (and set the secret token to match `GITLAB_WEBHOOK_SECRET` if
+configured).
 
 The payload is validated **leniently**: it must be a JSON object, but unknown or
 missing fields are tolerated (unknown fields are preserved in a `raw_json` JSONB
@@ -55,7 +90,7 @@ for the fields the reviewer currently sends.
 
 ## Storage
 
-**PostgreSQL** (required; no SQLite fallback), via `COLLECTOR_DATABASE_URL`. Four
+**PostgreSQL** (required; no SQLite fallback), via `COLLECTOR_DATABASE_URL`. Five
 tables:
 
 - `review_runs` — one row per run: typed columns for the fields a dashboard
@@ -78,6 +113,13 @@ tables:
   `(note_id, user_id, emoji)` (idempotent upsert; `revoke` deletes the row). Only
   ratings of tracked review comments are stored — reactions on the review marker
   note or other MR notes are ignored.
+- `comment_replies` — one row per human reply in a review comment's thread,
+  gathered from the comment webhook: `note_id` (the reply's own GitLab note id,
+  **unique** — upserted so edits and redeliveries don't duplicate),
+  `discussion_id`, `parent_note_id` (joins `review_comments.note_id`), the
+  parent's `run_id`, `project_id`/`project_path`, `mr_id`, the replying
+  `author_id`/`author_username`/`author_name`, the `body` text, `note_type`
+  (`DiffNote`/`DiscussionNote`), `url`, `noted_at`, `updated_at`, `action`.
 
 Schema is managed by **Alembic** (`migrations/`). `storage.run_migrations()`
 applies `alembic upgrade head` at startup (called from `main.py` at import), so a
@@ -87,7 +129,7 @@ initial revision is guarded to adopt a table created by the earlier
 old `review_runs.errors` JSONB into `run_events` before dropping that column;
 revision `0005` adds `review_comments` + `comment_scores`; revision `0006` adds
 `comment_scores.project_path`; revision `0007` renames `comment_scores.mr_iid`
-→ `mr_id`. To run migrations by hand:
+→ `mr_id`; revision `0008` adds `comment_replies`. To run migrations by hand:
 `COLLECTOR_DATABASE_URL=… alembic upgrade head` (from `collector/`).
 
 ## Configuration

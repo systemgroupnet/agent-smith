@@ -1,6 +1,6 @@
 """PostgreSQL storage for review-run analytics events (SQLAlchemy Core).
 
-Four tables:
+Five tables:
 
 * ``review_runs`` — one row per review run: typed columns for the fields a
   dashboard will filter and group on (project, status, review_type, counts,
@@ -19,6 +19,10 @@ Four tables:
   posted comment with the :one:..:five: award emojis, a human clicks one, and
   GitLab's emoji webhook (``POST /api/webhooks/gitlab``) delivers the award here.
   Joined to ``review_comments`` on ``note_id``.
+* ``comment_replies`` — one row per human reply *in the thread of* a review
+  comment, from GitLab's comment ("Note Hook") webhook on the same endpoint.
+  Matched by ``discussion_id`` (every note in a thread shares it), so only real
+  replies to the agent are stored — never unrelated MR comments.
 
 PostgreSQL only (so DevLake can ingest the data); the backend URL comes from
 ``COLLECTOR_DATABASE_URL`` (e.g. ``postgresql+psycopg://user:pass@host:5432/collector``).
@@ -178,6 +182,41 @@ comment_scores = Table(
     Index("uq_comment_scores_note_user_emoji", "note_id", "user_id", "emoji", unique=True),
 )
 
+# One row per human reply in the thread of a review comment the agent left,
+# gathered from GitLab's comment webhook ("Note Hook"). GitLab gives every note
+# in a thread the same ``discussion_id``, so a reply is identified by its
+# discussion_id matching a tracked ``review_comments.discussion_id`` — that also
+# resolves which agent comment it answers (``parent_note_id``), with no GitLab
+# API call. Comments elsewhere on the MR (new threads, replies to humans, the
+# review marker note) share no discussion with us and are never stored. Unique on
+# ``note_id`` so redeliveries and edits upsert instead of duplicating.
+comment_replies = Table(
+    "comment_replies",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("received_at", String, nullable=False),  # server-side ingest time (ISO UTC)
+    Column("note_id", BigInteger, nullable=False),  # the reply's own GitLab note id
+    Column("discussion_id", String),      # thread id; joins review_comments.discussion_id
+    Column("parent_note_id", BigInteger), # the agent comment that opened the thread
+    Column("run_id", String),             # copied from the parent comment's run
+    Column("project_id", Integer),        # numeric GitLab project id (webhook payload)
+    Column("project_path", String),       # webhook project.path_with_namespace
+    Column("mr_id", Integer),             # MR IID from the webhook's merge_request object
+    Column("author_id", Integer),         # replying GitLab user
+    Column("author_username", String),
+    Column("author_name", String),
+    Column("body", String),               # the reply text (object_attributes.note)
+    Column("note_type", String),          # DiffNote | DiscussionNote | None
+    Column("url", String),                # direct link to the reply
+    Column("noted_at", String),           # note created_at from GitLab
+    Column("updated_at", String),
+    Column("action", String),             # "create" | "update"
+    Index("idx_comment_replies_note_id", "note_id", unique=True),
+    Index("idx_comment_replies_discussion_id", "discussion_id"),
+    Index("idx_comment_replies_parent_note_id", "parent_note_id"),
+    Index("idx_comment_replies_run_id", "run_id"),
+)
+
 # Emoji-name → score mapping for the rating scale the reviewer seeds.
 _SCORE_EMOJIS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
 
@@ -330,6 +369,30 @@ def _review_comment_exists(note_id: int) -> bool:
     return row is not None
 
 
+def _review_comment_by_discussion(discussion_id: str) -> Optional[dict[str, Any]]:
+    """The tracked review comment that owns ``discussion_id``, or None.
+
+    Every note in a GitLab thread carries the thread's ``discussion_id``, and the
+    reviewer records the discussion id of each comment it posts — so a webhook
+    note whose discussion matches one of ours is, by construction, a reply in
+    that comment's thread. Returns the parent's identity (note id, run, project,
+    MR) so the reply can be keyed to it.
+    """
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(
+                review_comments.c.note_id,
+                review_comments.c.run_id,
+                review_comments.c.project_path,
+                review_comments.c.mr_id,
+            )
+            .where(review_comments.c.discussion_id == discussion_id)
+            .order_by(review_comments.c.id.asc())
+            .limit(1)
+        ).mappings().first()
+    return dict(row) if row is not None else None
+
+
 def _event_row(
     entry: dict[str, Any],
     default_severity: str,
@@ -409,6 +472,130 @@ def list_run_events(
     with get_engine().connect() as conn:
         rows = conn.execute(stmt).mappings().all()
     return [dict(row) for row in rows]
+
+
+def record_webhook_event(payload: dict[str, Any]) -> dict[str, Any]:
+    """Route one GitLab webhook delivery to its handler.
+
+    Two hooks feed the review-evaluation loop and both post to the same endpoint:
+    "Emoji events" (``object_kind: emoji``) → 1–5 comment scores, and "Comments"
+    (``object_kind: note``) → replies in an agent comment's thread. Anything else
+    is acknowledged and ignored so GitLab keeps the hook enabled.
+    """
+    if not isinstance(payload, dict):
+        return {"status": "ignored", "reason": "not an object"}
+    kind = payload.get("object_kind")
+    if kind == "emoji":
+        return record_emoji_event(payload)
+    if kind == "note":
+        return record_note_event(payload)
+    return {"status": "ignored", "reason": f"unhandled event kind: {kind}"}
+
+
+def record_note_event(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ingest one GitLab comment-webhook ("Note Hook") event into ``comment_replies``.
+
+    Stores **only** replies in the thread of a review comment the agent posted —
+    the point being to capture what humans answer back to the agent, not every
+    comment on the MR. A note qualifies when its ``discussion_id`` matches a
+    tracked ``review_comments`` row; that same match identifies the parent
+    comment, so no GitLab API call is needed.
+
+    Returns a status dict; like the emoji handler, every path is lenient — an
+    irrelevant or malformed event is *ignored* (never raises) so GitLab sees a 2xx
+    and doesn't disable the hook.
+
+    Ignored (in order): non-``note`` events; notes on anything but a
+    ``MergeRequest``; GitLab **system** notes (label/assignee/status chatter);
+    notes with no id or no discussion id; notes in a discussion we don't own (a
+    fresh MR thread, a reply between humans, the review marker note); and the
+    agent's **own** tracked comments, which arrive on this hook too but are the
+    parent of a thread, not a reply to one.
+    """
+    if not isinstance(payload, dict):
+        return {"status": "ignored", "reason": "not an object"}
+    if payload.get("object_kind") != "note":
+        return {"status": "ignored", "reason": "not a note event"}
+
+    attrs = payload.get("object_attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+
+    if attrs.get("noteable_type") != "MergeRequest":
+        return {"status": "ignored", "reason": "not a merge-request comment"}
+    if attrs.get("system"):
+        # Label/assignee/milestone chatter GitLab posts as notes — never a reply.
+        return {"status": "ignored", "reason": "system note"}
+
+    note_id = _as_int(attrs.get("id"))
+    if note_id is None:
+        return {"status": "ignored", "reason": "no note id"}
+
+    discussion_id = _text(attrs.get("discussion_id"))
+    if not discussion_id:
+        return {"status": "ignored", "reason": "no discussion id"}
+
+    # The agent's own comments fire this hook as well (they open the thread), and
+    # a redelivery could arrive after the run event created their review_comments
+    # row — so drop any note we posted ourselves before the discussion lookup.
+    if _review_comment_exists(note_id):
+        return {"status": "ignored", "reason": "own review comment, not a reply"}
+
+    parent = _review_comment_by_discussion(discussion_id)
+    if parent is None:
+        return {"status": "ignored", "reason": "not a reply to a review comment"}
+
+    user = payload.get("user")
+    user = user if isinstance(user, dict) else {}
+    project = payload.get("project")
+    project = project if isinstance(project, dict) else {}
+    mr = payload.get("merge_request")
+    mr = mr if isinstance(mr, dict) else {}
+
+    row = {
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "note_id": note_id,
+        "discussion_id": discussion_id,
+        "parent_note_id": _as_int(parent.get("note_id")),
+        "run_id": _text(parent.get("run_id")),
+        "project_id": _as_int(payload.get("project_id")),
+        "project_path": (
+            _text(project.get("path_with_namespace"))
+            or _text(project.get("name"))
+            or _text(parent.get("project_path"))
+        ),
+        "mr_id": _as_int(mr.get("iid")),
+        "author_id": _as_int(user.get("id")) or _as_int(attrs.get("author_id")),
+        "author_username": _text(user.get("username")),
+        "author_name": _text(user.get("name")),
+        "body": _text(attrs.get("note") or attrs.get("description")),
+        "note_type": _text(attrs.get("type")),
+        "url": _text(attrs.get("url")),
+        "noted_at": _text(attrs.get("created_at")),
+        "updated_at": _text(attrs.get("updated_at")),
+        "action": _text(attrs.get("action")),
+    }
+    with get_engine().begin() as conn:
+        stmt = pg_insert(comment_replies).values([row])
+        # An edited reply re-fires the hook with action="update" and the same note
+        # id; upsert keeps one row per reply holding its current text.
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["note_id"],
+            set_={
+                "received_at": stmt.excluded.received_at,
+                "body": stmt.excluded.body,
+                "note_type": stmt.excluded.note_type,
+                "url": stmt.excluded.url,
+                "updated_at": stmt.excluded.updated_at,
+                "action": stmt.excluded.action,
+            },
+        )
+        conn.execute(stmt)
+    return {
+        "status": "recorded",
+        "note_id": note_id,
+        "parent_note_id": row["parent_note_id"],
+        "discussion_id": discussion_id,
+    }
 
 
 def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
@@ -531,10 +718,12 @@ def list_review_comments(
     run_id: Optional[str] = None,
     project_path: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Return posted review comments (newest first), each with its current scores.
+    """Return posted review comments (newest first), each with its scores and replies.
 
     Each comment dict carries a ``scores`` list (the rows from ``comment_scores``
-    for that note) plus a convenience ``score_count`` and ``score_avg``.
+    for that note) plus a convenience ``score_count`` and ``score_avg``, and a
+    ``replies`` list (the rows from ``comment_replies`` in that comment's thread,
+    oldest first) plus a ``reply_count``.
     """
     stmt = select(review_comments)
     if run_id:
@@ -547,6 +736,7 @@ def list_review_comments(
         comments = [dict(r) for r in conn.execute(stmt).mappings().all()]
         note_ids = [c["note_id"] for c in comments]
         scores_by_note: dict[int, list] = {}
+        replies_by_note: dict[int, list] = {}
         if note_ids:
             srows = conn.execute(
                 select(comment_scores)
@@ -556,13 +746,50 @@ def list_review_comments(
             for s in srows:
                 scores_by_note.setdefault(s["note_id"], []).append(dict(s))
 
+            rrows = conn.execute(
+                select(comment_replies)
+                .where(comment_replies.c.parent_note_id.in_(note_ids))
+                .order_by(comment_replies.c.id.asc())
+            ).mappings().all()
+            for r in rrows:
+                replies_by_note.setdefault(r["parent_note_id"], []).append(dict(r))
+
     for c in comments:
         scores = scores_by_note.get(c["note_id"], [])
         c["scores"] = scores
         c["score_count"] = len(scores)
         vals = [s["score"] for s in scores if s.get("score") is not None]
         c["score_avg"] = round(sum(vals) / len(vals), 2) if vals else None
+        replies = replies_by_note.get(c["note_id"], [])
+        c["replies"] = replies
+        c["reply_count"] = len(replies)
     return comments
+
+
+def list_comment_replies(
+    limit: int = 100,
+    offset: int = 0,
+    run_id: Optional[str] = None,
+    project_path: Optional[str] = None,
+    note_id: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Return captured replies to review comments (newest first), as plain dicts.
+
+    Optional filters: ``run_id`` (the run whose comment was replied to),
+    ``project_path``, and ``note_id`` (the parent agent comment).
+    """
+    stmt = select(comment_replies)
+    if run_id:
+        stmt = stmt.where(comment_replies.c.run_id == run_id)
+    if project_path:
+        stmt = stmt.where(comment_replies.c.project_path == project_path)
+    if note_id is not None:
+        stmt = stmt.where(comment_replies.c.parent_note_id == note_id)
+    stmt = stmt.order_by(comment_replies.c.id.desc()).limit(limit).offset(offset)
+
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _as_int(value: Any) -> Optional[int]:

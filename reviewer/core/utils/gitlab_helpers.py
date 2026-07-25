@@ -659,24 +659,22 @@ async def get_file_content(gitlab_url: str, project_path: str, file_path: str, b
     return api_client.get_file_content(project_path, file_path, branch)
 
 
-def _posted_from_discussion(result: Dict) -> Dict:
+def _posted_from_discussion(result: Dict, comment_type: str = "inline") -> Dict:
     """Extract the posted-comment identity from a created-discussion response.
 
-    A positioned discussion's JSON is ``{"id": <discussion_id>, "notes": [{...}]}``
-    — the note id (what emoji-award webhooks report as ``awardable_id``) lives on
-    the first (only) note of the new discussion."""
+    A discussion's JSON is ``{"id": <discussion_id>, "notes": [{...}]}`` — the
+    note id (what emoji-award webhooks report as ``awardable_id``) lives on the
+    first (only) note of the new discussion. ``comment_type`` distinguishes a
+    positioned inline discussion from an unpositioned general one; both are
+    threads, so both carry a discussion id.
+    """
     notes = result.get("notes") or []
     first = notes[0] if notes and isinstance(notes[0], dict) else {}
     return {
         "note_id": first.get("id"),
         "discussion_id": result.get("id"),
-        "comment_type": "inline",
+        "comment_type": comment_type,
     }
-
-
-def _posted_from_note(result: Dict) -> Dict:
-    """Extract the posted-comment identity from a created-note response."""
-    return {"note_id": result.get("id"), "discussion_id": None, "comment_type": "note"}
 
 
 async def post_gitlab_comment(
@@ -752,7 +750,7 @@ async def post_gitlab_comment(
             inline_error = api_client.last_error
             print(f"  ↩️  [GitLab] Inline post failed for {file_path}:{line_number}; posting as a general note instead")
             located = f"**`{file_path}:{line_number}`**\n\n{comment}"
-            result = api_client.create_merge_request_note(
+            result = api_client.create_merge_request_discussion(
                 project_path, mr_id, located, warnings_sink=warnings_sink
             )
             if result is not None:
@@ -767,15 +765,19 @@ async def post_gitlab_comment(
                             f"({inline_error}); posted as a general MR note instead"
                         )[:600],
                     })
-                return _posted_from_note(result), None
+                return _posted_from_discussion(result, "note"), None
             return None, f"inline post failed ({inline_error}); fallback note also failed ({api_client.last_error})"
 
-        # General note
-        result = api_client.create_merge_request_note(
+        # General note. Posted as an *unpositioned discussion* rather than a plain
+        # note: both render as a comment on the MR, but a discussion is a thread
+        # with a stable discussion_id, which is what lets the collector recognise a
+        # human's reply to this comment (GitLab's note API returns no discussion_id,
+        # so a plain note's replies could never be tied back to us).
+        result = api_client.create_merge_request_discussion(
             project_path, mr_id, comment, warnings_sink=warnings_sink
         )
         if result is not None:
-            return _posted_from_note(result), None
+            return _posted_from_discussion(result, "note"), None
         return None, (api_client.last_error or "note post failed")
     except Exception as e:
         print(f"  ❌ Failed to post comment: {e}")
