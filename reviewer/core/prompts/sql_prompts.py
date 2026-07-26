@@ -7,7 +7,11 @@ Reviews SQL migrations, CREATE TABLE, and ALTER TABLE statements.
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
+from core.prompts.common import (
+    format_file_content_section,
+    format_mr_context_section,
+    AIAND_SOURCE_GUIDANCE,
+)
 
 if TYPE_CHECKING:
     from core.agents.sql_agent import SqlContext
@@ -98,9 +102,7 @@ Use these tools if you need additional context to perform your review, but avoid
 {context_section}
 
 === File Content ===
-```
-{context.content}
-```
+{format_file_content_section(context.content)}
 
 === Git Diff ===
 ```

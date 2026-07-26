@@ -8,7 +8,11 @@ This module contains system prompts for the service review agents:
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
+from core.prompts.common import (
+    format_file_content_section,
+    format_mr_context_section,
+    AIAND_SOURCE_GUIDANCE,
+)
 
 if TYPE_CHECKING:
     from core.agents.service_agents import ServiceContext
@@ -90,9 +94,7 @@ RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (
 {context_section}
 
 === File Content ===
-```
-{context.content}
-```
+{format_file_content_section(context.content)}
 
 === Git Diff ===
 ```
@@ -182,9 +184,7 @@ RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (
 {context_section}
 
 === File Content ===
-```
-{context.content}
-```
+{format_file_content_section(context.content)}
 
 === Git Diff ===
 ```

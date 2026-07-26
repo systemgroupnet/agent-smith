@@ -7,7 +7,11 @@ Reviews dataview registration and implementation files.
 
 from typing import TYPE_CHECKING
 
-from core.prompts.common import format_mr_context_section, AIAND_SOURCE_GUIDANCE
+from core.prompts.common import (
+    format_file_content_section,
+    format_mr_context_section,
+    AIAND_SOURCE_GUIDANCE,
+)
 
 if TYPE_CHECKING:
     from core.agents.dataview_agent import DataviewContext
@@ -94,9 +98,7 @@ Use these tools if you need additional context to perform your review, especiall
 {context_section}
 
 === File Content ===
-```
-{context.content}
-```
+{format_file_content_section(context.content)}
 
 === Git Diff ===
 ```
