@@ -5,14 +5,56 @@ Shared prompt helpers used across all reviewer prompts.
 from typing import Optional
 
 
-# Guidance shared across all reviewer prompts: which MCP to use depending on
-# whether a file was changed in this merge request or is a pre-existing file.
-AIAND_SOURCE_GUIDANCE = (
-    "For files that have changes in this merge request, use the GitLab MCP "
-    "tools (so you read the new version of the file). For old/unchanged files "
-    "and existing code in the rest of the codebase, use the AIAND Source MCP "
-    "(a semantic code index) to look them up for context."
-)
+def format_code_index_guidance(source_branch: Optional[str] = None) -> str:
+    """Guidance shared across all reviewer prompts: which MCP to use for what.
+
+    Two things to get across:
+
+    1. Which server to ask. Files *changed* in this MR must come from the GitLab
+       MCP (that reads the merge request's own blobs, i.e. the new version).
+       Old/unchanged files and the rest of the codebase come from the cocoindex
+       code-index MCP (semantic ``search`` plus exact ``ripgrep``).
+
+    2. Which branch to ask about. Both cocoindex tools take an optional
+       ``branch`` argument and **default to the server's checked-out base
+       branch** when it is omitted. For a review that default is wrong: it
+       returns the pre-merge-request state of the code, so a symbol the MR added
+       looks missing and a signature the MR changed looks unchanged — exactly the
+       false positives the MR context block exists to prevent. Passing the MR
+       source branch makes the index overlay that branch's changes, so lookups
+       reflect the code as it will be after merge.
+
+    The branch is interpolated as a literal so the model can copy it verbatim
+    rather than infer it. cocoindex's ``search`` requires the ref to already
+    exist in the server's clone (``ripgrep`` fetches on demand), hence the
+    retry-without-branch instruction — a branch the index has never seen should
+    degrade to a base-branch lookup, not to no lookup at all.
+    """
+    lines = [
+        "For files that have changes in this merge request, use the GitLab MCP "
+        "tools (so you read the new version of the file). For old/unchanged files "
+        "and existing code in the rest of the codebase, use the cocoindex code "
+        "index MCP (`search` for semantic lookups, `ripgrep` for exact text) to "
+        "look them up for context.",
+    ]
+    if source_branch:
+        lines.append(
+            f'ALWAYS pass `branch="{source_branch}"` to every cocoindex tool call. '
+            "That is this merge request's source branch. Without it the index "
+            "answers from the default branch, which does not contain this merge "
+            "request's changes, and you will draw the wrong conclusion about code "
+            "the merge request touched. If a call reports that the branch or ref "
+            "is unknown, retry the same call once without `branch` and treat the "
+            "result as the pre-merge-request state of the code."
+        )
+    else:
+        lines.append(
+            "The cocoindex tools take an optional `branch` argument and otherwise "
+            "answer from the default branch, which does not contain this merge "
+            "request's changes. Pass the merge request's source branch whenever "
+            "you know it."
+        )
+    return " ".join(lines)
 
 
 # Explains the line-number gutter that format_file_content_section prepends to

@@ -399,8 +399,8 @@ async def create_tool_agent(
                     resolved_tools.extend(tools_by_category["gitlab"])
                 elif tool_name.lower() == "atlassian":
                     resolved_tools.extend(tools_by_category["atlassian"])
-                elif tool_name.lower() == "aiand":
-                    resolved_tools.extend(tools_by_category["aiand"])
+                elif tool_name.lower() == "cocoindex":
+                    resolved_tools.extend(tools_by_category["cocoindex"])
                 else:
                     print(f"  ⚠️  Unknown tool category: {tool_name}")
         else:

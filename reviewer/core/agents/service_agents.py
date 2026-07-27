@@ -51,7 +51,7 @@ async def create_semantic_reviewer_agent():
     """
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
-        tools=["gitlab", "aiand"],  # GitLab (changed files) + AIAND Source (old/unchanged files)
+        tools=["gitlab", "cocoindex"],  # GitLab (changed files) + cocoindex (old/unchanged files)
         temperature=0.3,
         max_iterations=10,
         verbose=False,
@@ -69,7 +69,7 @@ async def create_business_logic_reviewer_agent():
     """
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
-        tools=["gitlab", "atlassian", "aiand"],  # GitLab + Atlassian (Jira/Confluence) + AIAND Source (code index)
+        tools=["gitlab", "atlassian", "cocoindex"],  # GitLab + Atlassian (Jira/Confluence) + cocoindex (code index)
         temperature=0.5,
         max_iterations=15,
         verbose=False,
