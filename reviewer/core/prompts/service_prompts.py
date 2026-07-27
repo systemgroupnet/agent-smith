@@ -12,6 +12,7 @@ from core.prompts.common import (
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
+    SUGGESTION_FIELD_RULE,
 )
 
 if TYPE_CHECKING:
@@ -62,7 +63,7 @@ You MUST assign a severity level to each issue:
 **CRITICAL REQUIREMENT**: For EVERY issue marked as **high** severity, you MUST provide a clear explanation in your "problem" field explaining WHY this issue is critical.
 
 SUGGESTION FIELD FORMAT:
-**IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
+{SUGGESTION_FIELD_RULE}
 
 TOOLS AVAILABLE:
 You have access to MCP tools for GitLab and the cocoindex code index that can help you:
@@ -149,7 +150,7 @@ You MUST assign a severity level to each issue:
 **CRITICAL REQUIREMENT**: For EVERY issue marked as **high** severity, you MUST provide a clear explanation in your "problem" field explaining WHY this issue is critical.
 
 SUGGESTION FIELD FORMAT:
-**IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
+{SUGGESTION_FIELD_RULE}
 
 TOOLS AVAILABLE:
 You have access to MCP tools for Jira and Confluence that can help you:

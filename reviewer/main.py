@@ -715,11 +715,14 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         line = issue.get("line") if isinstance(issue, dict) else issue.line
         severity = get_severity(issue)
         print(f"📝 Posting comment for {file_name}:{line}...")
-        comment = format_single_issue(issue)
 
         real_path, old_line, in_diff, file_in_mr = resolve_inline_position(
             file_name, line, position_maps
         )
+        # Formatted after resolution: only a comment landing on a diff line can
+        # carry an applyable ```suggestion block (GitLab ignores the syntax on a
+        # note off the diff), so in_diff decides how the fix is rendered.
+        comment = format_single_issue(issue, applyable=in_diff)
 
         # Drop issues whose file isn't part of this MR at all. Each reviewer
         # reviews one real changed file but self-reports file_name on every issue

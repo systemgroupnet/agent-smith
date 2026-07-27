@@ -57,6 +57,31 @@ def format_code_index_guidance(source_branch: Optional[str] = None) -> str:
     return " ".join(lines)
 
 
+# Shared across every reviewer prompt: what may go in an issue's `suggestion`.
+# The posted comment wraps this field in a GitLab ```suggestion block, so a human
+# clicking "Apply suggestion" commits the field's text into the file verbatim —
+# any prose, lead-in, fence or line-number gutter that leaks through is written
+# into their source. core/utils/comment_formatter.py sanitizes what it can, but
+# it can only salvage recognizable damage; the field has to arrive clean.
+SUGGESTION_FIELD_RULE = (
+    "**IMPORTANT**: the `suggestion` field is applied to the file *verbatim* — it "
+    "is rendered as a GitLab suggestion block and a reviewer clicks a button to "
+    "commit it. It MUST contain ONLY the replacement code:\n"
+    "- NO explanation, description, or lead-in — never `Here's the fix:`, "
+    "`Change this to:`, `Use this instead:`, and no commentary after the code. "
+    "Explain the reasoning in `problem` instead.\n"
+    "- NO markdown code fences or backticks around the code.\n"
+    "- NO line-number gutter: the `NN|` prefixes in the file content above are "
+    "not part of the file, so never copy them into the code.\n"
+    "- Keep the exact indentation the code needs in the file, and make it a "
+    "drop-in replacement for the line the issue points at (a self-contained "
+    "rewrite of that line, not a diff or a fragment).\n"
+    "- If you have no concrete code to offer, leave `suggestion` EMPTY. An empty "
+    "suggestion is correct and expected; a prose description in this field is a "
+    "defect, because it would be committed into the file as code."
+)
+
+
 # Explains the line-number gutter that format_file_content_section prepends to
 # every line of the reviewed file.
 LINE_NUMBER_GUTTER_NOTE = (
