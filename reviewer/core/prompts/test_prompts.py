@@ -11,6 +11,7 @@ from core.prompts.common import (
     format_file_content_section,
     format_mr_context_section,
     AIAND_SOURCE_GUIDANCE,
+    SUGGESTION_FIELD_RULE,
 )
 
 if TYPE_CHECKING:
@@ -75,7 +76,7 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 **CRITICAL**: For high severity issues, explain the impact on test reliability.
 
 ## SUGGESTION FIELD FORMAT
-**IMPORTANT**: The `suggestion` field MUST contain ONLY the corrected code, without any additional explanation, comments, or description. Do not include phrases like "Change this to:" or "Use this instead:". Just provide the actual code that should replace the problematic code.
+{SUGGESTION_FIELD_RULE}
 
 ## TOOLS AVAILABLE
 You have access to MCP tools for GitLab, Jira, Confluence, and the AIAND Source code index that can help you:

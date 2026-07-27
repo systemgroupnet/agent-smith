@@ -93,7 +93,7 @@ def get_comment_reviewer_prompt() -> str:
 
 - `selected_issues`: Array of the top 10 most critical FinalComment objects (or fewer if less than 10 qualify)
   - `problem`: A clear summary of the issue found in the comments. Synthesize multiple related comments into a single, concise problem statement.
-  - `suggestion`: Code suggestion if one exists in the comments. If the comment contains actual code snippets or specific code changes, include them here. Leave empty if no concrete code suggestion was provided.
+  - `suggestion`: The replacement CODE ONLY, copied verbatim from the input comment's suggestion. This field is rendered as a GitLab suggestion block that a reviewer applies with one click, committing your text into the file as-is — so it must contain no prose, no lead-in like "Here's the fix:", no markdown fences or backticks, and no `NN|` line-number prefixes. Leave it EMPTY whenever the input comment has no concrete code. Never write a description here and never invent code that wasn't in the input.
   - `file_name`: The file where the issue was found that exist in the comment
   - `line`: The line number where the issue occurs that exist in the comment
 - `filtered_count`: Number of issues that were filtered out (total input - selected)
@@ -103,7 +103,7 @@ def get_comment_reviewer_prompt() -> str:
 
 - If there are fewer than 10 truly critical issues, return only those that qualify. DO NOT pad the list.
 - For the `problem` field: Create a clear, concise summary of the issue. If multiple comments relate to the same problem, synthesize them into one coherent problem statement.
-- For the `suggestion` field: Only include actual code suggestions or code snippets if they exist in the comments. If the comment only describes the problem without providing code, leave the suggestion empty or provide a brief description of what should be done.
+- For the `suggestion` field: include the code only, exactly as the input comment gave it. If the input only describes the problem without providing code, leave `suggestion` EMPTY — an empty suggestion is correct and expected. Do NOT put a description of what should be done in this field: it is applied to the file verbatim, so a sentence there gets committed into the source as code. Anything you want to say about the fix belongs in `problem`.
 - Focus on issues that, if not addressed, could cause real problems in production
 - When in doubt, prioritize issues that affect correctness, security, and data integrity over everything else
 
