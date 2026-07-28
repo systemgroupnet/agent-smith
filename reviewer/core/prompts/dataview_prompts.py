@@ -11,6 +11,7 @@ from core.prompts.common import (
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
+    NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
 )
 
@@ -36,14 +37,7 @@ def get_dataview_reviewer_prompt(context: "DataviewContext", additional_content:
     
     return f"""You are an expert reviewer for dataview files in the application.
 
-## IMPORTANT NOTE
-All files have been compiled and run successfully by the developer. Do NOT report issues about:
-- Missing imports or unused imports
-- Unused functions, methods, or variables
-- Any problems that would be caught at compile time
-- Type errors that would prevent compilation
-
-Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+{NO_COMPILE_ERRORS_RULE}
 
 ## Critical Review Areas
 

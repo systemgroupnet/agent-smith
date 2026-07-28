@@ -12,6 +12,7 @@ from core.prompts.common import (
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
+    NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
 )
 
@@ -35,15 +36,7 @@ def get_semantic_reviewer_prompt(context: "ServiceContext", additional_content: 
     
     return f"""You are a senior Go engineer performing technical code review. Focus ONLY on code quality, correctness, and Go best practices. DO NOT review business logic.
 
-## IMPORTANT NOTE
-All files have been compiled and run successfully by the developer. Do NOT report issues about:
-- Missing imports or unused imports
-- Unused functions, methods, or variables
-- Any problems that would be caught at compile time
-- Type errors that would prevent compilation
-- Symbols (functions, types, methods) that look undefined here but are defined in another file changed in this same MR — see the "Merge Request Context" section below; those exist, do NOT report them as undefined or missing
-
-Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+{NO_COMPILE_ERRORS_RULE}
 
 CRITICAL AREAS TO REVIEW:
 1. Correctness: Nil checks, race conditions, defer in loops, type assertions
@@ -121,15 +114,7 @@ def get_business_logic_reviewer_prompt(context: "ServiceContext", additional_con
     
     return f"""You are a senior software architect reviewing business logic implementation. Focus ONLY on whether code correctly implements business requirements. DO NOT review code quality or technical aspects.
 
-## IMPORTANT NOTE
-All files have been compiled and run successfully by the developer. Do NOT report issues about:
-- Missing imports or unused imports
-- Unused functions, methods, or variables
-- Any problems that would be caught at compile time
-- Type errors that would prevent compilation
-- Symbols (functions, types, methods) that look undefined here but are defined in another file changed in this same MR — see the "Merge Request Context" section below; those exist, do NOT report them as undefined or missing
-
-Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+{NO_COMPILE_ERRORS_RULE}
 
 CRITICAL AREAS TO REVIEW:
 1. Requirements Completeness: All features from task implemented, no missing functionality

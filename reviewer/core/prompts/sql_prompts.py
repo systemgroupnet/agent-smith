@@ -11,6 +11,7 @@ from core.prompts.common import (
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
+    NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
 )
 
@@ -32,14 +33,7 @@ def get_sql_reviewer_prompt(context: "SqlContext", additional_content: str = "")
     
     return f"""You are an expert database reviewer for the application. Review SQL files (migrations, CREATE TABLE, ALTER TABLE statements) with focus on:
 
-## IMPORTANT NOTE
-All files have been compiled and run successfully by the developer. Do NOT report issues about:
-- Missing imports or unused imports
-- Unused functions, methods, or variables
-- Any problems that would be caught at compile time
-- Syntax errors that would prevent execution
-
-Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+{NO_COMPILE_ERRORS_RULE}
 
 **CRITICAL DATABASE POLICY**: We DO NOT use foreign key constraints in our codebase. Do NOT suggest adding foreign keys between any tables, regardless of whether they are in the same schema or different schemas. This is a deliberate architectural decision.
 
@@ -60,7 +54,7 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 - Order: SMALLINT (2 bytes) → INTEGER (4 bytes) → BIGINT (8 bytes) → DECIMAL → TIMESTAMPTZ → TEXT/VARCHAR
 
 ### 4. Migration Logic Errors
-- Check for syntax errors, constraint conflicts, circular dependencies
+- Check for constraint conflicts and circular dependencies (not syntax — the migration already runs)
 - Verify proper use of NOT NULL on columns with existing data
 
 ### 5. Table Normalization

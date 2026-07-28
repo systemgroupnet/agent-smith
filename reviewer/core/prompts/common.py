@@ -57,6 +57,48 @@ def format_code_index_guidance(source_branch: Optional[str] = None) -> str:
     return " ".join(lines)
 
 
+# Shared across every reviewer prompt: the build already passed before the MR was
+# opened, so nothing a compiler, type checker or parser would reject can actually
+# be present in this code. Each reviewer sees exactly one file (plus the MR
+# context block), which makes "undefined symbol" / "unimplemented function" /
+# "unused variable" findings a systematic false positive: the definition or the
+# call site simply lives in a file the model was never shown. That class is also
+# invisible to the in-diff gate in main.py — the issue points at a real changed
+# line, so it survives every deterministic filter and lands on the MR. It has to
+# be suppressed at the prompt, and again at the comment-review stage
+# (comment_prompts.py) for anything that slips through.
+NO_COMPILE_ERRORS_RULE = (
+    "## COMPILATION IS NOT YOUR CONCERN\n"
+    "This code has already been compiled, built and run successfully by the "
+    "developer. Anything a compiler, type checker, parser, build step or linter "
+    "would reject therefore does NOT exist here. NEVER report:\n"
+    "- Missing, unused or misordered imports\n"
+    "- Unused variables, constants, parameters, functions, methods, types or "
+    "fields — including \"declared but not used\"\n"
+    "- Undefined, undeclared or missing symbols: a function, method, type, "
+    "constant, variable, field or package you cannot find is defined somewhere "
+    "you were not shown, NOT missing\n"
+    "- Unimplemented / not-yet-implemented functions, methods or interfaces, or "
+    "an interface that looks unsatisfied\n"
+    "- Type errors, signature or argument mismatches, wrong return counts, "
+    "conversion errors\n"
+    "- Syntax errors, unbalanced brackets/tags, malformed declarations, or "
+    "anything that would prevent the file from compiling, parsing, rendering or "
+    "executing at all\n"
+    "- Any claim of the form \"this will not compile\", \"this will fail to "
+    "build\", \"undefined: X\", \"X is not defined\", \"X is never used\"\n"
+    "Symbols defined in another file changed in this same merge request (see the "
+    "Merge Request Context section) exist — do NOT report them as undefined or "
+    "missing. You are shown one file at a time, so you can never conclude from "
+    "what is in front of you that something is undefined, unused or "
+    "unimplemented. If you are tempted to, look it up with the code index tools "
+    "instead, and drop the finding when in doubt.\n"
+    "Report ONLY problems that survive a successful build: runtime failures, "
+    "logic errors, security flaws, data-integrity and performance problems, and "
+    "design issues."
+)
+
+
 # Shared across every reviewer prompt: what may go in an issue's `suggestion`.
 # The posted comment wraps this field in a GitLab ```suggestion block, so a human
 # clicking "Apply suggestion" commits the field's text into the file verbatim —
