@@ -31,6 +31,26 @@ def int_env(name: str, default: int) -> int:
         return default
 
 
+def _api_style() -> str:
+    """Which wire contract the configured endpoint speaks: "openrouter" or "openai".
+
+    ``ChatOpenRouter`` is right for OpenRouter (including OpenRouter behind an
+    internal reverse proxy) because it understands that schema's reasoning and
+    provider-routing fields. It is *wrong* for a vendor's own OpenAI-compatible
+    API: the openrouter SDK validates responses against OpenRouter's model, which
+    requires ``system_fingerprint``, and a GLM/Zhipu ``/v4`` endpoint doesn't send
+    it — every call died with "ResponseValidationError … body.system_fingerprint
+    Field required", retried three times, and failed the file. Nothing in the
+    request was wrong, so no amount of retrying could help.
+
+    Set ``LLM_API_STYLE=openai`` alongside ``OPENROUTER_BASE_URL`` to talk plain
+    OpenAI to such an endpoint. Left unset it stays "openrouter", so existing
+    deployments are untouched.
+    """
+    style = os.getenv("LLM_API_STYLE", "").strip().lower()
+    return style if style in ("openai", "openrouter") else "openrouter"
+
+
 def get_default_model() -> str:
     """
     Return the default LLM model id from the environment (OpenRouter format).
@@ -96,8 +116,38 @@ def get_llm_model(
         )
 
     model = model_name or get_default_model()
-    # OpenRouter ids are "provider/model"; assume OpenAI if no provider is given.
-    if "/" not in model:
+    base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
+
+    if _api_style() == "openai":
+        # Plain OpenAI-compatible endpoint (e.g. an internal GLM/Zhipu reverse
+        # proxy). `reasoning` is dropped: it is an OpenRouter-shaped field, and a
+        # thinking model behind such an endpoint manages its own thinking (GLM 5.2
+        # accepts a forced tool_choice with thinking on, so structured output needs
+        # no override). Timeout converts ms → seconds, which is what ChatOpenAI
+        # takes; passing the raw ms value would mean an ~83-hour timeout.
+        from langchain_openai import ChatOpenAI
+
+        oa_kwargs: dict[str, Any] = {
+            "model": model,
+            "api_key": api_key,
+            "temperature": temperature,
+            "streaming": streaming,
+            "timeout": int_env("OPENROUTER_TIMEOUT_MS", 300000) / 1000.0,
+        }
+        if base_url:
+            oa_kwargs["base_url"] = base_url
+        if max_tokens:
+            oa_kwargs["max_tokens"] = max_tokens
+        return ChatOpenAI(**oa_kwargs)
+    # "provider/model" is *OpenRouter's* id convention, so only assume a missing
+    # provider means OpenAI when we are actually talking to OpenRouter. A custom
+    # base_url may be a vendor's own API behind a reverse proxy, where ids are
+    # native and unprefixed — pointing at an internal GLM endpoint with
+    # DEFAULT_LLM_MODEL=glm-5.2 used to send "openai/glm-5.2" and get back
+    # "BadRequestResponseError: Unknown Model, please check the model code".
+    # Existing OpenRouter-behind-a-proxy setups are unaffected: their ids already
+    # carry a provider (deepseek/deepseek-v4-pro), so this branch never fired.
+    if "/" not in model and not base_url:
         model = f"openai/{model}"
 
     kwargs: dict[str, Any] = {
@@ -115,7 +165,6 @@ def get_llm_model(
 
     # Honor a custom OpenRouter endpoint (e.g. an internal reverse proxy) when set;
     # if OPENROUTER_BASE_URL is unset, ChatOpenRouter targets OpenRouter directly.
-    base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
     if base_url:
         kwargs["base_url"] = base_url
 
