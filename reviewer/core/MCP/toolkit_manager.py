@@ -30,22 +30,13 @@ from contextlib import AsyncExitStack
 # Transport types
 TransportType = Literal["sse", "streamable-http"]
 
-
-def _cocoindex_env(suffix: str, default: str) -> str:
-    """Read an ``MCP_COCOINDEX_<suffix>`` var, falling back to the legacy name.
-
-    The code index used to be referred to as "AIAND Source", so its settings were
-    ``MCP_AIAND_ENABLED``/``_URL``/``_TRANSPORT``. Those names live outside this
-    repo too (CI variables, runner env, operators' .env files), and silently
-    ignoring them would be the worst kind of breakage: ``MCP_AIAND_ENABLED=false``
-    would start connecting to a server the operator had switched off, and a
-    ``MCP_AIAND_URL`` pointing at a private index would fall back to the public
-    default. So the new name wins, the old one still works.
-    """
-    value = os.getenv(f"MCP_COCOINDEX_{suffix}")
-    if value is not None:
-        return value
-    return os.getenv(f"MCP_AIAND_{suffix}", default)
+# cocoindex is configured by a single variable — its base URI. Transport is
+# always streamable-http (that is what the server speaks), and "enabled" is
+# derived from the URI: a non-empty value means use it, an empty one means skip
+# the server entirely. One knob instead of three, because the other two never
+# had a reason to differ per deployment.
+COCOINDEX_URL_ENV = "MCP_COCOINDEX_URL"
+DEFAULT_COCOINDEX_URL = "http://internal.example.com/mcp"
 
 
 def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
@@ -152,8 +143,12 @@ class MCPToolkitManager:
         return os.getenv("MCP_ATLASSIAN_ENABLED", "false").lower() == "true"
 
     def is_cocoindex_enabled(self) -> bool:
-        """Check if cocoindex MCP integration is enabled."""
-        return _cocoindex_env("ENABLED", "true").lower() == "true"
+        """Check if cocoindex MCP integration is enabled.
+
+        There is no separate enable flag: the base URI is the only setting, so an
+        empty ``MCP_COCOINDEX_URL`` is how you turn the code index off.
+        """
+        return bool(self._get_cocoindex_url())
 
     def _get_gitlab_transport(self) -> TransportType:
         """Get GitLab MCP transport type from environment."""
@@ -169,13 +164,6 @@ class MCPToolkitManager:
             return transport  # type: ignore
         return "streamable-http"  # default to streamable-http
 
-    def _get_cocoindex_transport(self) -> TransportType:
-        """Get cocoindex MCP transport type from environment."""
-        transport = _cocoindex_env("TRANSPORT", "streamable-http").lower()
-        if transport in ("sse", "streamable-http"):
-            return transport  # type: ignore
-        return "streamable-http"  # default to streamable-http
-
     def _get_gitlab_url(self) -> str:
         """Get GitLab MCP server URL (no endpoint appended)."""
         return os.getenv("MCP_GITLAB_URL", "http://mcp-gitlab:3002").rstrip('/')
@@ -185,11 +173,12 @@ class MCPToolkitManager:
         return os.getenv("MCP_ATLASSIAN_URL", "http://mcp-atlassian:9000").rstrip('/')
 
     def _get_cocoindex_url(self) -> str:
-        """Get cocoindex MCP server URL (code index for old/unchanged files)."""
-        return _cocoindex_env(
-            "URL",
-            "http://internal.example.com/mcp",
-        ).rstrip('/')
+        """Get cocoindex MCP base URI (code index for old/unchanged files).
+
+        Empty (explicitly set to "") disables the server — see
+        :meth:`is_cocoindex_enabled`.
+        """
+        return os.getenv(COCOINDEX_URL_ENV, DEFAULT_COCOINDEX_URL).strip().rstrip('/')
     
     async def initialize(self) -> None:
         """
@@ -355,22 +344,13 @@ class MCPToolkitManager:
         """Initialize cocoindex MCP toolkit (code index for old/unchanged files)."""
         try:
             url = self._get_cocoindex_url()
-            transport = self._get_cocoindex_transport()
-            transport_name = "SSE (Server-Sent Events)" if transport == "sse" else "Streamable HTTP"
 
             print(f"  🔌 [cocoindex MCP] Connecting to: {url}")
-            print(f"     - Transport: {transport_name}")
+            print("     - Transport: Streamable HTTP")
 
-            # Create client based on transport type
-            if transport == "sse":
-                read_stream, write_stream = await self._exit_stack.enter_async_context(
-                    sse_client(url)
-                )
-            else:
-                # streamable-http transport
-                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
-                    streamablehttp_client(url)
-                )
+            read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                streamablehttp_client(url)
+            )
 
             # Create ClientSession with the streams
             session = ClientSession(read_stream, write_stream)
