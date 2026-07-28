@@ -40,8 +40,12 @@ def setup_proxy():
     confluence_url = os.getenv("CONFLUENCE_URL", "")
     collector_url = os.getenv("COLLECTOR_URL", "")
     # Only a self-hosted Langfuse is internal; Langfuse Cloud must keep using the
-    # proxy, so read the configured value rather than the Cloud default.
-    langfuse_url = os.getenv("LANGFUSE_BASE_URL", "") or os.getenv("LANGFUSE_HOST", "")
+    # proxy, so exclude the configured base URI unless it *is* Cloud.
+    from core.config.langfuse_config import get_langfuse_base_url, is_langfuse_cloud
+
+    langfuse_url = get_langfuse_base_url()
+    if is_langfuse_cloud(langfuse_url):
+        langfuse_url = ""
 
     # Build NO_PROXY list to exclude internal services from using the proxy
     from urllib.parse import urlparse

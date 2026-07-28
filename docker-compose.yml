@@ -60,16 +60,16 @@ services:
       - COLLECTOR_URL=${COLLECTOR_URL:-http://collector:8000}
       - COLLECTOR_TOKEN=${COLLECTOR_TOKEN:-}
       # Langfuse tracing — captures the full prompt/context of every LLM call.
-      # Turns itself on once both keys are set. The default host reaches a
-      # Langfuse published on the *host machine's* port 3000 (its own compose
-      # stack), via the host-gateway alias below; that keeps this stack usable
-      # when Langfuse isn't running. If you'd rather attach directly to the
-      # Langfuse compose network, set LANGFUSE_BASE_URL=http://langfuse-web:3000
-      # and add the external `langfuse_default` network to this service.
-      - LANGFUSE_ENABLED=${LANGFUSE_ENABLED:-}
+      # The base URI is the switch: set it (plus both keys) to turn tracing on,
+      # leave it unset for none. From in here, a Langfuse published on the *host
+      # machine's* port 3000 (its own compose stack) is
+      # http://host.docker.internal:3000, via the host-gateway alias below. To
+      # attach directly to the Langfuse compose network instead, use
+      # http://langfuse-web:3000 and add the external `langfuse_default` network
+      # to this service.
+      - LANGFUSE_BASE_URL=${LANGFUSE_BASE_URL:-}
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
-      - LANGFUSE_BASE_URL=${LANGFUSE_BASE_URL:-http://host.docker.internal:3000}
     # Docker Engine on Linux (unlike Docker Desktop) doesn't provide
     # host.docker.internal; map it so the trace export can reach a Langfuse
     # published on the host. Requires Langfuse to listen on 0.0.0.0.

@@ -248,8 +248,8 @@ class ToolEnabledAgent:
         Args:
             input_text: Input text for the agent
             context: Optional context dictionary
-            config: Optional LangSmith run config (carries thread metadata so the
-                    agent's nested LLM/tool runs stay in the MR thread)
+            config: Optional tracing run config (carries session metadata so the
+                    agent's nested LLM/tool runs stay in the MR's session)
 
         Returns:
             Structured output (if output_model specified) or dict

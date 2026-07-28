@@ -19,10 +19,11 @@ LangSmith are independent and can run at the same time.
 
 Enabling
 --------
-Set ``LANGFUSE_PUBLIC_KEY`` + ``LANGFUSE_SECRET_KEY`` (project keys from the
-Langfuse UI) and, when self-hosting, ``LANGFUSE_BASE_URL`` (e.g.
-``http://localhost:3000``; unset → Langfuse Cloud). Tracing switches itself on as
-soon as both keys are present; ``LANGFUSE_ENABLED`` forces it on or off.
+Three variables, no separate switch: ``LANGFUSE_BASE_URL`` is the endpoint *and*
+the on/off knob (``http://localhost:3000`` self-hosted,
+``https://cloud.langfuse.com`` for Cloud; unset → no tracing), and
+``LANGFUSE_PUBLIC_KEY`` + ``LANGFUSE_SECRET_KEY`` are the project keys from the
+Langfuse UI. All three must be set for tracing to run.
 
 Everything in this module is non-fatal by design: a missing package, wrong keys
 or an unreachable Langfuse degrades to "no tracing" and never fails a review —
@@ -32,9 +33,6 @@ the same contract as MCP init and the analytics collector.
 import os
 from typing import Any, Optional
 
-# Values that read as "off" for the boolean env flags here.
-_FALSY = ("", "false", "0", "no", "off")
-
 # Resolved once per process. ``_handler_resolved`` is a separate flag because
 # ``None`` (tracing disabled / init failed) is itself a cacheable answer, and we
 # never want to re-run the auth check or re-print the status line per file.
@@ -42,57 +40,52 @@ _handler: Optional[Any] = None
 _handler_resolved: bool = False
 
 
-def _truthy(raw: Optional[str]) -> bool:
-    """Whether an env value reads as enabled ('' / false / 0 / no / off => False)."""
-    return (raw or "").strip().lower() not in _FALSY
-
-
 def get_langfuse_base_url() -> str:
-    """The endpoint traces are shipped to.
+    """The endpoint traces are shipped to, or "" when tracing isn't configured.
 
-    Mirrors the SDK's own precedence (``LANGFUSE_BASE_URL`` wins over the older
-    ``LANGFUSE_HOST``, then Cloud) so the status line and the proxy exclusion in
-    ``proxy_config`` name the host Langfuse will actually talk to.
+    ``LANGFUSE_BASE_URL`` is the SDK's own first-choice variable (langfuse 4.x
+    reads it before the older ``LANGFUSE_HOST``, then falls back to Cloud), so
+    pointing the reviewer at a Langfuse and pointing the SDK at one are the same
+    act — which is why this can double as the on/off switch. No Cloud default
+    here on purpose: unset must mean "off", not "ship traces somewhere".
     """
-    return (
-        os.getenv("LANGFUSE_BASE_URL", "").strip()
-        or os.getenv("LANGFUSE_HOST", "").strip()
-        or "https://cloud.langfuse.com"
-    )
+    return os.getenv("LANGFUSE_BASE_URL", "").strip()
 
 
 def langfuse_enabled() -> bool:
     """Whether Langfuse tracing should be active for this run.
 
-    Default is "on when configured": both keys present means someone wired a
-    Langfuse up and wants the traces. ``LANGFUSE_ENABLED`` overrides in either
-    direction — but forcing it on without keys can't work, so that combination
-    warns and stays off rather than failing later on every single LLM call.
+    Setting the base URI *is* enabling tracing — there's no separate flag to
+    forget or to contradict it. The keys are then simply required: a URI without
+    them can't authenticate, so it warns rather than failing later on every
+    single LLM call.
     """
-    has_keys = bool(
-        os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
-        and os.getenv("LANGFUSE_SECRET_KEY", "").strip()
-    )
-    # LANGFUSE_TRACING is the pre-existing name in this repo's .env template
-    # (mirroring LANGSMITH_TRACING); LANGFUSE_ENABLED matches the convention used
-    # by every other switch here (COLLECTOR_ENABLED, MCP_*_ENABLED, ...) and wins.
-    # The SDK's own LANGFUSE_TRACING_ENABLED=false also still works as a kill
-    # switch — it disables the client underneath us.
-    raw = (
-        os.getenv("LANGFUSE_ENABLED", "").strip()
-        or os.getenv("LANGFUSE_TRACING", "").strip()
-    )
-    if not raw:
-        return has_keys
-    if not _truthy(raw):
+    if not get_langfuse_base_url():
         return False
-    if not has_keys:
-        print(
-            "  ⚠️  [langfuse] LANGFUSE_ENABLED is set but LANGFUSE_PUBLIC_KEY / "
-            "LANGFUSE_SECRET_KEY are missing — tracing disabled"
-        )
-        return False
-    return True
+    if os.getenv("LANGFUSE_PUBLIC_KEY", "").strip() and os.getenv(
+        "LANGFUSE_SECRET_KEY", ""
+    ).strip():
+        return True
+    print(
+        "  ⚠️  [langfuse] LANGFUSE_BASE_URL is set but LANGFUSE_PUBLIC_KEY / "
+        "LANGFUSE_SECRET_KEY are missing — tracing disabled"
+    )
+    return False
+
+
+def is_langfuse_cloud(base_url: str) -> bool:
+    """Whether a base URI points at Langfuse Cloud rather than a self-hosted one.
+
+    Matters only for proxy handling: Cloud is an external host that must keep
+    using ``HTTP_PROXY``, while a self-hosted Langfuse must bypass it. Before the
+    base URI became the on/off switch, "was it configured at all?" answered this
+    — Cloud was the unset default. Now Cloud users set it explicitly like
+    everyone else, so the host itself has to be inspected.
+    """
+    from urllib.parse import urlparse
+
+    hostname = (urlparse(base_url).hostname or "").lower()
+    return hostname == "langfuse.com" or hostname.endswith(".langfuse.com")
 
 
 def _ensure_no_proxy(base_url: str) -> None:
@@ -109,13 +102,10 @@ def _ensure_no_proxy(base_url: str) -> None:
     no matter how the process was started. Appends, so it never drops entries
     another component added.
 
-    Only applies to an explicitly configured host, i.e. self-hosted. Langfuse
-    Cloud is external and must keep using the proxy, so it is left alone.
+    Only applies to a self-hosted host. Langfuse Cloud is external and must keep
+    using the proxy, so it is left alone.
     """
-    if not (
-        os.getenv("LANGFUSE_BASE_URL", "").strip()
-        or os.getenv("LANGFUSE_HOST", "").strip()
-    ):
+    if not base_url or is_langfuse_cloud(base_url):
         return
     if not any(
         os.getenv(var)
@@ -169,12 +159,10 @@ def _auth_ok(client: Any, base_url: str) -> bool:
 
     Without this a misconfigured Langfuse fails *silently*: spans are buffered
     and dropped on export, and the run looks fine until you open the UI and find
-    nothing. One bounded call up front turns that into a startup warning. Set
-    ``LANGFUSE_AUTH_CHECK=false`` to skip it (it costs a round trip, and
-    ``auth_check`` is blocking).
+    nothing. One bounded call up front turns that into a startup warning. It only
+    runs when tracing is configured, and costs a single blocking round trip per
+    process — cheap enough not to be worth a flag of its own.
     """
-    if not _truthy(os.getenv("LANGFUSE_AUTH_CHECK", "true")):
-        return True
     try:
         if client.auth_check():
             return True

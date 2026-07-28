@@ -47,7 +47,11 @@ def check_env() -> bool:
     """Report what's configured before touching the network."""
     print("1. Configuration")
     base_url = get_langfuse_base_url()
-    ok = True
+    ok = bool(base_url)
+    if base_url:
+        print(f"   ✓ LANGFUSE_BASE_URL: {base_url}")
+    else:
+        print("   ✗ LANGFUSE_BASE_URL: not set (this is also the on/off switch)")
     for var in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
         value = os.getenv(var, "").strip()
         if value:
@@ -55,12 +59,12 @@ def check_env() -> bool:
         else:
             print(f"   ✗ {var}: not set")
             ok = False
-    print(f"   • host: {base_url}")
     print(f"   • enabled: {langfuse_enabled()}")
     if not ok:
         print(
-            "\n   Set both keys in .env (Langfuse UI → Settings → API Keys), plus\n"
-            "   LANGFUSE_BASE_URL for a self-hosted instance (e.g. http://localhost:3000)."
+            "\n   Set all three in .env: LANGFUSE_BASE_URL (e.g. http://localhost:3000\n"
+            "   self-hosted, or https://cloud.langfuse.com) plus both keys from the\n"
+            "   Langfuse UI → Settings → API Keys."
         )
     return ok
 
