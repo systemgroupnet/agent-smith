@@ -14,8 +14,8 @@ Langfuse ships a LangChain ``CallbackHandler``, so it hooks into the run configs
 that :mod:`core.config.tracing` already threads into every top-level ``ainvoke``
 (each file's workflow, the effort estimate, the comment reviewer). Nested runs —
 graph nodes, the agent loop, individual LLM/tool calls — inherit the handler from
-the ambient LangChain config, so no per-agent change is needed. Langfuse and
-LangSmith are independent and can run at the same time.
+the ambient LangChain config, so no per-agent change is needed. It is the only
+tracing backend the project uses.
 
 Enabling
 --------

@@ -77,7 +77,7 @@ async def process_single_file(
         gitlab_token: GitLab API token
         mr_title: Merge request title
         target_branch: Target branch name
-        thread_id: LangSmith thread id grouping all runs of this MR review
+        thread_id: Tracing thread id grouping all runs of this MR review
         mr_id: Merge request IID (for trace metadata)
         head_sha: Current head commit SHA (for trace metadata)
 
@@ -115,7 +115,7 @@ async def process_single_file(
         # Get diff
         diff = change.get("diff", "")
         
-        # Build the per-file LangSmith run config so this file's trace (and all of its
+        # Build the per-file tracing run config so this file's trace (and all of its
         # nested agent/LLM/tool runs) lands inside this MR's thread.
         review_config = None
         if thread_id:
@@ -302,11 +302,11 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     print(f"🌿 Source Branch: {source_branch}")
     print(f"🎯 Target Branch: {target_branch}\n")
 
-    # Build a per-MR LangSmith thread id so every run of this review (one trace per
+    # Build a per-MR thread id so every run of this review (one trace per
     # file, plus the comment-reviewer trace) is grouped into a single thread. Keying
     # on the MR means incremental re-reviews append to the same thread.
     thread_id = build_thread_id(project_path, mr_id)
-    print(f"🧵 LangSmith thread: {thread_id}\n")
+    print(f"🧵 Trace session: {thread_id}\n")
 
     # Incremental review: read the marker note recording the last commit we reviewed
     # so we only review commits added since then instead of the whole MR diff.

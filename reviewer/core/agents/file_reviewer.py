@@ -30,7 +30,7 @@ async def review_file_with_workflow(
 ) -> Optional[list]:
     """Review a file using LangGraph workflow.
 
-    ``config`` carries the LangSmith thread metadata (thread_id) so this file's
+    ``config`` carries the tracing session metadata (thread_id) so this file's
     trace and every nested agent/LLM/tool run is grouped into the MR's thread.
     """
     
@@ -62,7 +62,7 @@ source_branch: {source_branch}
             mr_context=mr_context
         )
         
-        # Run workflow (config carries the LangSmith thread metadata, which LangGraph
+        # Run workflow (config carries the tracing session metadata, which LangGraph
         # forwards into each node's RunnableConfig)
         final_state = await review_workflow.ainvoke(initial_state, config=config)
         
@@ -121,7 +121,7 @@ async def review_comments_with_agent(
 
     Args:
         issues: List of high-severity ReviewIssue objects/dicts
-        config: Optional LangSmith run config carrying the MR thread metadata
+        config: Optional tracing run config carrying the MR session metadata
 
     Returns:
         List of top 10 most critical issues
