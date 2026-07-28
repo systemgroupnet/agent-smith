@@ -38,6 +38,29 @@ TransportType = Literal["sse", "streamable-http"]
 COCOINDEX_URL_ENV = "MCP_COCOINDEX_URL"
 DEFAULT_COCOINDEX_URL = "http://internal.example.com/mcp"
 
+# Every MCP tool call is bounded. Without this a server that accepts the request
+# and then simply stops answering hangs the call forever — and with it the agent
+# loop, the file review, and the whole run. Observed on a 55-file MR: the process
+# sat on one open socket for 40+ minutes having burned 12s of CPU, and
+# FILE_REVIEW_TIMEOUT_S could not rescue it (review_file_with_workflow awaits a
+# *shielded* task, and its CancelledError handler then awaits that same task, so
+# the watchdog's cancellation is absorbed rather than abandoning the work). A
+# hung optional-context lookup must cost one bounded wait, not the run.
+MCP_TOOL_TIMEOUT_ENV = "MCP_TOOL_TIMEOUT_S"
+DEFAULT_MCP_TOOL_TIMEOUT_S = 60.0
+
+
+def _mcp_tool_timeout() -> float:
+    """Per-tool-call timeout in seconds; <= 0 disables the bound."""
+    raw = os.getenv(MCP_TOOL_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MCP_TOOL_TIMEOUT_S
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"  ⚠️  [MCP] Ignoring invalid {MCP_TOOL_TIMEOUT_ENV}={raw!r}")
+        return DEFAULT_MCP_TOOL_TIMEOUT_S
+
 
 def _schema_properties(tool: BaseTool) -> Dict[str, dict]:
     """The tool's JSON-Schema ``properties`` map, or ``{}`` if unavailable.
@@ -175,8 +198,23 @@ def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
                 fixed, notes = _repair_tool_args(props, kwargs)
                 if notes:
                     print(f"  🔧 [MCP] Repaired {tool_name} args: {', '.join(notes)}")
+                budget = _mcp_tool_timeout()
                 try:
+                    if budget > 0:
+                        return await asyncio.wait_for(call(*args, **fixed), timeout=budget)
                     return await call(*args, **fixed)
+                except asyncio.TimeoutError:
+                    # Our own bound, not an outer cancellation: report it like any
+                    # other unavailable-server case so the review carries on.
+                    msg = (
+                        f"ERROR: the '{tool_name}' tool did not respond within "
+                        f"{budget:.0f}s. Do not retry it; continue the review using "
+                        f"the file content and diff already provided."
+                    )
+                    print(f"  ⚠️  [MCP] {msg}")
+                    if resp_format == "content_and_artifact":
+                        return msg, None
+                    return msg
                 except asyncio.CancelledError:
                     raise  # never swallow cancellation (timeouts/shutdown)
                 except Exception as e:  # noqa: BLE001 — degrade any MCP failure
