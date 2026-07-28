@@ -1,8 +1,9 @@
 """
-LangSmith Tracing Helpers
+Tracing Helpers (LangSmith + Langfuse)
 
 This module builds the LangChain ``RunnableConfig`` that groups every LLM/agent
-run of a single merge-request review into one LangSmith *thread*.
+run of a single merge-request review into one LangSmith *thread* / Langfuse
+*session*, and attaches the Langfuse callback handler that captures the prompts.
 
 LangSmith forms a thread by collecting all runs that share a thread metadata key.
 Three keys are recognized: ``session_id``, ``thread_id`` and ``conversation_id``
@@ -12,14 +13,24 @@ run — for thread filtering and token counting to be complete. We therefore thr
 the config returned by these helpers down to every ``ainvoke`` call instead of
 relying solely on LangChain's automatic parent→child metadata propagation.
 
-Tracing itself is enabled purely via environment variables (``LANGSMITH_TRACING``,
-``LANGSMITH_API_KEY``, ``LANGSMITH_PROJECT``, ``LANGSMITH_ENDPOINT``), which
-LangChain reads automatically — this module only handles thread grouping.
+LangSmith tracing itself is enabled purely via environment variables
+(``LANGSMITH_TRACING``, ``LANGSMITH_API_KEY``, ``LANGSMITH_PROJECT``,
+``LANGSMITH_ENDPOINT``), which LangChain reads automatically — for LangSmith this
+module only handles thread grouping.
+
+Langfuse needs one more thing: an explicit callback handler on the run. It is
+attached here, in :func:`build_run_config`, so every top-level ``ainvoke`` in the
+review is traced without touching the agents (see
+:mod:`core.config.langfuse_config`). The Langfuse equivalent of a thread is a
+*session*, keyed off the same per-MR thread id via the ``langfuse_session_id``
+metadata key.
 """
 
 from typing import Any, Dict, List, Optional
 
 from langchain_core.runnables import RunnableConfig
+
+from core.config.langfuse_config import get_langfuse_handler
 
 
 def build_thread_id(project_path: str, mr_id: Any) -> str:
@@ -58,11 +69,18 @@ def build_run_config(
     Returns:
         A RunnableConfig dict with thread metadata set. ``thread_id`` and
         ``session_id`` are both populated (both are LangSmith-recognized thread keys)
-        for robustness across LangSmith UI versions.
+        for robustness across LangSmith UI versions, and ``langfuse_session_id``
+        mirrors them for Langfuse. When Langfuse is configured, its callback
+        handler is attached under ``callbacks`` so this run and every run nested
+        under it is captured.
     """
     metadata: Dict[str, Any] = {
         "thread_id": thread_id,
         "session_id": thread_id,
+        # Langfuse reads its trace attributes from these reserved metadata keys
+        # (it strips them from the recorded metadata). Same id as the LangSmith
+        # thread, so one MR is one session in both tools.
+        "langfuse_session_id": thread_id,
     }
     if extra_metadata:
         metadata.update(extra_metadata)
@@ -73,6 +91,16 @@ def build_run_config(
     }
     if run_name:
         config["run_name"] = run_name
+
+    # Attach the Langfuse handler only on these top-level configs. Nested runs
+    # inherit it through LangChain's ambient config, and re-attaching it further
+    # down would replace the inherited callback *manager* (which carries the
+    # parent run id) with a bare handler list — flattening the trace into
+    # unrelated roots. See merge_thread_into_config, which deliberately does not
+    # touch callbacks. Absent when tracing is off, leaving behavior unchanged.
+    handler = get_langfuse_handler()
+    if handler is not None:
+        config["callbacks"] = [handler]
 
     return config
 
@@ -89,6 +117,12 @@ def merge_thread_into_config(
     Used by graph nodes to give each nested agent run a useful name without losing
     the ``thread_id`` set on the parent config. Returns ``None`` unchanged when the
     incoming config is ``None`` so callers fall back to LangChain's ambient config.
+
+    Deliberately carries **no** ``callbacks`` key: a config passed to a nested
+    ``ainvoke`` overrides the ambient one key-by-key, so setting callbacks here
+    would swap the inherited callback manager (which knows the parent run) for a
+    plain handler list and break the parent→child links in the trace. Leaving the
+    key out lets LangChain propagate the Langfuse handler from the parent run.
 
     Args:
         config: The parent RunnableConfig (may be None).

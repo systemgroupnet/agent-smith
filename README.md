@@ -258,6 +258,65 @@ LangSmith provides powerful tracing and monitoring capabilities for your LangGra
 
 **For detailed setup instructions**, see [docs/LANGSMITH_SETUP.md](docs/LANGSMITH_SETUP.md)
 
+### Langfuse Configuration (Optional - for Prompt/Context Inspection)
+
+Langfuse is the **context inspector**. Where the analytics collector records *what
+happened* (counts, severities, outcomes), Langfuse records *what the model saw*: for
+every LLM call it captures the exact prompt — the system prompt, the shared MR context
+block, the line-numbered file content, the diff, the per-repo `.aid` instructions —
+plus every MCP tool call with its result and the raw model answer. That is what you
+need to explain a false positive or a missed issue.
+
+It can run alongside LangSmith; the two are independent.
+
+1. **Get project keys**: in the Langfuse UI → Settings → API Keys.
+
+2. **Add the configuration to your `.env`**:
+
+   ```env
+   # Langfuse Configuration (self-hosted observability)
+   LANGFUSE_ENABLED=true
+   LANGFUSE_BASE_URL=http://localhost:3000   # omit for Langfuse Cloud
+   LANGFUSE_PUBLIC_KEY=pk-lf-...
+   LANGFUSE_SECRET_KEY=sk-lf-...
+   ```
+
+   Tracing switches itself on as soon as both keys are present — `LANGFUSE_ENABLED`
+   is only needed to force it off. Nothing here can break a review: a missing
+   package, wrong keys or an unreachable host prints one warning and the run
+   continues untraced.
+
+3. **Verify the setup**:
+
+   ```bash
+   python scripts/test_langfuse.py
+   ```
+
+   This pushes a trace through the reviewer's own config plumbing using a fake chat
+   model (so no OpenRouter call is made and nothing is billed), reads it back, and
+   reports whether nesting, session grouping and prompt capture all work.
+
+4. **What you'll see in Langfuse**:
+   - **One session per MR review**, keyed `{project_path}!{mr_id}` — the same id used
+     for the LangSmith thread, so an incremental re-review appends to it. Find them
+     under **Tracing → Sessions**.
+   - **One trace per reviewed file** (`review:<path>`), plus the effort estimate and
+     the comment reviewer, each nested down to individual LLM and tool calls.
+   - **The full prompt and completion** of every call — the actual context window.
+   - **Token usage, cost and latency** per call, and the reviewer build (`release`)
+     that produced the trace.
+
+5. **Running in Docker**: `docker-compose.yml` points the reviewer at
+   `http://host.docker.internal:3000` (a host-gateway alias) so it reaches a Langfuse
+   published on the host without this stack depending on Langfuse's compose network.
+   To attach to that network directly instead, set
+   `LANGFUSE_BASE_URL=http://langfuse-web:3000` and add the external
+   `langfuse_default` network to the `codereviewagent` service.
+
+   If you sit behind a corporate proxy, a self-hosted Langfuse must bypass it —
+   `setup_proxy()` adds the configured host to `NO_PROXY` automatically in web mode;
+   for CLI runs make sure your ambient `NO_PROXY` covers it.
+
 ## Usage
 
 This project provides reviewer agents as Python modules. Import and use them in your workflow:

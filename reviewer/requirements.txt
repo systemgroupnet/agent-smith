@@ -17,6 +17,7 @@ langchain-openrouter>=0.2.5,<0.3.0   # official OpenRouter-native chat model (Ch
 langchain-mcp-adapters>=0.3,<0.4      # official MCP<->LangChain tools (replaces langchain-mcp)
 langgraph>=1.2,<2.0
 langsmith>=0.1.0  # observability
+langfuse>=4.0,<5.0  # observability: captures the full prompt/context of every LLM call
 
 # Web framework
 flask==3.1.0
