@@ -18,7 +18,7 @@ from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
-from core.utils.llm_retry import maybe_print_traceback
+from core.utils.llm_retry import maybe_print_traceback, describe_error
 from core.prompts import get_semantic_reviewer_prompt, get_business_logic_reviewer_prompt
 from dto.general import ReviewResponse
 
@@ -130,7 +130,7 @@ async def run_semantic_review(context: ServiceContext, config: Optional[Runnable
         
     except Exception as e:
         elapsed_time = time.time() - start_time
-        print(f"  ❌ Semantic review failed after {elapsed_time:.2f}s: {e}")
+        print(f"  ❌ Semantic review failed after {elapsed_time:.2f}s: {describe_error(e)}")
         maybe_print_traceback(e)
         # Semantic review is the core review; surface the failure so the file
         # is recorded as errored and the run exits non-zero.
@@ -187,7 +187,7 @@ async def run_business_logic_review(context: ServiceContext, config: Optional[Ru
         
     except Exception as e:
         elapsed_time = time.time() - start_time
-        print(f"  ❌ Business logic review failed after {elapsed_time:.2f}s: {e}")
+        print(f"  ❌ Business logic review failed after {elapsed_time:.2f}s: {describe_error(e)}")
         maybe_print_traceback(e)
         # Return empty response on error
         return ReviewResponse(issues=[])
@@ -268,7 +268,7 @@ async def run_combined_service_review(context: ServiceContext, config: Optional[
         return ReviewResponse(issues=all_issues)
         
     except Exception as e:
-        print(f"  ❌ Combined review failed: {e}")
+        print(f"  ❌ Combined review failed: {describe_error(e)}")
         maybe_print_traceback(e)
         # Propagate so the service file is recorded as errored and the run exits
         # non-zero, rather than silently reporting zero issues.

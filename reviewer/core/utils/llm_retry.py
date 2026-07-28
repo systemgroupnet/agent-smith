@@ -15,11 +15,15 @@ surface those immediately so the run fails fast instead of hammering a wall.
 Errors are matched on their string form so we don't couple to the OpenRouter
 SDK's exception classes (the security-policy 403 currently surfaces as a
 ``ResponseValidationError`` because its body isn't the shape the SDK expects).
+That string is built by :func:`_error_text`, which includes each exception's
+**type name** and walks the ``__cause__`` chain — see its docstring for why the
+message alone is not enough.
 """
 
 import asyncio
 import os
 import random
+from typing import Optional
 
 # Hard denials — retrying is futile until a reset; surface immediately.
 _HARD_LIMIT_SIGNATURES = (
@@ -65,7 +69,24 @@ _TRANSIENT_SIGNATURES = (
     " 502",
     " 503",
     " 504",
+    # httpx/httpcore transport failures, matched by *type name* because these
+    # arrive with an empty message (see _error_text). "timeout" above already
+    # covers Read/Write/Connect/PoolTimeout.
+    "connecterror",
+    "readerror",
+    "writeerror",
+    "remoteprotocolerror",
+    "protocolerror",
+    "incompleteread",
 )
+
+# Timeout-class failures get a lower attempt cap than other transient errors:
+# every attempt costs a *full* OPENROUTER_TIMEOUT_MS window (5 min by default),
+# so the usual 3 attempts would spend ~15 min on one file and starve the rest of
+# the run's OVERALL_TIMEOUT_S budget. One retry is the useful part — it clears a
+# stalled connection — while a genuinely too-slow generation fails in ~10 min.
+_TIMEOUT_SIGNATURES = ("timeout", "timed out")
+_TIMEOUT_MAX_ATTEMPTS = 2
 
 
 def _int_env(name: str, default: int) -> int:
@@ -88,17 +109,63 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _error_text(err: BaseException) -> str:
+    """Lowercased text to classify an error by: every exception in its
+    ``__cause__`` chain, each contributing its **type name** and its message.
+
+    The type name is not a nicety — for transport errors it is the *only* signal.
+    ``httpx`` builds a timeout as ``mapped_exc(str(httpcore_exc))``, and the
+    httpcore exception wraps anyio's bare ``TimeoutError``, so what actually
+    arrives is ``httpx.ReadTimeout("")``: an **empty** message. Classifying on
+    ``str(err)`` alone therefore matched none of the signatures above, and a
+    5-minute read timeout — the textbook transient failure this module exists for
+    — was treated as non-retryable and re-raised on the first attempt. The name
+    "ReadTimeout" contains "timeout"; the message contains nothing.
+
+    Only ``__cause__`` is followed (explicit ``raise ... from``, which is how
+    httpx/httpcore chain), never ``__context__`` — that would drag in whatever
+    unrelated exception happened to be in flight and could misread a transient
+    failure as a hard quota block.
+    """
+    parts: list[str] = []
+    current: Optional[BaseException] = err
+    for _ in range(6):  # depth cap: chains are short, and never trust a cycle
+        if current is None:
+            break
+        parts.append(type(current).__name__)
+        parts.append(str(current))
+        current = current.__cause__
+    return " ".join(parts).lower()
+
+
 def is_hard_limit_error(err: BaseException) -> bool:
     """True for daily-limit / quota / payment denials — never retry these."""
-    msg = str(err).lower()
-    return any(sig in msg for sig in _HARD_LIMIT_SIGNATURES)
+    text = _error_text(err)
+    return any(sig in text for sig in _HARD_LIMIT_SIGNATURES)
 
 
 def is_provider_config_error(err: BaseException) -> bool:
     """True for OpenRouter data-policy / guardrail 'no matching endpoints' blocks —
     an account/model configuration issue, deterministic and not a code bug."""
-    msg = str(err).lower()
-    return any(sig in msg for sig in _CONFIG_BLOCK_SIGNATURES)
+    text = _error_text(err)
+    return any(sig in text for sig in _CONFIG_BLOCK_SIGNATURES)
+
+
+def is_timeout_error(err: BaseException) -> bool:
+    """True for timeout-class failures, which retry on a tighter attempt cap
+    (each attempt burns a full request-timeout window)."""
+    text = _error_text(err)
+    return any(sig in text for sig in _TIMEOUT_SIGNATURES)
+
+
+def describe_error(err: BaseException) -> str:
+    """``TypeName: message`` for logging, or bare ``TypeName`` when the message is
+    empty — which it is for every httpx transport error (see :func:`_error_text`).
+    Without this, a read timeout logs as ``review failed after 301.06s:`` with
+    nothing after the colon, and the run log says only that *something* failed."""
+    msg = str(err).strip()
+    name = type(err).__name__
+    return f"{name}: {msg}" if msg else name
 
 
 def is_provider_hard_block(err: BaseException) -> bool:
@@ -114,8 +181,8 @@ def is_retryable_llm_error(err: BaseException) -> bool:
     never treated as transient."""
     if is_hard_limit_error(err) or is_provider_config_error(err):
         return False
-    msg = str(err).lower()
-    return any(sig in msg for sig in _TRANSIENT_SIGNATURES)
+    text = _error_text(err)
+    return any(sig in text for sig in _TRANSIENT_SIGNATURES)
 
 
 def maybe_print_traceback(exc: BaseException, *, indent: str = "     ") -> None:
@@ -146,6 +213,10 @@ async def with_llm_retry(operation, *, label: str = "LLM call"):
     must return a *fresh* awaitable each call (e.g. ``lambda: x.ainvoke(...)``)
     so each retry issues a new request.
 
+    Timeout-class failures are capped at ``_TIMEOUT_MAX_ATTEMPTS`` regardless of
+    LLM_RETRY_ATTEMPTS, since each of their attempts costs a full request-timeout
+    window rather than failing fast.
+
     Env knobs: LLM_RETRY_ATTEMPTS (default 3), LLM_RETRY_BASE_DELAY_S (default 3).
     """
     attempts = max(1, _int_env("LLM_RETRY_ATTEMPTS", 3))
@@ -155,11 +226,13 @@ async def with_llm_retry(operation, *, label: str = "LLM call"):
         try:
             return await operation()
         except Exception as e:  # noqa: BLE001 — classify then re-raise
-            if attempt >= attempts or not is_retryable_llm_error(e):
+            budget = min(attempts, _TIMEOUT_MAX_ATTEMPTS) if is_timeout_error(e) else attempts
+            if attempt >= budget or not is_retryable_llm_error(e):
                 raise
             delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, base_delay)
             print(
                 f"  ⏳ [llm-retry] {label}: transient failure "
-                f"(attempt {attempt}/{attempts}) — retrying in {delay:.1f}s: {str(e)[:140]}"
+                f"(attempt {attempt}/{budget}) — retrying in {delay:.1f}s: "
+                f"{describe_error(e)[:140]}"
             )
             await asyncio.sleep(delay)

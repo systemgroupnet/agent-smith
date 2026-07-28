@@ -38,6 +38,7 @@ from core.agents.dataview_agent import DataviewContext, run_dataview_review
 from core.agents.typescript_agent import TypescriptContext, run_typescript_review
 from core.agents.html_agent import HtmlContext, run_html_review
 from core.agents.scss_agent import ScssContext, run_scss_review
+from core.utils.llm_retry import describe_error
 
 
 # =============================================================================
@@ -73,8 +74,8 @@ async def classify_node(state: ReviewState) -> ReviewState:
         
         return state
     except Exception as e:
-        print(f"❌ Classification failed: {e}")
-        state = set_error(state, f"Classification error: {str(e)}")
+        print(f"❌ Classification failed: {describe_error(e)}")
+        state = set_error(state, f"Classification error: {describe_error(e)}")
         return state
 
 
@@ -121,8 +122,8 @@ async def review_service_node(state: ReviewState, config: RunnableConfig) -> Rev
         
         return state
     except Exception as e:
-        print(f"❌ Service review failed: {e}")
-        state = set_error(state, f"Service review error: {str(e)}")
+        print(f"❌ Service review failed: {describe_error(e)}")
+        state = set_error(state, f"Service review error: {describe_error(e)}")
         return state
 
 
@@ -154,8 +155,8 @@ async def review_sql_node(state: ReviewState, config: RunnableConfig) -> ReviewS
         print(f"✅ SQL review complete: {len(result.issues)} issues")
         return state
     except Exception as e:
-        print(f"❌ SQL review failed: {e}")
-        state = set_error(state, f"SQL review error: {str(e)}")
+        print(f"❌ SQL review failed: {describe_error(e)}")
+        state = set_error(state, f"SQL review error: {describe_error(e)}")
         return state
 
 
@@ -187,8 +188,8 @@ async def review_test_node(state: ReviewState, config: RunnableConfig) -> Review
         print(f"✅ Test review complete: {len(result.issues)} issues")
         return state
     except Exception as e:
-        print(f"❌ Test review failed: {e}")
-        state = set_error(state, f"Test review error: {str(e)}")
+        print(f"❌ Test review failed: {describe_error(e)}")
+        state = set_error(state, f"Test review error: {describe_error(e)}")
         return state
 
 
@@ -220,8 +221,8 @@ async def review_pbook_node(state: ReviewState, config: RunnableConfig) -> Revie
         print(f"✅ Pbook review complete: {len(result.issues)} issues")
         return state
     except Exception as e:
-        print(f"❌ Pbook review failed: {e}")
-        state = set_error(state, f"Pbook review error: {str(e)}")
+        print(f"❌ Pbook review failed: {describe_error(e)}")
+        state = set_error(state, f"Pbook review error: {describe_error(e)}")
         return state
 
 
@@ -255,8 +256,8 @@ async def review_dataview_node(state: ReviewState, config: RunnableConfig) -> Re
         print(f"✅ Dataview review complete: {len(result.issues)} issues")
         return state
     except Exception as e:
-        print(f"❌ Dataview review failed: {e}")
-        state = set_error(state, f"Dataview review error: {str(e)}")
+        print(f"❌ Dataview review failed: {describe_error(e)}")
+        state = set_error(state, f"Dataview review error: {describe_error(e)}")
         return state
 
 
@@ -288,8 +289,8 @@ async def review_typescript_node(state: ReviewState, config: RunnableConfig) -> 
         print(f"✅ TypeScript review complete: {len(result.issues)} issues")
         return state
     except Exception as e:
-        print(f"❌ TypeScript review failed: {e}")
-        state = set_error(state, f"TypeScript review error: {str(e)}")
+        print(f"❌ TypeScript review failed: {describe_error(e)}")
+        state = set_error(state, f"TypeScript review error: {describe_error(e)}")
         return state
 
 
@@ -321,8 +322,8 @@ async def review_html_node(state: ReviewState, config: RunnableConfig) -> Review
         print(f"✅ HTML review complete: {len(result.issues)} issues")
         return state
     except Exception as e:
-        print(f"❌ HTML review failed: {e}")
-        state = set_error(state, f"HTML review error: {str(e)}")
+        print(f"❌ HTML review failed: {describe_error(e)}")
+        state = set_error(state, f"HTML review error: {describe_error(e)}")
         return state
 
 
@@ -354,8 +355,8 @@ async def review_scss_node(state: ReviewState, config: RunnableConfig) -> Review
         print(f"✅ SCSS review complete: {len(result.issues)} issues")
         return state
     except Exception as e:
-        print(f"❌ SCSS review failed: {e}")
-        state = set_error(state, f"SCSS review error: {str(e)}")
+        print(f"❌ SCSS review failed: {describe_error(e)}")
+        state = set_error(state, f"SCSS review error: {describe_error(e)}")
         return state
 
 

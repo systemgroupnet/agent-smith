@@ -39,6 +39,101 @@ COCOINDEX_URL_ENV = "MCP_COCOINDEX_URL"
 DEFAULT_COCOINDEX_URL = "http://internal.example.com/mcp"
 
 
+def _schema_properties(tool: BaseTool) -> Dict[str, dict]:
+    """The tool's JSON-Schema ``properties`` map, or ``{}`` if unavailable.
+
+    MCP adapter tools carry the server's raw ``inputSchema`` dict; be defensive
+    because a non-MCP tool may use a pydantic model instead.
+    """
+    schema = getattr(tool, "args_schema", None)
+    if isinstance(schema, dict):
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            return props
+    return {}
+
+
+def _schema_facts(spec: dict) -> tuple[set, Optional[float], Optional[float]]:
+    """Collect a property's declared types and numeric bounds.
+
+    Bounds and types can sit either directly on the property or inside an
+    ``anyOf`` branch (which is how an optional ``list[str] | None`` is rendered),
+    so both places are merged.
+    """
+    types: set = set()
+    minimum = maximum = None
+    for node in [spec, *(spec.get("anyOf") or [])]:
+        if not isinstance(node, dict):
+            continue
+        node_type = node.get("type")
+        if isinstance(node_type, str):
+            types.add(node_type)
+        if isinstance(node.get("minimum"), (int, float)):
+            minimum = node["minimum"] if minimum is None else min(minimum, node["minimum"])
+        if isinstance(node.get("maximum"), (int, float)):
+            maximum = node["maximum"] if maximum is None else max(maximum, node["maximum"])
+    return types, minimum, maximum
+
+
+def _repair_tool_args(properties: Dict[str, dict], arguments: dict) -> tuple[dict, List[str]]:
+    """Fix the two argument mistakes models reliably make on these tools.
+
+    Observed against the cocoindex index, where *every* call in a run failed:
+    ``search(paths="procurement/service")`` — a bare string where the schema wants
+    ``list[str]`` — and ``ripgrep(context_lines=100)`` where the schema caps it at
+    20. Both are server-side pydantic validation errors, so the tool call returns
+    an error and the reviewer loses the code index for that file even though the
+    server is perfectly healthy.
+
+    These two repairs are unambiguous (a single path *is* a one-element list; a
+    model asking for 100 lines of context wants as much as it can get), so doing
+    them here is strictly better than hoping the model reads the schema. Anything
+    else is passed through untouched and left to the server to reject.
+
+    Returns the repaired arguments plus a note per repair, for logging.
+    """
+    if not properties:
+        return arguments, []
+
+    repaired = dict(arguments)
+    notes: List[str] = []
+    for name, value in arguments.items():
+        spec = properties.get(name)
+        if not isinstance(spec, dict) or value is None:
+            continue
+        types, minimum, maximum = _schema_facts(spec)
+
+        # Scalar where an array is wanted → wrap it.
+        if "array" in types and not isinstance(value, (list, tuple)):
+            repaired[name] = [value]
+            notes.append(f"{name}={value!r} → [{value!r}]")
+            continue
+
+        # Out-of-range number → clamp to the declared bound.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not types & {"integer", "number"}:
+            continue
+        if maximum is not None and value > maximum:
+            repaired[name] = int(maximum) if "integer" in types else maximum
+            notes.append(f"{name}={value} → {repaired[name]} (max)")
+        elif minimum is not None and value < minimum:
+            repaired[name] = int(minimum) if "integer" in types else minimum
+            notes.append(f"{name}={value} → {repaired[name]} (min)")
+    return repaired, notes
+
+
+def _is_bad_arguments_error(err: BaseException) -> bool:
+    """Whether the server rejected the *arguments* rather than failing itself.
+
+    Matters because the two cases need opposite advice: a dead session is
+    hopeless and the model must stop trying, while bad arguments are the model's
+    own mistake and calling again with corrected ones will work.
+    """
+    text = str(err).lower()
+    return "validation error" in text or "input should be" in text
+
+
 def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
     """Make each MCP tool's call non-fatal to the review.
 
@@ -53,6 +148,11 @@ def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
     it then finishes from the file content + diff it already has (or the tool-agent
     salvage path) instead of throwing. The message tells the model not to retry, so
     a dead session doesn't burn the agent's iteration budget hammering it.
+
+    The wrapper also repairs the arguments it can (:func:`_repair_tool_args`) and,
+    when the server rejects them anyway, says so *as* an argument error instead of
+    "unavailable, do not retry" — telling a model to give up on a healthy server
+    because it mistyped one parameter is how a whole run loses its code index.
     """
     wrapped: List[BaseTool] = []
     for tool in tools:
@@ -61,25 +161,40 @@ def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
             wrapped.append(tool)
             continue
 
+        properties = _schema_properties(tool)
+
         # MCP adapter tools declare response_format="content_and_artifact", so
         # LangChain requires their result to be a (content, artifact) 2-tuple — a
         # bare string raises "a two-tuple ... is expected", which would itself crash
         # the review. Match the tool's declared shape in the error path too.
         response_format = getattr(tool, "response_format", "content")
 
-        def _make(tool_name: str, call, resp_format: str):
+        def _make(tool_name: str, call, resp_format: str, props: Dict[str, dict]):
             @functools.wraps(call)
             async def _resilient(*args, **kwargs):
+                fixed, notes = _repair_tool_args(props, kwargs)
+                if notes:
+                    print(f"  🔧 [MCP] Repaired {tool_name} args: {', '.join(notes)}")
                 try:
-                    return await call(*args, **kwargs)
+                    return await call(*args, **fixed)
                 except asyncio.CancelledError:
                     raise  # never swallow cancellation (timeouts/shutdown)
                 except Exception as e:  # noqa: BLE001 — degrade any MCP failure
-                    msg = (
-                        f"ERROR: the '{tool_name}' tool is unavailable right now "
-                        f"({type(e).__name__}: {e}). Do not retry it; continue the "
-                        f"review using the file content and diff already provided."
-                    )
+                    if _is_bad_arguments_error(e):
+                        msg = (
+                            f"ERROR: the '{tool_name}' call was rejected because the "
+                            f"arguments were invalid ({e}). The tool itself is working — "
+                            f"fix the arguments and call it again. Check the tool's schema: "
+                            f"list parameters need a JSON array (e.g. paths=[\"a/b\"], not "
+                            f"paths=\"a/b\") and numeric parameters must stay within their "
+                            f"documented minimum/maximum."
+                        )
+                    else:
+                        msg = (
+                            f"ERROR: the '{tool_name}' tool is unavailable right now "
+                            f"({type(e).__name__}: {e}). Do not retry it; continue the "
+                            f"review using the file content and diff already provided."
+                        )
                     print(f"  ⚠️  [MCP] {msg}")
                     # Return the shape the tool's response_format requires.
                     if resp_format == "content_and_artifact":
@@ -88,7 +203,7 @@ def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
             return _resilient
 
         try:
-            tool.coroutine = _make(tool.name, original, response_format)
+            tool.coroutine = _make(tool.name, original, response_format, properties)
         except Exception as e:  # pragma: no cover — if the tool model is frozen
             print(f"  ⚠️  [MCP] Could not wrap tool {getattr(tool, 'name', '?')}: {e}")
         wrapped.append(tool)

@@ -19,6 +19,7 @@ from core.agents.base_agent import StructuredOutputAgent
 from core.prompts import get_effort_estimator_prompt
 from core.utils.effort_insight import build_effort_insight
 from dto.general import EffortEstimate
+from core.utils.llm_retry import describe_error
 
 
 async def estimate_review_effort(
@@ -39,5 +40,5 @@ async def estimate_review_effort(
         print(f"  🧮 Review effort estimated: {result.effort}/5 — {result.reasoning[:140]}")
         return result.effort
     except Exception as e:
-        print(f"  ⚠️  Review-effort estimation failed (non-fatal): {e}")
+        print(f"  ⚠️  Review-effort estimation failed (non-fatal): {describe_error(e)}")
         return None

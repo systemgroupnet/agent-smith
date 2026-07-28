@@ -24,6 +24,14 @@ def format_code_index_guidance(source_branch: Optional[str] = None) -> str:
        source branch makes the index overlay that branch's changes, so lookups
        reflect the code as it will be after merge.
 
+    3. How to shape the arguments. Two constraints get violated on essentially
+       every run: ``paths``/``languages``/``globs`` are JSON **arrays**, and
+       ``context_lines`` is capped at 20. A violation is a server-side pydantic
+       error, so the call returns nothing useful — in one observed run *every*
+       cocoindex call in the whole MR failed on those two mistakes alone.
+       ``toolkit_manager._repair_tool_args`` now fixes both before the call goes
+       out, but saying it here saves the round trip.
+
     The branch is interpolated as a literal so the model can copy it verbatim
     rather than infer it. cocoindex's ``search`` requires the ref to already
     exist in the server's clone (``ripgrep`` fetches on demand), hence the
@@ -54,6 +62,12 @@ def format_code_index_guidance(source_branch: Optional[str] = None) -> str:
             "request's changes. Pass the merge request's source branch whenever "
             "you know it."
         )
+    lines.append(
+        "Respect the cocoindex argument types or the call is rejected and you get "
+        'nothing back: `paths`, `languages` and `globs` are arrays — `paths=["a/b"]`, '
+        'never `paths="a/b"` — and `context_lines` must be between 0 and 20 (ask for '
+        "20 if you want maximum context, not 50 or 100)."
+    )
     return " ".join(lines)
 
 

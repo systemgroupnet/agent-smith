@@ -46,7 +46,7 @@ from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
 from core.config.langfuse_config import get_langfuse_handler, flush_langfuse
 from core.config.langchain_config import get_llm_model, int_env
-from core.utils.llm_retry import is_provider_hard_block
+from core.utils.llm_retry import is_provider_hard_block, describe_error
 from core.analytics import send_run_analytics
 from dto.analytics import RunMetrics, record_error, record_warning
 
@@ -170,7 +170,7 @@ async def process_single_file(
     
     except Exception as e:
         file_info = file_path if file_path else "unknown file"
-        print(f"❌ Error processing file {file_info}: {e}")
+        print(f"❌ Error processing file {file_info}: {describe_error(e)}")
         # Propagate so process_mr records this file as failed and the run exits
         # non-zero. Best-effort: sibling files in the batch are reviewed
         # independently (asyncio.gather with return_exceptions=True).
@@ -195,7 +195,7 @@ async def llm_preflight() -> bool:
         print("✅ LLM endpoint reachable\n")
         return True
     except Exception as e:
-        reason = str(e) or type(e).__name__
+        reason = describe_error(e)
         print(f"❌ LLM endpoint pre-flight failed after <= {timeout_s}s: {reason}")
         print("   Aborting before review. Check the endpoint/proxy and retry.")
         return False
@@ -217,7 +217,7 @@ async def process_mr(mr_url: str):
     except Exception as e:
         # Capture the fatal error into the event (status defaults to "error")
         # before it propagates, so unhandled crashes are debuggable in the collector.
-        record_error(metrics, "fatal", str(e), exc=e)
+        record_error(metrics, "fatal", describe_error(e), exc=e)
         raise
     finally:
         metrics.duration_seconds = round(time.monotonic() - run_start, 3)
@@ -242,9 +242,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     try:
         await initialize_mcp_toolkits()
     except Exception as e:
-        print(f"⚠️  Warning: Failed to initialize some MCP toolkits: {e}")
+        print(f"⚠️  Warning: Failed to initialize some MCP toolkits: {describe_error(e)}")
         print("   Continuing with available tools...\n")
-        record_error(metrics, "mcp_init", str(e), exc=e)
+        record_error(metrics, "mcp_init", describe_error(e), exc=e)
     
     # Record the model up front so even an early-exit run reports which model was
     # configured (matches the reviewer's default in langchain_config / CLAUDE.md).
@@ -491,7 +491,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             if isinstance(result, Exception):
                 print(f"❌ Exception during file processing: {result}")
                 file_error_count += 1
-                record_error(metrics, "file_review", str(result), exc=result)
+                record_error(metrics, "file_review", describe_error(result), exc=result)
                 if is_provider_hard_block(result):
                     provider_blocked = True
                 continue
@@ -875,7 +875,7 @@ async def run_with_cleanup(mr_url: str) -> int:
             await close_mcp_toolkits()
             print("✅ MCP sessions closed successfully")
         except Exception as e:
-            print(f"⚠️  Error closing MCP sessions: {e}")
+            print(f"⚠️  Error closing MCP sessions: {describe_error(e)}")
 
 
 def main():
@@ -907,7 +907,7 @@ def main():
     except Exception as e:
         # Any unhandled error means the review did not complete — fail loudly so
         # GitLab CI does not treat the job as successful.
-        print(f"❌ Fatal error during review: {e}")
+        print(f"❌ Fatal error during review: {describe_error(e)}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

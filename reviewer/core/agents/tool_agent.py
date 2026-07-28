@@ -34,7 +34,7 @@ from core.config.langchain_config import (
     get_structured_model_for_agent,
     get_default_model,
 )
-from core.utils.llm_retry import with_llm_retry
+from core.utils.llm_retry import with_llm_retry, describe_error
 from core.MCP.toolkit_manager import get_mcp_toolkit_manager
 from dto.general import ReviewResponse
 
@@ -294,7 +294,7 @@ class ToolEnabledAgent:
             return output
 
         except Exception as e:
-            print(f"❌ Error in ToolEnabledAgent: {e}")
+            print(f"❌ Error in ToolEnabledAgent: {describe_error(e)}")
             raise
     
     def run_sync(self, input_text: str, context: Optional[dict] = None) -> Union[T, dict]:
@@ -335,7 +335,7 @@ class ToolEnabledAgent:
             return output
             
         except Exception as e:
-            print(f"❌ Error in ToolEnabledAgent: {e}")
+            print(f"❌ Error in ToolEnabledAgent: {describe_error(e)}")
             raise
 
 

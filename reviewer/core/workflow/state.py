@@ -119,11 +119,11 @@ def create_initial_state(input_text: str, **kwargs) -> ReviewState:
 def update_state_with_classification(state: ReviewState, classification: StarterResponse) -> ReviewState:
     """
     Update state with classification results.
-    
+
     Args:
         state: Current state
         classification: Classification response from starter agent
-    
+
     Returns:
         Updated state
     """
@@ -133,11 +133,30 @@ def update_state_with_classification(state: ReviewState, classification: Starter
     state["package_name"] = classification.package_name
     state["module_name"] = classification.module_name
     state["jira_task_number"] = classification.jira_task_number
-    state["content"] = classification.content
-    state["diff"] = classification.diff
-    state["target_branch"] = classification.target_branch
-    state["source_branch"] = classification.source_branch
-    
+
+    # These four already arrived on the state from the caller, which took them
+    # straight from the MR. The classifier only re-derives them by regex-scraping
+    # `input_text` — a blob that also embeds the file's whole content and diff — so
+    # its copy is strictly less trustworthy, and it used to overwrite the real one
+    # unconditionally. Two ways that goes wrong: a miss yields "" and erases the
+    # value, and `extract_field_from_input`'s `\s*` crosses newlines, so a reviewed
+    # file containing a bare `source_branch:` line hands back the *next line of
+    # source code* as the branch name (verified: a Go file yielded "var A = 1").
+    # It matters because every reviewer prompt interpolates source_branch as the
+    # literal `branch="..."` the model passes to the cocoindex tools — blank or
+    # bogus and the index answers from the pre-MR base branch, which is the exact
+    # class of false positive the MR context block exists to kill. So the caller's
+    # value wins, and the scrape is only a fallback for callers that pass nothing
+    # but `input_text`.
+    for field, scraped in (
+        ("content", classification.content),
+        ("diff", classification.diff),
+        ("target_branch", classification.target_branch),
+        ("source_branch", classification.source_branch),
+    ):
+        if not state.get(field) and scraped:
+            state[field] = scraped
+
     # Set flag for parallel review (service, dataview)
     state["needs_parallel_review"] = classification.file_type in ["service", "dataview"]
     

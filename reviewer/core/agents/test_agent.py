@@ -12,7 +12,7 @@ from langchain_core.runnables import RunnableConfig
 
 from core.agents.tool_agent import create_review_agent_with_tools
 from core.utils.md_loader import load_md_content
-from core.utils.llm_retry import maybe_print_traceback
+from core.utils.llm_retry import maybe_print_traceback, describe_error
 from core.prompts import get_test_reviewer_prompt
 from dto.general import ReviewResponse
 
@@ -96,7 +96,7 @@ async def run_test_review(context: TestContext, config: Optional[RunnableConfig]
         
     except Exception as e:
         elapsed_time = time.time() - start_time
-        print(f"  ❌ Test review failed after {elapsed_time:.2f}s: {e}")
+        print(f"  ❌ Test review failed after {elapsed_time:.2f}s: {describe_error(e)}")
         maybe_print_traceback(e)
         # Surface the failure instead of swallowing it into an empty result, so
         # this file is recorded as errored and the run exits non-zero. Other

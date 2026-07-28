@@ -12,6 +12,7 @@ from typing import Optional, List
 from langchain_core.runnables import RunnableConfig
 from core.workflow.graph import review_workflow
 from core.workflow.state import create_initial_state
+from core.utils.llm_retry import describe_error
 
 
 async def review_file_with_workflow(
@@ -84,7 +85,7 @@ source_branch: {source_branch}
         return await asyncio.shield(task)
     except asyncio.CancelledError as e:
         # If cancelled (e.g., by lingering MCP cancel scope), wait for task and clear cancellation
-        cancel_msg = str(e)
+        cancel_msg = describe_error(e)
         try:
             # Wait for the task to complete anyway
             result = await task
@@ -103,12 +104,12 @@ source_branch: {source_branch}
             current_task = asyncio.current_task()
             if current_task is not None:
                 current_task.uncancel()
-            print(f"  ⚠️  Workflow error after cancel for {file_path}: {inner_e}")
+            print(f"  ⚠️  Workflow error after cancel for {file_path}: {describe_error(inner_e)}")
             raise
     except Exception as e:
         # Genuine review failure (not an MCP cancel-scope race) — propagate so the
         # caller records this file as errored and the run exits non-zero.
-        print(f"Error reviewing file {file_path}: {e}")
+        print(f"Error reviewing file {file_path}: {describe_error(e)}")
         raise
 
 
@@ -161,6 +162,6 @@ async def review_comments_with_agent(
         
     except Exception as e:
         elapsed_time = time.time() - start_time
-        print(f"  ⚠️  Error running comment reviewer agent after {elapsed_time:.2f}s: {e}")
+        print(f"  ⚠️  Error running comment reviewer agent after {elapsed_time:.2f}s: {describe_error(e)}")
         print(f"  ℹ️  Falling back to all {len(issues)} issues")
         return issues

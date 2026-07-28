@@ -13,7 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
 from core.config.langchain_config import get_structured_model_for_agent, get_default_model
-from core.utils.llm_retry import with_llm_retry
+from core.utils.llm_retry import with_llm_retry, describe_error
 from dto.general import ReviewResponse, ReviewIssue
 
 
@@ -134,7 +134,7 @@ class BaseReviewAgent(ABC, Generic[T]):
             
         except Exception as e:
             elapsed_time = time.time() - start_time
-            print(f"❌ Error in {agent_name} after {elapsed_time:.2f}s: {e}")
+            print(f"❌ Error in {agent_name} after {elapsed_time:.2f}s: {describe_error(e)}")
             raise
     
     def run_sync(self, input_text: str, context: Optional[dict] = None) -> T:
@@ -159,7 +159,7 @@ class BaseReviewAgent(ABC, Generic[T]):
             return result
             
         except Exception as e:
-            print(f"❌ Error in {self.__class__.__name__}: {e}")
+            print(f"❌ Error in {self.__class__.__name__}: {describe_error(e)}")
             raise
 
 
