@@ -205,58 +205,62 @@ These instructions will be injected into the system prompt under the "Additional
    # ... etc
    ```
 
-### LangSmith Configuration (Optional - for Observability)
+### Langfuse Configuration (Optional - for Prompt/Context Inspection)
 
-LangSmith provides powerful tracing and monitoring capabilities for your LangGraph workflows. It helps you debug, optimize, and understand how your code review agents are performing.
+Langfuse is the **context inspector**. Where the analytics collector records *what
+happened* (counts, severities, outcomes), Langfuse records *what the model saw*: for
+every LLM call it captures the exact prompt — the system prompt, the shared MR context
+block, the line-numbered file content, the diff, the per-repo `.aid` instructions —
+plus every MCP tool call with its result and the raw model answer. That is what you
+need to explain a false positive or a missed issue.
 
-1. **Sign up for LangSmith**:
-   - Go to [https://smith.langchain.com/](https://smith.langchain.com/)
-   - Create a free account
-   - Navigate to Settings → API Keys
-   - Create a new API key
+It is the project's only tracing backend — LangSmith has been removed.
 
-2. **Add LangSmith configuration to your `.env` file**:
+1. **Get project keys**: in the Langfuse UI → Settings → API Keys.
+
+2. **Add the configuration to your `.env`**:
 
    ```env
-   # LangSmith Configuration
-   LANGSMITH_TRACING=true
-   LANGSMITH_API_KEY=your_langsmith_api_key_here
-   LANGSMITH_PROJECT=codereviewagent
-   LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+   # Langfuse Configuration (self-hosted observability)
+   LANGFUSE_BASE_URL=http://localhost:3000   # https://cloud.langfuse.com for Cloud
+   LANGFUSE_PUBLIC_KEY=pk-lf-...
+   LANGFUSE_SECRET_KEY=sk-lf-...
    ```
 
-3. **What you'll see in LangSmith**:
-   - **One thread per MR review**: every run of a review (one trace per file plus the
-     comment reviewer) is grouped into a single thread keyed by the MR
-     (`{project_path}!{mr_id}`). Re-reviewing the same MR appends to the same thread.
-     Find them under the project's **Threads** tab.
-   - **Full trace of each review**: See every step of the LangGraph workflow
-   - **Token usage**: Monitor costs per file review
-   - **Latency metrics**: Identify slow agents or bottlenecks
-   - **Agent decisions**: Debug why certain issues were flagged or filtered
-   - **Error tracking**: Catch and diagnose failures in production
+   Three variables, no separate switch: the base URI *is* the switch. Set it plus
+   both keys and tracing runs; leave it unset and there is none. Nothing here can
+   break a review — a missing package, wrong keys or an unreachable host prints one
+   warning and the run continues untraced.
 
-4. **Test your configuration**:
+3. **Verify the setup**:
 
    ```bash
-   python scripts/test_langsmith.py
+   python scripts/test_langfuse.py
    ```
 
-   This will verify your LangSmith setup and optionally create a test trace.
+   This pushes a trace through the reviewer's own config plumbing using a fake chat
+   model (so no OpenRouter call is made and nothing is billed), reads it back, and
+   reports whether nesting, session grouping and prompt capture all work.
 
-5. **Viewing traces**:
-   - Once configured, run a code review
-   - Visit [https://smith.langchain.com/](https://smith.langchain.com/)
-   - Navigate to your project (e.g., "codereviewagent")
-   - Click on any trace to see the full execution flow
+4. **What you'll see in Langfuse**:
+   - **One session per MR review**, keyed `{project_path}!{mr_id}`, so an incremental
+     re-review appends to it. Find them under **Tracing → Sessions**.
+   - **One trace per reviewed file** (`review:<path>`), plus the effort estimate and
+     the comment reviewer, each nested down to individual LLM and tool calls.
+   - **The full prompt and completion** of every call — the actual context window.
+   - **Token usage, cost and latency** per call, and the reviewer build (`release`)
+     that produced the trace.
 
-**Benefits**:
-- Debug complex multi-agent workflows
-- Optimize performance by identifying slow components
-- Track costs and token usage over time
-- Share traces with your team for collaboration
+5. **Running in Docker**: set `LANGFUSE_BASE_URL=http://host.docker.internal:3000` —
+   `docker-compose.yml` maps that host-gateway alias so the reviewer reaches a Langfuse
+   published on the host without this stack depending on Langfuse's compose network.
+   To attach to that network directly instead, set
+   `LANGFUSE_BASE_URL=http://langfuse-web:3000` and add the external
+   `langfuse_default` network to the `codereviewagent` service.
 
-**For detailed setup instructions**, see [docs/LANGSMITH_SETUP.md](docs/LANGSMITH_SETUP.md)
+   If you sit behind a corporate proxy, a self-hosted Langfuse must bypass it —
+   `setup_proxy()` adds the configured host to `NO_PROXY` automatically in web mode;
+   for CLI runs make sure your ambient `NO_PROXY` covers it.
 
 ## Usage
 

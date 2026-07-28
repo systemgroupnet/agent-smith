@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 from core.prompts.common import (
     format_file_content_section,
     format_mr_context_section,
-    AIAND_SOURCE_GUIDANCE,
+    format_code_index_guidance,
+    NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
 )
 
@@ -35,15 +36,7 @@ def get_semantic_reviewer_prompt(context: "ServiceContext", additional_content: 
     
     return f"""You are a senior Go engineer performing technical code review. Focus ONLY on code quality, correctness, and Go best practices. DO NOT review business logic.
 
-## IMPORTANT NOTE
-All files have been compiled and run successfully by the developer. Do NOT report issues about:
-- Missing imports or unused imports
-- Unused functions, methods, or variables
-- Any problems that would be caught at compile time
-- Type errors that would prevent compilation
-- Symbols (functions, types, methods) that look undefined here but are defined in another file changed in this same MR — see the "Merge Request Context" section below; those exist, do NOT report them as undefined or missing
-
-Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+{NO_COMPILE_ERRORS_RULE}
 
 CRITICAL AREAS TO REVIEW:
 1. Correctness: Nil checks, race conditions, defer in loops, type assertions
@@ -66,12 +59,12 @@ SUGGESTION FIELD FORMAT:
 {SUGGESTION_FIELD_RULE}
 
 TOOLS AVAILABLE:
-You have access to MCP tools for GitLab and the AIAND Source code index that can help you:
+You have access to MCP tools for GitLab and the cocoindex code index that can help you:
 - Fetch file contents from the repository to understand context
 - Look up related files or dependencies
 - View merge request information
 
-{AIAND_SOURCE_GUIDANCE}
+{format_code_index_guidance(context.source_branch)}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 
@@ -121,15 +114,7 @@ def get_business_logic_reviewer_prompt(context: "ServiceContext", additional_con
     
     return f"""You are a senior software architect reviewing business logic implementation. Focus ONLY on whether code correctly implements business requirements. DO NOT review code quality or technical aspects.
 
-## IMPORTANT NOTE
-All files have been compiled and run successfully by the developer. Do NOT report issues about:
-- Missing imports or unused imports
-- Unused functions, methods, or variables
-- Any problems that would be caught at compile time
-- Type errors that would prevent compilation
-- Symbols (functions, types, methods) that look undefined here but are defined in another file changed in this same MR — see the "Merge Request Context" section below; those exist, do NOT report them as undefined or missing
-
-Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+{NO_COMPILE_ERRORS_RULE}
 
 CRITICAL AREAS TO REVIEW:
 1. Requirements Completeness: All features from task implemented, no missing functionality
@@ -158,11 +143,11 @@ You have access to MCP tools for Jira and Confluence that can help you:
 - Retrieve Confluence documentation and specifications
 - Look up related tasks and documents
 
-You also have GitLab tools and the AIAND Source code index to:
+You also have GitLab tools and the cocoindex code index to:
 - Fetch related files from the repository
 - View merge request context
 
-{AIAND_SOURCE_GUIDANCE}
+{format_code_index_guidance(context.source_branch)}
 
 Use these tools to gather the information you need to properly review business logic against requirements. You SHOULD use Jira/Confluence tools if a Jira task number is provided to understand the requirements.
 

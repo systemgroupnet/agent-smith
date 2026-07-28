@@ -44,6 +44,7 @@ from core.utils.comment_formatter import format_single_issue, extract_high_sever
 from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
+from core.config.langfuse_config import get_langfuse_handler, flush_langfuse
 from core.config.langchain_config import get_llm_model, int_env
 from core.utils.llm_retry import is_provider_hard_block
 from core.analytics import send_run_analytics
@@ -226,6 +227,11 @@ async def process_mr(mr_url: str):
 async def _run_review(mr_url: str, metrics: RunMetrics):
     """Main function to process a GitLab merge request."""
     print(f"🚀 Processing GitLab MR: {mr_url}\n")
+
+    # Resolve Langfuse tracing up front so a misconfiguration surfaces as one
+    # startup line instead of silently producing an empty project. Non-fatal:
+    # returns None (and the review runs untraced) whenever it can't be used.
+    get_langfuse_handler()
 
     # Fail fast if the LLM endpoint is unreachable — nothing below works without it.
     if not await llm_preflight():
@@ -859,6 +865,11 @@ async def run_with_cleanup(mr_url: str) -> int:
         exit_code = await process_mr(mr_url)
         return exit_code if exit_code is not None else 0
     finally:
+        # Push buffered Langfuse spans before the process exits — a one-shot CI
+        # container would otherwise die inside the batch interval and lose the
+        # run's traces. Non-fatal, and a no-op when tracing is off.
+        flush_langfuse()
+
         print("\n🔌 Cleaning up MCP sessions...")
         try:
             await close_mcp_toolkits()

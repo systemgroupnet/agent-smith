@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 from core.prompts.common import (
     format_file_content_section,
     format_mr_context_section,
-    AIAND_SOURCE_GUIDANCE,
+    format_code_index_guidance,
+    NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
 )
 
@@ -32,14 +33,7 @@ def get_typescript_reviewer_prompt(context: "TypescriptContext", additional_cont
     
     return f"""You are an expert TypeScript reviewer for the application frontend.
 
-## IMPORTANT NOTE
-All files have been compiled and run successfully by the developer. Do NOT report issues about:
-- Missing imports or unused imports
-- Unused functions, methods, or variables
-- Any problems that would be caught at compile time
-- Type errors that would prevent compilation
-
-Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+{NO_COMPILE_ERRORS_RULE}
 
 ## Critical Review Areas
 
@@ -64,7 +58,7 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 - Proper RxJS patterns
 
 ## Severity Levels
-- **high**: Type errors, runtime bugs, security issues
+- **high**: Runtime bugs, security issues, unsafe typing that survives compilation (e.g. an `any` or a cast that hides a wrong shape at runtime)
 - **medium**: Code quality issues, suboptimal patterns
 - **low**: Style improvements, naming suggestions
 
@@ -74,13 +68,13 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 {SUGGESTION_FIELD_RULE}
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, Confluence, and the AIAND Source code index that can help you:
+You have access to MCP tools for GitLab, Jira, Confluence, and the cocoindex code index that can help you:
 - Fetch related TypeScript files from the repository (components, services, models)
 - Look up Jira issues to understand feature requirements
 - View Confluence documentation about frontend architecture and standards
 - Understand the broader context of the component/service
 
-{AIAND_SOURCE_GUIDANCE}
+{format_code_index_guidance(context.source_branch)}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 

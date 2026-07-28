@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 from core.prompts.common import (
     format_file_content_section,
     format_mr_context_section,
-    AIAND_SOURCE_GUIDANCE,
+    format_code_index_guidance,
+    NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
 )
 
@@ -32,14 +33,7 @@ def get_pbook_reviewer_prompt(context: "PbookContext", additional_content: str =
     
     return f"""You are an expert reviewer for pbook (error message) files in the application.
 
-## IMPORTANT NOTE
-All files have been compiled and run successfully by the developer. Do NOT report issues about:
-- Missing imports or unused imports
-- Unused functions, methods, or variables
-- Any problems that would be caught at compile time
-- Syntax errors that would prevent compilation
-
-Focus ONLY on runtime issues, logic errors, and best practices that affect code quality beyond compilation.
+{NO_COMPILE_ERRORS_RULE}
 
 ## Critical Review Areas
 
@@ -74,13 +68,13 @@ Focus ONLY on runtime issues, logic errors, and best practices that affect code 
 {SUGGESTION_FIELD_RULE}
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, Confluence, and the AIAND Source code index that can help you:
+You have access to MCP tools for GitLab, Jira, Confluence, and the cocoindex code index that can help you:
 - Fetch related error message files from the repository to check for duplicates
 - Look up Jira issues to understand the context of error messages
 - View Confluence documentation about error message standards
 - Understand the broader error handling strategy
 
-{AIAND_SOURCE_GUIDANCE}
+{format_code_index_guidance(context.source_branch)}
 
 Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
 

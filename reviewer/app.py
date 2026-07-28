@@ -11,6 +11,7 @@ setup_proxy()
 
 # Import MCP session cleanup (centralized toolkit manager)
 from core.MCP.toolkit_manager import close_mcp_toolkits
+from core.config.langfuse_config import flush_langfuse
 
 app = Flask(__name__,static_folder='assets', static_url_path='/assets')
 
@@ -56,6 +57,12 @@ def review():
     except Exception as e:
         print(f"Error processing MR: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        # Flush per request rather than only at shutdown: this server is
+        # long-lived, so waiting for the batch interval (or exit) would leave a
+        # just-finished review missing from Langfuse while someone is looking
+        # for it. No-op when tracing is off.
+        flush_langfuse()
 
 
 if __name__ == '__main__':

@@ -39,7 +39,7 @@ async def create_html_reviewer_agent():
     """
     return await create_review_agent_with_tools(
         system_prompt="",  # Will be replaced with context-specific prompt
-        tools=["gitlab", "atlassian", "aiand"],  # GitLab + Atlassian (Jira/Confluence) + AIAND Source (code index)
+        tools=["gitlab", "atlassian", "cocoindex"],  # GitLab + Atlassian (Jira/Confluence) + cocoindex (code index)
         temperature=0.3,
         max_iterations=10,
         verbose=False,

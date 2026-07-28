@@ -103,7 +103,7 @@ class BaseReviewAgent(ABC, Generic[T]):
         Args:
             input_text: Input text for the agent
             context: Optional context dictionary
-            config: Optional LangSmith run config (carries thread metadata)
+            config: Optional tracing run config (carries session metadata)
 
         Returns:
             Structured output from the agent

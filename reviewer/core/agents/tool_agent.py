@@ -248,8 +248,8 @@ class ToolEnabledAgent:
         Args:
             input_text: Input text for the agent
             context: Optional context dictionary
-            config: Optional LangSmith run config (carries thread metadata so the
-                    agent's nested LLM/tool runs stay in the MR thread)
+            config: Optional tracing run config (carries session metadata so the
+                    agent's nested LLM/tool runs stay in the MR's session)
 
         Returns:
             Structured output (if output_model specified) or dict
@@ -399,8 +399,8 @@ async def create_tool_agent(
                     resolved_tools.extend(tools_by_category["gitlab"])
                 elif tool_name.lower() == "atlassian":
                     resolved_tools.extend(tools_by_category["atlassian"])
-                elif tool_name.lower() == "aiand":
-                    resolved_tools.extend(tools_by_category["aiand"])
+                elif tool_name.lower() == "cocoindex":
+                    resolved_tools.extend(tools_by_category["cocoindex"])
                 else:
                     print(f"  ⚠️  Unknown tool category: {tool_name}")
         else:

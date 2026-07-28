@@ -30,6 +30,14 @@ from contextlib import AsyncExitStack
 # Transport types
 TransportType = Literal["sse", "streamable-http"]
 
+# cocoindex is configured by a single variable — its base URI. Transport is
+# always streamable-http (that is what the server speaks), and "enabled" is
+# derived from the URI: a non-empty value means use it, an empty one means skip
+# the server entirely. One knob instead of three, because the other two never
+# had a reason to differ per deployment.
+COCOINDEX_URL_ENV = "MCP_COCOINDEX_URL"
+DEFAULT_COCOINDEX_URL = "http://internal.example.com/mcp"
+
 
 def _wrap_tools_resilient(tools: List[BaseTool]) -> List[BaseTool]:
     """Make each MCP tool's call non-fatal to the review.
@@ -108,16 +116,16 @@ class MCPToolkitManager:
         "jira_search",
     }
 
-    # AIAND Source MCP (code index for old/unchanged files).
+    # cocoindex MCP (code index for old/unchanged files).
     # An empty set means "allow all tools" since the exact tool names exposed
-    # by the AIAND Source server are not fixed/known ahead of time.
-    ALLOWED_AIAND_TOOLS: set[str] = set()
+    # by the cocoindex server are not fixed/known ahead of time.
+    ALLOWED_COCOINDEX_TOOLS: set[str] = set()
 
     def __init__(self):
         """Initialize the toolkit manager."""
         self._gitlab_tools: Optional[List[BaseTool]] = None
         self._atlassian_tools: Optional[List[BaseTool]] = None
-        self._aiand_tools: Optional[List[BaseTool]] = None
+        self._cocoindex_tools: Optional[List[BaseTool]] = None
         self._exit_stack: Optional[AsyncExitStack] = None
         self._initialized = False
     
@@ -134,9 +142,13 @@ class MCPToolkitManager:
         """Check if Atlassian MCP integration is enabled."""
         return os.getenv("MCP_ATLASSIAN_ENABLED", "false").lower() == "true"
 
-    def is_aiand_enabled(self) -> bool:
-        """Check if AIAND Source MCP integration is enabled."""
-        return os.getenv("MCP_AIAND_ENABLED", "true").lower() == "true"
+    def is_cocoindex_enabled(self) -> bool:
+        """Check if cocoindex MCP integration is enabled.
+
+        There is no separate enable flag: the base URI is the only setting, so an
+        empty ``MCP_COCOINDEX_URL`` is how you turn the code index off.
+        """
+        return bool(self._get_cocoindex_url())
 
     def _get_gitlab_transport(self) -> TransportType:
         """Get GitLab MCP transport type from environment."""
@@ -152,13 +164,6 @@ class MCPToolkitManager:
             return transport  # type: ignore
         return "streamable-http"  # default to streamable-http
 
-    def _get_aiand_transport(self) -> TransportType:
-        """Get AIAND Source MCP transport type from environment."""
-        transport = os.getenv("MCP_AIAND_TRANSPORT", "streamable-http").lower()
-        if transport in ("sse", "streamable-http"):
-            return transport  # type: ignore
-        return "streamable-http"  # default to streamable-http
-
     def _get_gitlab_url(self) -> str:
         """Get GitLab MCP server URL (no endpoint appended)."""
         return os.getenv("MCP_GITLAB_URL", "http://mcp-gitlab:3002").rstrip('/')
@@ -167,19 +172,20 @@ class MCPToolkitManager:
         """Get Atlassian MCP server URL (no endpoint appended)."""
         return os.getenv("MCP_ATLASSIAN_URL", "http://mcp-atlassian:9000").rstrip('/')
 
-    def _get_aiand_url(self) -> str:
-        """Get AIAND Source MCP server URL (code index for old/unchanged files)."""
-        return os.getenv(
-            "MCP_AIAND_URL",
-            "http://internal.example.com/mcp",
-        ).rstrip('/')
+    def _get_cocoindex_url(self) -> str:
+        """Get cocoindex MCP base URI (code index for old/unchanged files).
+
+        Empty (explicitly set to "") disables the server — see
+        :meth:`is_cocoindex_enabled`.
+        """
+        return os.getenv(COCOINDEX_URL_ENV, DEFAULT_COCOINDEX_URL).strip().rstrip('/')
     
     async def initialize(self) -> None:
         """
         Initialize all enabled MCP toolkits.
         
         This method opens a session to each enabled MCP server (GitLab,
-        Atlassian, AIAND Source) and loads its tools via langchain-mcp-adapters.
+        Atlassian, cocoindex) and loads its tools via langchain-mcp-adapters.
         
         Raises:
             Exception: If toolkit initialization fails
@@ -214,14 +220,14 @@ class MCPToolkitManager:
         else:
             print("  ⏭️  [Atlassian MCP] Disabled, skipping...")
 
-        # Initialize AIAND Source toolkit (isolated to prevent cancel scope leakage)
-        if self.is_aiand_enabled():
+        # Initialize cocoindex toolkit (isolated to prevent cancel scope leakage)
+        if self.is_cocoindex_enabled():
             await self._initialize_toolkit_isolated(
-                self._initialize_aiand_tools,
-                "AIAND Source MCP"
+                self._initialize_cocoindex_tools,
+                "cocoindex MCP"
             )
         else:
-            print("  ⏭️  [AIAND Source MCP] Disabled, skipping...")
+            print("  ⏭️  [cocoindex MCP] Disabled, skipping...")
 
         self._initialized = True
         print("\n✅ MCP Toolkit Manager initialized\n")
@@ -334,26 +340,17 @@ class MCPToolkitManager:
             self._atlassian_tools = None
             # Don't raise - allow partial initialization
 
-    async def _initialize_aiand_tools(self) -> None:
-        """Initialize AIAND Source MCP toolkit (code index for old/unchanged files)."""
+    async def _initialize_cocoindex_tools(self) -> None:
+        """Initialize cocoindex MCP toolkit (code index for old/unchanged files)."""
         try:
-            url = self._get_aiand_url()
-            transport = self._get_aiand_transport()
-            transport_name = "SSE (Server-Sent Events)" if transport == "sse" else "Streamable HTTP"
+            url = self._get_cocoindex_url()
 
-            print(f"  🔌 [AIAND Source MCP] Connecting to: {url}")
-            print(f"     - Transport: {transport_name}")
+            print(f"  🔌 [cocoindex MCP] Connecting to: {url}")
+            print("     - Transport: Streamable HTTP")
 
-            # Create client based on transport type
-            if transport == "sse":
-                read_stream, write_stream = await self._exit_stack.enter_async_context(
-                    sse_client(url)
-                )
-            else:
-                # streamable-http transport
-                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
-                    streamablehttp_client(url)
-                )
+            read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                streamablehttp_client(url)
+            )
 
             # Create ClientSession with the streams
             session = ClientSession(read_stream, write_stream)
@@ -363,12 +360,12 @@ class MCPToolkitManager:
             await self._exit_stack.enter_async_context(session)
             await session.initialize()
 
-            print(f"  🔄 [AIAND Source MCP] Loading tools...")
-            self._aiand_tools = _wrap_tools_resilient(await load_mcp_tools(session))
+            print(f"  🔄 [cocoindex MCP] Loading tools...")
+            self._cocoindex_tools = _wrap_tools_resilient(await load_mcp_tools(session))
 
-            all_tools = self._aiand_tools
-            filtered_tools = self._filter_aiand_tools(all_tools)
-            print(f"  ✅ [AIAND Source MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s)")
+            all_tools = self._cocoindex_tools
+            filtered_tools = self._filter_cocoindex_tools(all_tools)
+            print(f"  ✅ [cocoindex MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s)")
 
             # Print available tools (filtered)
             for tool in filtered_tools:
@@ -378,21 +375,21 @@ class MCPToolkitManager:
             task = asyncio.current_task()
             if task is not None:
                 task.uncancel()
-            print(f"  ❌ [AIAND Source MCP] Initialization cancelled: {e}")
-            self._aiand_tools = None
+            print(f"  ❌ [cocoindex MCP] Initialization cancelled: {e}")
+            self._cocoindex_tools = None
             # Don't raise - allow partial initialization
         except Exception as e:
-            print(f"  ❌ [AIAND Source MCP] Failed to initialize: {e}")
+            print(f"  ❌ [cocoindex MCP] Failed to initialize: {e}")
             import traceback
             print(f"     Traceback: {traceback.format_exc()}")
-            self._aiand_tools = None
+            self._cocoindex_tools = None
             # Don't raise - allow partial initialization
 
-    def _filter_aiand_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
-        """Filter AIAND Source tools. Empty allow-set means expose all tools."""
-        if not self.ALLOWED_AIAND_TOOLS:
+    def _filter_cocoindex_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
+        """Filter cocoindex tools. Empty allow-set means expose all tools."""
+        if not self.ALLOWED_COCOINDEX_TOOLS:
             return list(tools)
-        return [tool for tool in tools if tool.name in self.ALLOWED_AIAND_TOOLS]
+        return [tool for tool in tools if tool.name in self.ALLOWED_COCOINDEX_TOOLS]
 
     async def _initialize_toolkit_isolated(
         self,
@@ -479,21 +476,21 @@ class MCPToolkitManager:
             print(f"  ⚠️  [Atlassian MCP] Error getting tools: {e}")
             return []
 
-    def get_aiand_tools(self) -> List[BaseTool]:
+    def get_cocoindex_tools(self) -> List[BaseTool]:
         """
-        Get AIAND Source MCP tools (code index for old/unchanged files).
+        Get cocoindex MCP tools (code index for old/unchanged files).
 
         Returns:
-            List of AIAND Source MCP tools or empty list if not initialized
+            List of cocoindex MCP tools or empty list if not initialized
         """
-        if self._aiand_tools is None:
+        if self._cocoindex_tools is None:
             return []
 
         try:
-            all_tools = self._aiand_tools
-            return self._filter_aiand_tools(all_tools)
+            all_tools = self._cocoindex_tools
+            return self._filter_cocoindex_tools(all_tools)
         except Exception as e:
-            print(f"  ⚠️  [AIAND Source MCP] Error getting tools: {e}")
+            print(f"  ⚠️  [cocoindex MCP] Error getting tools: {e}")
             return []
 
     def get_all_tools(self) -> List[BaseTool]:
@@ -506,12 +503,12 @@ class MCPToolkitManager:
         all_tools = []
         all_tools.extend(self.get_gitlab_tools())
         all_tools.extend(self.get_atlassian_tools())
-        all_tools.extend(self.get_aiand_tools())
+        all_tools.extend(self.get_cocoindex_tools())
         return all_tools
 
     def get_tools_by_category(self) -> Dict[str, List[BaseTool]]:
         """
-        Get tools organized by category (gitlab, atlassian, aiand).
+        Get tools organized by category (gitlab, atlassian, cocoindex).
 
         Returns:
             Dictionary mapping category names to tool lists
@@ -519,7 +516,7 @@ class MCPToolkitManager:
         return {
             "gitlab": self.get_gitlab_tools(),
             "atlassian": self.get_atlassian_tools(),
-            "aiand": self.get_aiand_tools(),
+            "cocoindex": self.get_cocoindex_tools(),
         }
     
     async def close(self) -> None:
@@ -539,9 +536,9 @@ class MCPToolkitManager:
             print("  ✅ [Atlassian MCP] Toolkit closed")
             self._atlassian_tools = None
 
-        if self._aiand_tools is not None:
-            print("  ✅ [AIAND Source MCP] Toolkit closed")
-            self._aiand_tools = None
+        if self._cocoindex_tools is not None:
+            print("  ✅ [cocoindex MCP] Toolkit closed")
+            self._cocoindex_tools = None
 
         # Close all async context managers (SSE/HTTP clients)
         if self._exit_stack is not None:

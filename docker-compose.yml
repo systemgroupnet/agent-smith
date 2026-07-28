@@ -49,9 +49,9 @@ services:
       - MCP_GITLAB_ENABLED=true
       - MCP_GITLAB_URL=${MCP_GITLAB_URL:-http://mcp-gitlab:3002}
       - MCP_GITLAB_TRANSPORT=${MCP_GITLAB_TRANSPORT:-streamable-http}
-      - MCP_AIAND_ENABLED=${MCP_AIAND_ENABLED:-true}
-      - MCP_AIAND_URL=${MCP_AIAND_URL:-http://internal.example.com/mcp}
-      - MCP_AIAND_TRANSPORT=${MCP_AIAND_TRANSPORT:-streamable-http}
+      # cocoindex code index — one setting, its base URI. Set it empty to turn
+      # the code index off; the transport is always streamable-http.
+      - MCP_COCOINDEX_URL=${MCP_COCOINDEX_URL:-http://internal.example.com/mcp}
       - GITLAB_URL=${GITLAB_URL}
       - GITLAB_TOKEN=${GITLAB_TOKEN}
       # Run analytics — opt-in. Off by default so a reviewer run never depends on
@@ -59,6 +59,22 @@ services:
       - COLLECTOR_ENABLED=${COLLECTOR_ENABLED:-false}
       - COLLECTOR_URL=${COLLECTOR_URL:-http://collector:8000}
       - COLLECTOR_TOKEN=${COLLECTOR_TOKEN:-}
+      # Langfuse tracing — captures the full prompt/context of every LLM call.
+      # The base URI is the switch: set it (plus both keys) to turn tracing on,
+      # leave it unset for none. From in here, a Langfuse published on the *host
+      # machine's* port 3000 (its own compose stack) is
+      # http://host.docker.internal:3000, via the host-gateway alias below. To
+      # attach directly to the Langfuse compose network instead, use
+      # http://langfuse-web:3000 and add the external `langfuse_default` network
+      # to this service.
+      - LANGFUSE_BASE_URL=${LANGFUSE_BASE_URL:-}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+    # Docker Engine on Linux (unlike Docker Desktop) doesn't provide
+    # host.docker.internal; map it so the trace export can reach a Langfuse
+    # published on the host. Requires Langfuse to listen on 0.0.0.0.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./reviewer:/app
       - ./.env:/app/.env:ro
