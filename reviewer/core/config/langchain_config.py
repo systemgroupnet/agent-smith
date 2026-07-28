@@ -1,17 +1,31 @@
 """
-LangChain Configuration Module for OpenRouter Integration
+LangChain Configuration Module — one OpenAI-compatible client for every endpoint
 
-Builds chat models via the official ``langchain-openrouter`` package
-(``ChatOpenRouter``), which is purpose-built for OpenRouter's schema / reasoning /
-provider-routing contract — unlike ``ChatOpenAI`` pointed at OpenRouter's base_url,
-which mishandles reasoning models and structured output through OpenRouter.
+Every chat model is a ``ChatOpenAI`` pointed at ``OPENROUTER_BASE_URL``. That one
+client covers OpenRouter, OpenRouter behind an internal reverse proxy, and a
+vendor's own OpenAI-compatible API (e.g. an internal GLM/Zhipu ``/v4`` endpoint),
+because they all speak ``POST {base}/chat/completions``.
+
+This replaced ``langchain-openrouter``'s ``ChatOpenRouter``, which could only talk
+to OpenRouter: it validates *responses* against OpenRouter's schema, so a GLM
+endpoint — which omits ``system_fingerprint`` — failed every single call with
+``ResponseValidationError``, on requests that were perfectly valid. The two
+OpenRouter-specific request fields it existed to provide, ``reasoning`` and
+``provider`` routing, are plain JSON and ride along in ``extra_body``; a vendor
+endpoint that doesn't know them ignores them (verified against GLM 5.2).
+
+A side benefit: ``ChatOpenAI`` implements ``_astream``, which ``ChatOpenRouter``
+did not. LangChain's ``astream`` — what the agent loop calls — no longer degrades
+to a single blocking ``ainvoke``, so a long completion arrives incrementally
+instead of having to land inside one ``OPENROUTER_TIMEOUT_MS`` read window. That
+window expiring is what produced the `httpx.ReadTimeout` failures in CI.
 """
 
 import json
 import os
 from typing import Any, Optional
 from langchain_core.language_models import BaseChatModel
-from langchain_openrouter import ChatOpenRouter
+from langchain_openai import ChatOpenAI
 
 
 def int_env(name: str, default: int) -> int:
@@ -29,26 +43,6 @@ def int_env(name: str, default: int) -> int:
     except ValueError:
         print(f"  ⚠️  [config] Ignoring invalid {name}={raw!r}; using default {default}")
         return default
-
-
-def _api_style() -> str:
-    """Which wire contract the configured endpoint speaks: "openrouter" or "openai".
-
-    ``ChatOpenRouter`` is right for OpenRouter (including OpenRouter behind an
-    internal reverse proxy) because it understands that schema's reasoning and
-    provider-routing fields. It is *wrong* for a vendor's own OpenAI-compatible
-    API: the openrouter SDK validates responses against OpenRouter's model, which
-    requires ``system_fingerprint``, and a GLM/Zhipu ``/v4`` endpoint doesn't send
-    it — every call died with "ResponseValidationError … body.system_fingerprint
-    Field required", retried three times, and failed the file. Nothing in the
-    request was wrong, so no amount of retrying could help.
-
-    Set ``LLM_API_STYLE=openai`` alongside ``OPENROUTER_BASE_URL`` to talk plain
-    OpenAI to such an endpoint. Left unset it stays "openrouter", so existing
-    deployments are untouched.
-    """
-    style = os.getenv("LLM_API_STYLE", "").strip().lower()
-    return style if style in ("openai", "openrouter") else "openrouter"
 
 
 def get_default_model() -> str:
@@ -88,25 +82,29 @@ def get_llm_model(
     reasoning: Optional[dict] = None,
 ) -> BaseChatModel:
     """
-    Get a ChatOpenRouter model configured for OpenRouter.
+    Get a ChatOpenAI model pointed at the configured endpoint.
 
     Args:
-        model_name: OpenRouter model id ("provider/model"). Falls back to
-                    DEFAULT_LLM_MODEL when None.
+        model_name: Model id as the endpoint names it — "provider/model" on
+                    OpenRouter, native (e.g. "glm-5.2") on a vendor API. Falls
+                    back to DEFAULT_LLM_MODEL when None.
         temperature: Sampling temperature (0.0 = deterministic).
-        streaming: Enable streaming responses.
+        streaming: Enable streaming for ``invoke``. (``astream`` streams anyway.)
         max_tokens: Maximum tokens for the response (optional).
-        reasoning: Optional OpenRouter reasoning config passed through to
-                   ChatOpenRouter (e.g. {"enabled": False} to turn thinking off).
+        reasoning: Optional reasoning config, sent as the top-level ``reasoning``
+                   request field via ``extra_body`` (e.g. {"effort": "none"} to
+                   turn thinking off). Honored by OpenRouter; ignored by
+                   endpoints that don't know the field.
 
     Returns:
-        Configured ChatOpenRouter (a BaseChatModel).
+        Configured ChatOpenAI (a BaseChatModel).
 
     Environment Variables:
-        - OPENROUTER_API_KEY: required.
+        - OPENROUTER_API_KEY: required (the key for whichever endpoint is set).
         - DEFAULT_LLM_MODEL: fallback model when model_name is not provided.
-        - OPENROUTER_BASE_URL: optional custom endpoint (e.g. internal reverse proxy).
-        - OPENROUTER_PROVIDER: optional JSON provider-routing config.
+        - OPENROUTER_BASE_URL: optional custom endpoint (reverse proxy, vendor API).
+        - OPENROUTER_PROVIDER: optional JSON provider-routing config (OpenRouter).
+        - OPENROUTER_TIMEOUT_MS: per-request timeout in milliseconds.
     """
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -118,35 +116,13 @@ def get_llm_model(
     model = model_name or get_default_model()
     base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
 
-    if _api_style() == "openai":
-        # Plain OpenAI-compatible endpoint (e.g. an internal GLM/Zhipu reverse
-        # proxy). `reasoning` is dropped: it is an OpenRouter-shaped field, and a
-        # thinking model behind such an endpoint manages its own thinking (GLM 5.2
-        # accepts a forced tool_choice with thinking on, so structured output needs
-        # no override). Timeout converts ms → seconds, which is what ChatOpenAI
-        # takes; passing the raw ms value would mean an ~83-hour timeout.
-        from langchain_openai import ChatOpenAI
-
-        oa_kwargs: dict[str, Any] = {
-            "model": model,
-            "api_key": api_key,
-            "temperature": temperature,
-            "streaming": streaming,
-            "timeout": int_env("OPENROUTER_TIMEOUT_MS", 300000) / 1000.0,
-        }
-        if base_url:
-            oa_kwargs["base_url"] = base_url
-        if max_tokens:
-            oa_kwargs["max_tokens"] = max_tokens
-        return ChatOpenAI(**oa_kwargs)
     # "provider/model" is *OpenRouter's* id convention, so only assume a missing
-    # provider means OpenAI when we are actually talking to OpenRouter. A custom
-    # base_url may be a vendor's own API behind a reverse proxy, where ids are
-    # native and unprefixed — pointing at an internal GLM endpoint with
-    # DEFAULT_LLM_MODEL=glm-5.2 used to send "openai/glm-5.2" and get back
-    # "BadRequestResponseError: Unknown Model, please check the model code".
-    # Existing OpenRouter-behind-a-proxy setups are unaffected: their ids already
-    # carry a provider (deepseek/deepseek-v4-pro), so this branch never fired.
+    # provider means OpenAI when we are talking to OpenRouter directly. A custom
+    # base_url may be a vendor's own API, where ids are native and unprefixed —
+    # pointing at an internal GLM endpoint with DEFAULT_LLM_MODEL=glm-5.2 used to
+    # send "openai/glm-5.2" and get back "BadRequestResponseError: Unknown Model,
+    # please check the model code". Existing OpenRouter-behind-a-proxy setups are
+    # unaffected: their ids already carry a provider (deepseek/deepseek-v4-pro).
     if "/" not in model and not base_url:
         model = f"openai/{model}"
 
@@ -157,25 +133,31 @@ def get_llm_model(
         "streaming": streaming,
         # Bound every request so a proxy that swallows a request without ever
         # answering (observed with the internal reverse proxy) surfaces as a
-        # timeout + SDK retry instead of hanging the review forever.
-        "timeout": int_env("OPENROUTER_TIMEOUT_MS", 300000),
+        # timeout + SDK retry instead of hanging the review forever. ChatOpenAI
+        # takes seconds, so convert — passing the raw ms would be an ~83-hour
+        # timeout, i.e. no bound at all.
+        "timeout": int_env("OPENROUTER_TIMEOUT_MS", 300000) / 1000.0,
     }
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
 
-    # Honor a custom OpenRouter endpoint (e.g. an internal reverse proxy) when set;
-    # if OPENROUTER_BASE_URL is unset, ChatOpenRouter targets OpenRouter directly.
     if base_url:
         kwargs["base_url"] = base_url
 
+    # OpenRouter's two non-OpenAI request fields are plain JSON, so they ride in
+    # extra_body rather than needing a bespoke client. An endpoint that doesn't
+    # know them ignores them (checked against GLM: a request carrying
+    # reasoning={"effort":"none"} is answered normally).
+    extra_body: dict[str, Any] = {}
     provider = _get_openrouter_provider()
     if provider:
-        kwargs["openrouter_provider"] = provider
-
+        extra_body["provider"] = provider
     if reasoning is not None:
-        kwargs["reasoning"] = reasoning
+        extra_body["reasoning"] = reasoning
+    if extra_body:
+        kwargs["extra_body"] = extra_body
 
-    return ChatOpenRouter(**kwargs)
+    return ChatOpenAI(**kwargs)
 
 
 def _structured_reasoning_for(model: str) -> Optional[dict]:
@@ -192,9 +174,11 @@ def _structured_reasoning_for(model: str) -> Optional[dict]:
     The model list is comma-separated id prefixes in
     STRUCTURED_NO_REASONING_MODELS (default "deepseek/").
 
-    Uses {"effort": "none"} rather than {"enabled": false}: the openrouter
-    SDK's ChatRequestReasoning model only knows effort/summary, so an
-    "enabled" key is silently dropped and an empty {} reaches the wire.
+    Uses {"effort": "none"} rather than {"enabled": false}. Both now reach the
+    wire intact (the dict goes out verbatim in ``extra_body``), but "effort" is
+    the form proven against this endpoint — the older client silently dropped an
+    unknown "enabled" key and sent an empty {}, so that variant was never
+    actually exercised.
     """
     raw = os.getenv("STRUCTURED_NO_REASONING_MODELS", "deepseek/")
     prefixes = [p.strip() for p in raw.split(",") if p.strip()]
