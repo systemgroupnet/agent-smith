@@ -83,8 +83,17 @@ class RunMetrics(BaseModel):
 
     # "full" | "incremental" | "none" (no code to review) | None (never got there)
     review_type: Optional[str] = None
-    # LLM model in provider/model form, e.g. "deepseek/deepseek-v4-pro".
+    # The *configured* (primary) LLM model, e.g. "glm-5.2". Kept as-is even when
+    # the run fails over, so "what was this deployment set to" stays answerable.
     model: Optional[str] = None
+    # True when a provider rate limit (HTTP 429) outlived the retry budget and the
+    # run switched to FALLBACK_LLM_MODEL partway through. A run can therefore be
+    # *mixed*: files reviewed before the switch ran on ``model``, files after on
+    # ``model_fallback_model``. Per-comment attribution lives in the
+    # ``posted_comments`` entries' own "model" key — without it, comparing comment
+    # quality by model across mixed runs silently credits everything to ``model``.
+    model_fallback_used: bool = False
+    model_fallback_model: Optional[str] = None
 
     # --- file counts ---
     files_changed_total: int = 0   # full MR changed-file count
@@ -112,7 +121,10 @@ class RunMetrics(BaseModel):
     # can key human emoji-reaction scores (gathered via its GitLab webhook
     # endpoint) back to a specific comment and run. Entry shape:
     # {note_id, discussion_id, comment_type: "inline"|"note", file, line,
-    # severity}. ``note_id`` is the GitLab note id — the same value an emoji
+    # severity, model}. ``model`` is the model that actually reviewed that file
+    # (captured when the file review finished), which is not necessarily
+    # ``RunMetrics.model`` once a rate-limit failover has happened mid-run.
+    # ``note_id`` is the GitLab note id — the same value an emoji
     # webhook event reports as ``object_attributes.awardable_id``, which is the
     # join key. Bounded in practice by the comment-reviewer filter (~10/run).
     posted_comments: list = Field(default_factory=list)

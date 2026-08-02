@@ -42,6 +42,7 @@ from typing import Any, Optional
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     Float,
     Index,
@@ -86,6 +87,9 @@ _TYPED_TEXT_FIELDS = (
     "last_reviewed_sha",
     "review_type",
     "model",
+    # The fallback model a rate-limit failover switched to mid-run; NULL when the
+    # run stayed on ``model`` the whole way (see model_fallback_used).
+    "model_fallback_model",
     "status",
 )
 
@@ -98,6 +102,12 @@ review_runs = Table(
     Column("duration_seconds", Float),
     *[Column(name, String) for name in _TYPED_TEXT_FIELDS],
     *[Column(name, Integer) for name in _TYPED_INT_FIELDS],
+    # True when the run hit a provider rate limit hard enough to switch providers
+    # partway through. Such a run is *mixed* — some comments came from ``model``
+    # and some from ``model_fallback_model`` — so per-comment attribution lives on
+    # review_comments.model. Typed as a real boolean so a dashboard can filter
+    # mixed runs out of a model-quality comparison.
+    Column("model_fallback_used", Boolean),
     # Denormalized counts for monitoring/alerting (the full structured events live
     # in the run_events table, one row per error/warning, keyed to this run).
     Column("error_count", Integer),
@@ -150,6 +160,10 @@ review_comments = Table(
     Column("file", String),
     Column("line", Integer),
     Column("severity", String),
+    # The model that reviewed this comment's file. Usually the run's ``model``,
+    # but a run that failed over mid-way has both, and this is the only place the
+    # distinction survives — review_runs.model is the *configured* model.
+    Column("model", String),
     Column("mr_author_username", String),  # whose MR the comment is on
     Index("idx_review_comments_run_id", "run_id"),
     Index("idx_review_comments_note_id", "note_id", unique=True),
@@ -276,6 +290,7 @@ def insert_event(payload: dict[str, Any]) -> int:
         "duration_seconds": _as_float(payload.get("duration_seconds")),
         "error_count": len(errors),
         "warning_count": len(warnings),
+        "model_fallback_used": _as_bool(payload.get("model_fallback_used")),
     }
     for name in _TYPED_TEXT_FIELDS:
         val = payload.get(name)
@@ -325,6 +340,7 @@ def insert_event(payload: dict[str, Any]) -> int:
                 "file": _text(c.get("file")),
                 "line": _as_int(c.get("line")),
                 "severity": _text(c.get("severity")),
+                "model": _text(c.get("model")),
                 "mr_author_username": mr_author,
             })
         if comment_rows:
@@ -804,3 +820,22 @@ def _as_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_bool(value: Any) -> Optional[bool]:
+    """Lenient boolean coercion, same contract as the other _as_* helpers: an
+    unparseable value becomes NULL rather than dropping the event. Accepts real
+    booleans plus the string/int spellings a non-Python producer might send."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes", "on"):
+            return True
+        if lowered in ("false", "0", "no", "off"):
+            return False
+    return None

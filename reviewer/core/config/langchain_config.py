@@ -54,6 +54,95 @@ def get_default_model() -> str:
     return os.getenv("DEFAULT_LLM_MODEL", "deepseek/deepseek-v4-pro")
 
 
+# ── Fallback provider ────────────────────────────────────────────────────────
+# A second endpoint the whole run switches to when the primary keeps answering
+# with a rate/concurrency limit (see core/utils/llm_retry.py). The switch is a
+# process-wide, sticky latch rather than a per-call choice: several file reviews
+# are in flight at once and they hit the limit together, so once one of them has
+# established that the primary is throttling, the others should not each spend a
+# full retry budget rediscovering it. It is never switched back — a provider that
+# just shed load under our concurrency will still be shedding it this run.
+_fallback_active = False
+
+
+def get_fallback_model() -> str:
+    """Fallback model id, or "" when no fallback is configured."""
+    return os.getenv("FALLBACK_LLM_MODEL", "").strip()
+
+
+def _fallback_api_key() -> str:
+    """Fallback key. Defaults to the primary key, so a fallback that is another
+    model on the *same* account needs only FALLBACK_LLM_MODEL."""
+    return os.getenv("FALLBACK_LLM_API_KEY", "").strip() or os.getenv("OPENROUTER_API_KEY", "").strip()
+
+
+def _fallback_base_url() -> str:
+    """Fallback endpoint. Defaults to the primary endpoint, for the same reason."""
+    return os.getenv("FALLBACK_LLM_BASE_URL", "").strip() or os.getenv("OPENROUTER_BASE_URL", "").strip()
+
+
+def fallback_configured() -> bool:
+    """True when a fallback provider is usable. FALLBACK_LLM_MODEL is the switch —
+    the key and base URL each fall back to the primary's when unset, so pointing at
+    a different model on the same endpoint takes one variable, and a genuinely
+    separate provider takes all three."""
+    return bool(get_fallback_model() and _fallback_api_key())
+
+
+def is_fallback_active() -> bool:
+    """True once the run has switched to the fallback provider."""
+    return _fallback_active
+
+
+def activate_fallback_provider() -> bool:
+    """Latch the fallback on for the rest of the process.
+
+    Returns True if this call flipped it, False if it was already on — the caller
+    uses that only to decide how to phrase its log line, since concurrent agents
+    all arrive here after the same throttle.
+    """
+    global _fallback_active
+    if _fallback_active:
+        return False
+    _fallback_active = True
+    return True
+
+
+def reset_fallback_provider() -> None:
+    """Clear the latch. For tests and for web mode, where one process serves many
+    reviews and a throttle during one MR should not permanently demote the next."""
+    global _fallback_active
+    _fallback_active = False
+
+
+def describe_fallback_provider() -> str:
+    """Human-readable fallback target for log lines (never includes the key)."""
+    base = _fallback_base_url()
+    return f"{get_fallback_model()} @ {base}" if base else f"{get_fallback_model()} @ api.openrouter.ai"
+
+
+def resolve_effective_model(model_name: Optional[str] = None) -> str:
+    """The model id actually sent — the fallback's once the fallback is active.
+
+    Every caller's requested model is overridden, because the latch means "the
+    primary endpoint is throttling us", which is true of every model on it.
+    """
+    if _fallback_active and fallback_configured():
+        return get_fallback_model()
+    return model_name or get_default_model()
+
+
+def _resolve_endpoint(model_name: Optional[str]) -> tuple[str, str, str]:
+    """``(model, api_key, base_url)`` for the provider currently in force."""
+    if _fallback_active and fallback_configured():
+        return get_fallback_model(), _fallback_api_key(), _fallback_base_url()
+    return (
+        model_name or get_default_model(),
+        os.getenv("OPENROUTER_API_KEY", "").strip(),
+        os.getenv("OPENROUTER_BASE_URL", "").strip(),
+    )
+
+
 def _get_openrouter_provider() -> Optional[dict]:
     """
     Optional OpenRouter provider-routing config, read from OPENROUTER_PROVIDER.
@@ -106,15 +195,14 @@ def get_llm_model(
         - OPENROUTER_PROVIDER: optional JSON provider-routing config (OpenRouter).
         - OPENROUTER_TIMEOUT_MS: per-request timeout in milliseconds.
     """
-    api_key = os.getenv("OPENROUTER_API_KEY")
+    # Which provider is in force: the primary, or the fallback once the rate-limit
+    # latch has been flipped (see activate_fallback_provider).
+    model, api_key, base_url = _resolve_endpoint(model_name)
     if not api_key:
         raise ValueError(
             "OPENROUTER_API_KEY not found in environment variables. "
             "Please set OPENROUTER_API_KEY in your .env file."
         )
-
-    model = model_name or get_default_model()
-    base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
 
     # "provider/model" is *OpenRouter's* id convention, so only assume a missing
     # provider means OpenAI when we are talking to OpenRouter directly. A custom
@@ -251,9 +339,14 @@ def get_structured_model_for_agent(
     keep using get_model_for_agent so reasoning stays on.
     """
     actual_model = MODEL_NAME_MAPPING.get(agent_model_name, agent_model_name)
+    # Decide the reasoning override against the model that will actually be sent.
+    # Once the fallback latch is on that is the *fallback* id, and the two can
+    # disagree: falling back from GLM (fine with a forced tool_choice while
+    # thinking) to a DeepSeek V4 model (which rejects it) must disable reasoning,
+    # even though the primary id never needed it.
     return get_llm_model(
         actual_model,
         temperature=temperature,
         streaming=False,
-        reasoning=_structured_reasoning_for(actual_model),
+        reasoning=_structured_reasoning_for(resolve_effective_model(actual_model)),
     )

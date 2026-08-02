@@ -90,7 +90,18 @@ class BaseReviewAgent(ABC, Generic[T]):
         
         # Create chain: prompt | llm_with_structure
         self.chain = self.prompt | llm_with_structure
-    
+
+    def _rebuild_for_fallback(self):
+        """Re-resolve the model and rebuild the chain on the fallback provider.
+
+        Handed to ``with_llm_retry`` as its ``on_fallback`` hook: the chain below
+        is bound to a client built at __init__ against the primary endpoint, so
+        the swap only takes effect if it is reconstructed. ``run``'s lambda reads
+        ``self.chain`` at call time, so the retry after this picks up the new one.
+        """
+        self.llm = get_structured_model_for_agent(self.model_name, temperature=self.temperature)
+        self._build_chain()
+
     async def run(
         self,
         input_text: str,
@@ -125,6 +136,7 @@ class BaseReviewAgent(ABC, Generic[T]):
             result = await with_llm_retry(
                 lambda: self.chain.ainvoke(input_data, config=config),
                 label=f"{agent_name} structured call",
+                on_fallback=self._rebuild_for_fallback,
             )
             
             elapsed_time = time.time() - start_time

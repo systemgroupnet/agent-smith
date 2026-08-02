@@ -135,6 +135,22 @@ class ToolEnabledAgent:
             return_intermediate_steps=True,
         )
 
+    def _rebuild_for_fallback(self):
+        """Re-resolve the model and rebuild the executor on the fallback provider.
+
+        Handed to ``with_llm_retry`` as its ``on_fallback`` hook: the executor is
+        bound to a client built at __init__ against the primary endpoint, so it
+        has to be reconstructed for the swap to take effect. ``run``'s lambda
+        reads ``self.agent_executor`` at call time, so the retry after this picks
+        up the new one. Rebuilding is prompt/tool wiring only — no I/O.
+        """
+        self.llm = get_model_for_agent(
+            self.model_name,
+            temperature=self.temperature,
+            streaming=False,
+        )
+        self._build_agent()
+
     def _parse_text_output(self, output: str):
         """Best-effort parse of the agent's free-text answer into ``output_model``.
 
@@ -268,6 +284,7 @@ class ToolEnabledAgent:
             result = await with_llm_retry(
                 lambda: self.agent_executor.ainvoke(input_data, config=config),
                 label=f"{self.__class__.__name__} agent",
+                on_fallback=self._rebuild_for_fallback,
             )
 
             # Extract the final output + the tool call/result trace
@@ -285,9 +302,13 @@ class ToolEnabledAgent:
                     # reliable with_structured_output call.
                     print("  ⚠️  [ToolEnabledAgent] No parseable final answer; deriving structured output from gathered context")
                     prompt = self._build_structuring_prompt(output, steps)
+                    # _get_structured_llm builds its client per call, so it already
+                    # honors the latch; the hook is still passed so this call can
+                    # be the one that *trips* it.
                     parsed_output = await with_llm_retry(
                         lambda: self._get_structured_llm().ainvoke(prompt),
                         label=f"{self.__class__.__name__} salvage",
+                        on_fallback=self._rebuild_for_fallback,
                     )
                 return parsed_output
 

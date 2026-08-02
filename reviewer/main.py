@@ -14,6 +14,7 @@ import asyncio
 import os
 import sys
 import time
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -45,7 +46,15 @@ from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
 from core.config.langfuse_config import get_langfuse_handler, flush_langfuse
-from core.config.langchain_config import get_llm_model, int_env
+from core.config.langchain_config import (
+    get_default_model,
+    get_fallback_model,
+    get_llm_model,
+    int_env,
+    is_fallback_active,
+    reset_fallback_provider,
+    resolve_effective_model,
+)
 from core.utils.llm_retry import is_provider_hard_block, describe_error
 from core.analytics import send_run_analytics
 from dto.analytics import RunMetrics, record_error, record_warning
@@ -64,6 +73,7 @@ async def process_single_file(
     thread_id: str = None,
     mr_id: str = None,
     head_sha: str = None,
+    model_by_file: dict = None,
 ) -> tuple:
     """
     Process a single file for review.
@@ -162,7 +172,15 @@ async def process_single_file(
         if issues is None:
             print(f"⚠️  Could not review {file_path}, skipping...")
             return None
-        
+
+        # Which model actually produced these issues. Read *after* the review, so
+        # a file whose review completed on the fallback (because every primary
+        # attempt was rate limited) is attributed to the fallback. Recorded per
+        # file rather than per run because the failover latch flips mid-run.
+        if model_by_file is not None:
+            model_by_file[file_path] = resolve_effective_model()
+
+
         file_elapsed_time = time.time() - file_start_time
         print(f"✅ Found {len(issues)} issue(s) (⏱️  Total file processing: {file_elapsed_time:.2f}s)")
         
@@ -177,12 +195,17 @@ async def process_single_file(
         raise
 
 
-async def llm_preflight() -> bool:
+async def llm_preflight() -> Optional[BaseException]:
     """One tiny bounded LLM call before any review work.
 
     Fails fast (clear message + non-zero exit) when the LLM endpoint is dead —
     e.g. the internal reverse proxy swallowing requests — instead of hanging
     partway through a review with GitLab state already touched.
+
+    Returns ``None`` on success, or the exception that killed it. The caller
+    records that exception: a preflight abort used to ``return 1`` silently, so
+    the run event said ``status="error"`` with ``error_count=0`` and no
+    ``run_events`` row — a failure with nothing at all explaining it.
     """
     timeout_s = int_env("LLM_PREFLIGHT_TIMEOUT_S", 60)
     base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
@@ -193,12 +216,19 @@ async def llm_preflight() -> bool:
             timeout=timeout_s,
         )
         print("✅ LLM endpoint reachable\n")
-        return True
-    except Exception as e:
-        reason = describe_error(e)
-        print(f"❌ LLM endpoint pre-flight failed after <= {timeout_s}s: {reason}")
+        return None
+    except asyncio.TimeoutError as e:
+        # wait_for's TimeoutError stringifies to "", so name the budget explicitly
+        # or the recorded message is empty (see describe_error's docstring).
+        err = TimeoutError(f"LLM pre-flight exceeded LLM_PREFLIGHT_TIMEOUT_S={timeout_s}s ({base_url})")
+        err.__cause__ = e
+        print(f"❌ LLM endpoint pre-flight failed after <= {timeout_s}s: {describe_error(err)}")
         print("   Aborting before review. Check the endpoint/proxy and retry.")
-        return False
+        return err
+    except Exception as e:
+        print(f"❌ LLM endpoint pre-flight failed after <= {timeout_s}s: {describe_error(e)}")
+        print("   Aborting before review. Check the endpoint/proxy and retry.")
+        return e
 
 
 async def process_mr(mr_url: str):
@@ -212,6 +242,10 @@ async def process_mr(mr_url: str):
     """
     metrics = RunMetrics(mr_url=mr_url)
     run_start = time.monotonic()
+    # The LLM fallback latch is sticky for a run, not for a process. In web mode
+    # (app.py) one process serves many reviews, so an MR that got rate-limited
+    # would otherwise demote every later review to the fallback model forever.
+    reset_fallback_provider()
     try:
         return await _run_review(mr_url, metrics)
     except Exception as e:
@@ -221,6 +255,12 @@ async def process_mr(mr_url: str):
         raise
     finally:
         metrics.duration_seconds = round(time.monotonic() - run_start, 3)
+        # Read the failover latch here rather than at the switch site: the finally
+        # block is the one place every exit path passes through, so a run that
+        # crashed after failing over still reports that it did.
+        if is_fallback_active():
+            metrics.model_fallback_used = True
+            metrics.model_fallback_model = get_fallback_model()
         await send_run_analytics(metrics)
 
 
@@ -233,8 +273,49 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     # returns None (and the review runs untraced) whenever it can't be used.
     get_langfuse_handler()
 
+    # Identity FIRST — before anything that can fail. parse_gitlab_mr_url is pure
+    # string parsing (no network), and metrics.model is an env read, so both can
+    # run here. They used to sit *after* the LLM pre-flight and MCP init, which
+    # meant every early failure — most commonly the pre-flight itself, when the
+    # endpoint is throttled or hanging — emitted an event with project_path,
+    # mr_id and model all NULL. Those runs were unattributable: a dashboard
+    # grouped by project silently dropped them, so a failing reviewer looked like
+    # a reviewer that simply hadn't run.
+    mr_info = parse_gitlab_mr_url(mr_url)
+    if not mr_info:
+        metrics.status = "config_error"
+        record_error(metrics, "config", f"could not parse a GitLab MR URL from {mr_url!r}")
+        return 1
+
+    gitlab_url = mr_info["domain"]
+    project_path = mr_info["project_path"]
+    mr_id = mr_info["mr_id"]
+    metrics.project_path = project_path
+    metrics.mr_id = str(mr_id)
+    # The configured (primary) model. If the run later fails over, that is
+    # reported separately via model_fallback_used / model_fallback_model rather
+    # than by rewriting this field.
+    metrics.model = get_default_model()
+
+    print(f"📦 Project: {project_path}")
+    print(f"🔢 MR ID: {mr_id}\n")
+
+    # Get GitLab credentials
+    gitlab_token = os.getenv("GITLAB_TOKEN")
+    if not gitlab_token:
+        print("Error: GITLAB_TOKEN not found in environment variables.")
+        print("Please set GITLAB_TOKEN in your .env file.")
+        metrics.status = "config_error"
+        record_error(metrics, "config", "GITLAB_TOKEN is not set")
+        return 1
+
     # Fail fast if the LLM endpoint is unreachable — nothing below works without it.
-    if not await llm_preflight():
+    preflight_error = await llm_preflight()
+    if preflight_error is not None:
+        metrics.status = "config_error"
+        record_error(
+            metrics, "preflight", describe_error(preflight_error), exc=preflight_error
+        )
         return 1
 
     # Initialize MCP toolkits
@@ -245,34 +326,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         print(f"⚠️  Warning: Failed to initialize some MCP toolkits: {describe_error(e)}")
         print("   Continuing with available tools...\n")
         record_error(metrics, "mcp_init", describe_error(e), exc=e)
-    
-    # Record the model up front so even an early-exit run reports which model was
-    # configured (matches the reviewer's default in langchain_config / CLAUDE.md).
-    metrics.model = os.getenv("DEFAULT_LLM_MODEL", "deepseek/deepseek-v4-pro")
 
-    # Parse MR URL
-    mr_info = parse_gitlab_mr_url(mr_url)
-    if not mr_info:
-        metrics.status = "config_error"
-        return 1
-
-    # Get GitLab credentials
-    gitlab_token = os.getenv("GITLAB_TOKEN")
-    if not gitlab_token:
-        print("Error: GITLAB_TOKEN not found in environment variables.")
-        print("Please set GITLAB_TOKEN in your .env file.")
-        metrics.status = "config_error"
-        return 1
-
-    gitlab_url = mr_info["domain"]
-    project_path = mr_info["project_path"]
-    mr_id = mr_info["mr_id"]
-    metrics.project_path = project_path
-    metrics.mr_id = str(mr_id)
-
-    print(f"📦 Project: {project_path}")
-    print(f"🔢 MR ID: {mr_id}\n")
-    
     # Fetch MR information
     print("📥 Fetching MR information...")
     mr_data = await get_gitlab_mr_info(gitlab_url, project_path, mr_id, gitlab_token)
@@ -426,6 +480,10 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
 
     # Process files concurrently in batches of 5
     all_comments = []
+    # file path -> model that reviewed it, so each posted comment can be
+    # attributed to the model that actually produced it (see model_by_file in
+    # process_single_file). A run that fails over mid-way has both.
+    model_by_file: dict = {}
     file_error_count = 0  # files whose review raised — drives the non-zero exit code
     batch_size = max(1, int_env("FILE_BATCH_SIZE", 5))
     total_batches = (len(changes_to_review) + batch_size - 1) // batch_size
@@ -479,6 +537,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                 thread_id=thread_id,
                 mr_id=mr_id,
                 head_sha=head_sha,
+                model_by_file=model_by_file,
             )
             for change in batch
         ]
@@ -807,13 +866,22 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                     context=f"{file_name}:{line}",
                 )
             else:
+                canonical = real_path or file_name
                 metrics.posted_comments.append({
                     "note_id": note_id,
                     "discussion_id": posted_note.get("discussion_id"),
                     "comment_type": posted_note.get("comment_type"),
-                    "file": real_path or file_name,  # canonical MR path when resolved
+                    "file": canonical,  # canonical MR path when resolved
                     "line": line,
                     "severity": severity,
+                    # The model that reviewed this file. Falls back to whatever is
+                    # active now if the path can't be matched (e.g. the comment
+                    # reviewer rewrote file_name while synthesizing its output).
+                    "model": (
+                        model_by_file.get(canonical)
+                        or model_by_file.get(file_name)
+                        or resolve_effective_model()
+                    ),
                 })
                 if reactions_enabled:
                     failed_emojis = await add_note_award_emojis(

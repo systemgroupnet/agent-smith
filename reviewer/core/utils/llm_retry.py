@@ -1,29 +1,46 @@
-"""Retry transient LLM / gateway failures with backoff.
+"""Parse, classify and retry transient LLM / gateway failures.
 
 The reviewer's LLM traffic egresses through a corporate security proxy (the
 ``OutboundHTTPProxy`` that the token-provider reverse proxy forwards through on
-its way to openrouter.ai). Under a burst of concurrent automated requests that
-proxy can deny with HTTP 403 ``{"error": "Access denied by security policy"}``.
-That block is **transient** — it clears after a short cooldown — unlike a
-daily spend / key-quota cap, which is hard until the daily reset.
+its way to the model endpoint). Under a burst of concurrent automated requests
+that proxy can deny with HTTP 403 ``{"error": "Access denied by security
+policy"}``, and the *provider* itself can deny with HTTP 429. Both are
+transient — they clear after a cooldown — unlike a daily spend / call-count cap,
+which is hard until reset.
 
-So the policy here is: retry transient failures (security-policy 403s, malformed
-or truncated upstream bodies, 429s, momentary gateway/network errors) with
-exponential backoff + jitter, but **never** retry a hard limit/quota denial —
-surface those immediately so the run fails fast instead of hammering a wall.
+So the policy is:
 
-Errors are matched on their string form so we don't couple to the OpenRouter
-SDK's exception classes (the security-policy 403 currently surfaces as a
-``ResponseValidationError`` because its body isn't the shape the SDK expects).
-That string is built by :func:`_error_text`, which includes each exception's
-**type name** and walks the ``__cause__`` chain — see its docstring for why the
-message alone is not enough.
+* **Parse** the failure into :class:`LLMErrorInfo` (HTTP status + text) rather
+  than pattern-matching a message in isolation. Classification is deliberately
+  **provider-agnostic**: HTTP 429 is the rate-limit signal, and the provider's own
+  numeric code is captured for logs only — see :func:`parse_llm_error`.
+* **Retry** transient failures after a **random** wait (LLM_RETRY_WAIT_MIN_S ..
+  LLM_RETRY_WAIT_MAX_S, default 0.5–5s). The wait is random rather than a fixed
+  exponential ladder because the reviewer runs many file reviews concurrently:
+  they collide on the same rate limit at the same instant, and a deterministic
+  backoff makes them collide again on every retry. Independent random waits
+  spread the herd out.
+* **Fall back** to a second provider when a rate limit survives the whole retry
+  budget — see :func:`with_llm_retry` and ``langchain_config``'s fallback latch.
+* **Never** retry a hard limit/quota denial or a provider config block; surface
+  those immediately so the run fails fast instead of hammering a wall.
 """
+
+from __future__ import annotations
 
 import asyncio
 import os
 import random
-from typing import Optional
+import re
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+from core.config.langchain_config import (
+    activate_fallback_provider,
+    describe_fallback_provider,
+    fallback_configured,
+    is_fallback_active,
+)
 
 # Hard denials — retrying is futile until a reset; surface immediately.
 _HARD_LIMIT_SIGNATURES = (
@@ -49,7 +66,21 @@ _CONFIG_BLOCK_SIGNATURES = (
     "data policy",
 )
 
-# Transient signatures worth retrying.
+# Rate limiting / concurrency throttles — transient, and the trigger for the
+# fallback provider once the retry budget is spent.
+_RATE_LIMIT_SIGNATURES = (
+    "too many requests",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "concurrency",
+    "concurrent",
+    "reduce your concurrency",
+    "请求过快",  # "requests too fast" (1305)
+    "并发",      # "concurrency" (1302/1303)
+)
+
+# Other transient signatures worth retrying.
 _TRANSIENT_SIGNATURES = (
     "access denied by security policy",
     "security policy",
@@ -57,8 +88,6 @@ _TRANSIENT_SIGNATURES = (
     "eof while parsing",
     "forbidden",
     " 403",
-    "429",
-    "too many requests",
     "temporarily unavailable",
     "timeout",
     "timed out",
@@ -88,6 +117,14 @@ _TRANSIENT_SIGNATURES = (
 _TIMEOUT_SIGNATURES = ("timeout", "timed out")
 _TIMEOUT_MAX_ATTEMPTS = 2
 
+# "Error code: 429", "status_code=429", "HTTP 503".
+_STATUS_RE = re.compile(r"(?:error code|status[ _]?code|status|http)\W{0,3}([45]\d\d)\b", re.I)
+# The provider's own code in a JSON body: {"error":{"code":"1302",...}}. Purely
+# diagnostic — it makes a log line say "429/1302" instead of "429" — and never an
+# input to classification, since the integers mean different things per provider.
+# Anchored to four digits so it can't capture the HTTP status from `"code": 429`.
+_PROVIDER_CODE_RE = re.compile(r"['\"]code['\"]\s*:\s*['\"]?(\d{4})['\"]?")
+
 
 def _int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -109,6 +146,22 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _causes(err: BaseException):
+    """Yield ``err`` and its ``__cause__`` chain, depth-capped.
+
+    Only ``__cause__`` is followed (explicit ``raise ... from``, which is how
+    httpx/httpcore and the OpenAI SDK chain), never ``__context__`` — that would
+    drag in whatever unrelated exception happened to be in flight and could
+    misread a transient failure as a hard quota block.
+    """
+    current: Optional[BaseException] = err
+    for _ in range(6):  # chains are short, and never trust a cycle
+        if current is None:
+            return
+        yield current
+        current = current.__cause__
+
+
 def _error_text(err: BaseException) -> str:
     """Lowercased text to classify an error by: every exception in its
     ``__cause__`` chain, each contributing its **type name** and its message.
@@ -121,41 +174,140 @@ def _error_text(err: BaseException) -> str:
     5-minute read timeout — the textbook transient failure this module exists for
     — was treated as non-retryable and re-raised on the first attempt. The name
     "ReadTimeout" contains "timeout"; the message contains nothing.
-
-    Only ``__cause__`` is followed (explicit ``raise ... from``, which is how
-    httpx/httpcore chain), never ``__context__`` — that would drag in whatever
-    unrelated exception happened to be in flight and could misread a transient
-    failure as a hard quota block.
     """
     parts: list[str] = []
-    current: Optional[BaseException] = err
-    for _ in range(6):  # depth cap: chains are short, and never trust a cycle
-        if current is None:
-            break
-        parts.append(type(current).__name__)
-        parts.append(str(current))
-        current = current.__cause__
+    for exc in _causes(err):
+        parts.append(type(exc).__name__)
+        parts.append(str(exc))
     return " ".join(parts).lower()
+
+
+def _status_code(err: BaseException, text: str) -> Optional[int]:
+    """HTTP status for the failure, read from the exception before the text.
+
+    The OpenAI SDK's ``APIStatusError`` carries ``.status_code`` (and a
+    ``.response``), which is exact; the regex over the message is the fallback
+    for errors that only stringify their status (proxies, wrapped errors).
+    """
+    for exc in _causes(err):
+        for candidate in (
+            getattr(exc, "status_code", None),
+            getattr(getattr(exc, "response", None), "status_code", None),
+        ):
+            if isinstance(candidate, int) and 100 <= candidate <= 599:
+                return candidate
+            if isinstance(candidate, str) and candidate.strip().isdigit():
+                return int(candidate.strip())
+    match = _STATUS_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def _provider_code(err: BaseException, text: str) -> Optional[str]:
+    """The provider's own error code (e.g. z.ai's ``1302``), if the body carried
+    one. Diagnostic only — see :func:`parse_llm_error`; nothing branches on it."""
+    for exc in _causes(err):
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error")
+            raw = (error or {}).get("code") if isinstance(error, dict) else body.get("code")
+            if raw is not None and str(raw).strip().isdigit():
+                return str(raw).strip()
+    match = _PROVIDER_CODE_RE.search(text)
+    return match.group(1) if match else None
+
+
+@dataclass(frozen=True)
+class LLMErrorInfo:
+    """What a failed LLM call actually was, parsed once and reused by every
+    predicate below so the classifications can never disagree with each other."""
+
+    text: str
+    status_code: Optional[int]
+    provider_code: Optional[str]
+    is_rate_limit: bool
+    is_hard_limit: bool
+    is_config_block: bool
+    is_timeout: bool
+    is_retryable: bool
+
+    @property
+    def label(self) -> str:
+        """Short ``429/1302``-style tag for logs."""
+        parts = [str(p) for p in (self.status_code, self.provider_code) if p]
+        return "/".join(parts) if parts else "unclassified"
+
+
+def parse_llm_error(err: BaseException) -> LLMErrorInfo:
+    """Classify a failed LLM call.
+
+    **HTTP 429 alone decides a rate limit.** The provider's own error code is
+    extracted for the log label and never for a decision, because those codes are
+    provider-specific and the endpoint behind OPENROUTER_BASE_URL is whatever the
+    deployment points at. z.ai's numbering (1302 concurrency, 1303 QPS, 1304 daily
+    call cap, 1305 frequency) means nothing on OpenRouter or a vendor API that
+    reuses the same integers for something else — reading them universally turns
+    another provider's unrelated ``"code": 1304`` into a fabricated hard block.
+
+    Ordering still matters. A rate limit is decided **first** and suppresses the
+    hard-limit match, because throttle bodies routinely contain the word "limit"
+    (z.ai's 1302 literally says "contact support to increase the limit"). Without
+    that precedence a recoverable 429 reads as an exhausted quota: never retried,
+    never failed over, and — via ``is_provider_hard_block`` — enough to abort the
+    whole run through main.py's circuit breaker. A hard denial that genuinely is
+    one arrives as 402/403 with credit/quota wording, which still classifies hard;
+    a *429* that means "out of quota" simply costs the retry budget and then fails
+    over, which is the right response to it anyway.
+    """
+    text = _error_text(err)
+    status = _status_code(err, text)
+    code = _provider_code(err, text)  # label only — never an input below
+
+    is_rate_limit = status == 429 or any(sig in text for sig in _RATE_LIMIT_SIGNATURES)
+    is_config_block = any(sig in text for sig in _CONFIG_BLOCK_SIGNATURES)
+    is_hard_limit = not is_rate_limit and any(sig in text for sig in _HARD_LIMIT_SIGNATURES)
+    is_timeout = any(sig in text for sig in _TIMEOUT_SIGNATURES)
+
+    transient = (
+        is_rate_limit
+        or (status is not None and status in (408, 502, 503, 504))
+        or any(sig in text for sig in _TRANSIENT_SIGNATURES)
+    )
+    is_retryable = transient and not is_hard_limit and not is_config_block
+
+    return LLMErrorInfo(
+        text=text,
+        status_code=status,
+        provider_code=code,
+        is_rate_limit=is_rate_limit,
+        is_hard_limit=is_hard_limit,
+        is_config_block=is_config_block,
+        is_timeout=is_timeout,
+        is_retryable=is_retryable,
+    )
+
+
+def is_rate_limit_error(err: BaseException) -> bool:
+    """True for throttles — any HTTP 429, whoever the provider is — plus the
+    textual variants for endpoints that don't surface a clean status. Retryable,
+    and the trigger for switching to the fallback provider."""
+    return parse_llm_error(err).is_rate_limit
 
 
 def is_hard_limit_error(err: BaseException) -> bool:
     """True for daily-limit / quota / payment denials — never retry these."""
-    text = _error_text(err)
-    return any(sig in text for sig in _HARD_LIMIT_SIGNATURES)
+    return parse_llm_error(err).is_hard_limit
 
 
 def is_provider_config_error(err: BaseException) -> bool:
     """True for OpenRouter data-policy / guardrail 'no matching endpoints' blocks —
     an account/model configuration issue, deterministic and not a code bug."""
-    text = _error_text(err)
-    return any(sig in text for sig in _CONFIG_BLOCK_SIGNATURES)
+    return parse_llm_error(err).is_config_block
 
 
 def is_timeout_error(err: BaseException) -> bool:
     """True for timeout-class failures, which retry on a tighter attempt cap
     (each attempt burns a full request-timeout window)."""
-    text = _error_text(err)
-    return any(sig in text for sig in _TIMEOUT_SIGNATURES)
+    return parse_llm_error(err).is_timeout
 
 
 def describe_error(err: BaseException) -> str:
@@ -171,68 +323,145 @@ def describe_error(err: BaseException) -> str:
 def is_provider_hard_block(err: BaseException) -> bool:
     """Account-level hard block (data-policy/guardrail OR limit/quota): every
     request will fail identically, so the run should stop, not grind through
-    every file."""
-    return is_hard_limit_error(err) or is_provider_config_error(err)
+    every file. A rate limit is explicitly *not* one of these — it clears."""
+    info = parse_llm_error(err)
+    return info.is_hard_limit or info.is_config_block
 
 
 def is_retryable_llm_error(err: BaseException) -> bool:
     """Retryable iff the error looks transient AND is not a hard limit/quota
-    denial or a config block. Hard blocks win, so a quota/guardrail error is
-    never treated as transient."""
-    if is_hard_limit_error(err) or is_provider_config_error(err):
-        return False
-    text = _error_text(err)
-    return any(sig in text for sig in _TRANSIENT_SIGNATURES)
+    denial or a config block."""
+    return parse_llm_error(err).is_retryable
 
 
 def maybe_print_traceback(exc: BaseException, *, indent: str = "     ") -> None:
     """Print a traceback for an *unexpected* error, but replace it with a concise,
-    actionable one-liner for known account-level blocks (data-policy/guardrail,
-    limit/quota) — those are configuration issues, not code bugs, so the stack is
-    noise. Must be called from within the ``except`` block handling ``exc``."""
-    if is_provider_config_error(exc):
+    actionable one-liner for known provider-side conditions (data-policy/guardrail,
+    limit/quota, rate limit) — those are not code bugs, so the stack is noise.
+    Must be called from within the ``except`` block handling ``exc``."""
+    info = parse_llm_error(exc)
+    if info.is_config_block:
         print(
             f"{indent}↳ OpenRouter has no provider matching your data policy/guardrail for the "
             f"configured model. Fix at openrouter.ai/settings/privacy, or change DEFAULT_LLM_MODEL "
             f"/ OPENROUTER_PROVIDER. (not a code error)"
         )
         return
-    if is_hard_limit_error(exc):
+    if info.is_hard_limit:
         print(f"{indent}↳ Provider hard limit/quota reached — not a code error; retry after reset or raise the limit.")
+        return
+    if info.is_rate_limit:
+        print(
+            f"{indent}↳ Provider rate/concurrency limit ({info.label}) survived every retry"
+            f"{'' if fallback_configured() else ' and no fallback provider is configured'}"
+            f" — not a code error; lower FILE_BATCH_SIZE or set FALLBACK_LLM_MODEL."
+        )
         return
     import traceback
     print(f"{indent}Traceback: {traceback.format_exc()}")
 
 
-async def with_llm_retry(operation, *, label: str = "LLM call"):
+def retry_wait_seconds() -> float:
+    """A random wait in [LLM_RETRY_WAIT_MIN_S, LLM_RETRY_WAIT_MAX_S] (0.5–5s).
+
+    Random, not exponential: the reviewer runs several file reviews (and, for
+    service files, two sub-agents each) concurrently, so they hit a concurrency
+    limit simultaneously. A deterministic backoff re-synchronises them on every
+    attempt; independent random draws spread the retries out.
+    """
+    low = max(0.0, _float_env("LLM_RETRY_WAIT_MIN_S", 0.5))
+    high = _float_env("LLM_RETRY_WAIT_MAX_S", 5.0)
+    if high < low:
+        high = low
+    return random.uniform(low, high)
+
+
+def _switch_to_fallback(label: str, info: LLMErrorInfo) -> bool:
+    """Flip the process-wide fallback latch. Returns False when no fallback is
+    configured, in which case the caller keeps its normal retry/raise behavior.
+
+    The latch is global and sticky on purpose: with several file reviews in
+    flight, a per-call switch would make every other agent spend its own full
+    retry budget against a provider already known to be throttling us.
+    """
+    if not fallback_configured():
+        return False
+    if activate_fallback_provider():
+        print(
+            f"  🔀 [llm-fallback] {label}: rate limited ({info.label}) after every attempt on the "
+            f"primary provider — switching the rest of this run to {describe_fallback_provider()}"
+        )
+    else:
+        print(f"  🔀 [llm-fallback] {label}: rebuilding on the already-active fallback provider")
+    return True
+
+
+async def with_llm_retry(
+    operation: Callable[[], object],
+    *,
+    label: str = "LLM call",
+    on_fallback: Optional[Callable[[], None]] = None,
+):
     """Await ``operation()`` (a zero-arg coroutine factory), retrying transient
-    failures with exponential backoff + jitter.
+    failures after a random wait, and failing over to the fallback provider when
+    a rate limit outlives the retry budget.
 
-    Re-raises immediately on a hard limit/quota denial or any non-transient
-    error, and re-raises the last error after the final attempt. ``operation``
-    must return a *fresh* awaitable each call (e.g. ``lambda: x.ainvoke(...)``)
-    so each retry issues a new request.
+    ``operation`` must return a *fresh* awaitable each call (e.g.
+    ``lambda: chain.ainvoke(...)``) so each retry issues a new request.
 
-    Timeout-class failures are capped at ``_TIMEOUT_MAX_ATTEMPTS`` regardless of
-    LLM_RETRY_ATTEMPTS, since each of their attempts costs a full request-timeout
-    window rather than failing fast.
+    ``on_fallback`` rebuilds the caller's model-bound runnable — the chain or
+    agent executor was constructed against the primary provider, so it has to be
+    reconstructed for the swap to take effect. The retry budget resets after a
+    switch, giving the fallback a full set of attempts of its own. Call sites
+    that pass nothing simply never fail over.
 
-    Env knobs: LLM_RETRY_ATTEMPTS (default 3), LLM_RETRY_BASE_DELAY_S (default 3).
+    Re-raises immediately on a hard limit/quota denial, a provider config block,
+    or any non-transient error, and re-raises the last error after the final
+    attempt. Timeout-class failures are capped at ``_TIMEOUT_MAX_ATTEMPTS``
+    regardless of LLM_RETRY_ATTEMPTS, since each of their attempts costs a full
+    request-timeout window rather than failing fast.
+
+    Env knobs: LLM_RETRY_ATTEMPTS (default 3), LLM_RETRY_WAIT_MIN_S (0.5),
+    LLM_RETRY_WAIT_MAX_S (5).
     """
     attempts = max(1, _int_env("LLM_RETRY_ATTEMPTS", 3))
-    base_delay = max(0.0, _float_env("LLM_RETRY_BASE_DELAY_S", 3.0))
+    switched = False
+    attempt = 0
 
-    for attempt in range(1, attempts + 1):
+    while True:
+        attempt += 1
         try:
             return await operation()
         except Exception as e:  # noqa: BLE001 — classify then re-raise
-            budget = min(attempts, _TIMEOUT_MAX_ATTEMPTS) if is_timeout_error(e) else attempts
-            if attempt >= budget or not is_retryable_llm_error(e):
+            info = parse_llm_error(e)
+            budget = min(attempts, _TIMEOUT_MAX_ATTEMPTS) if info.is_timeout else attempts
+            exhausted = attempt >= budget
+
+            # A throttle that outlived the whole budget is what the fallback
+            # provider exists for. Only rate limits trigger it: a timeout or a
+            # gateway blip says nothing about the provider being over capacity.
+            #
+            # ``is_fallback_active()`` short-circuits the budget: with a batch of
+            # file reviews in flight they are all being throttled at once, so once
+            # any one of them has switched, the rest should join immediately
+            # rather than each spending three more attempts proving the primary is
+            # still busy. Their runnables are still bound to the primary client,
+            # so joining means rebuilding — the latch alone changes nothing.
+            if info.is_rate_limit and not switched and on_fallback is not None:
+                if (exhausted or is_fallback_active()) and _switch_to_fallback(label, info):
+                    on_fallback()
+                    switched = True
+                    attempt = 0
+                    await asyncio.sleep(retry_wait_seconds())
+                    continue
+
+            if exhausted or not info.is_retryable:
                 raise
-            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, base_delay)
+
+            delay = retry_wait_seconds()
             print(
                 f"  ⏳ [llm-retry] {label}: transient failure "
-                f"(attempt {attempt}/{budget}) — retrying in {delay:.1f}s: "
+                f"({info.label}, attempt {attempt}/{budget}) — retrying in {delay:.1f}s: "
                 f"{describe_error(e)[:140]}"
             )
             await asyncio.sleep(delay)

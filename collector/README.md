@@ -97,6 +97,10 @@ tables:
   filters/groups on (project, status, review_type, counts, duration, timestamps,
   `reviewer_version`), denormalized `error_count`/`warning_count` for alerting,
   plus a `raw_json` **JSONB** column preserving the full payload.
+  `model` is the *configured* model; `model_fallback_used` (bool) and
+  `model_fallback_model` say whether a provider rate limit forced the run onto a
+  second provider partway through. Such a run is **mixed** — filter it out of a
+  model-quality comparison, or use per-comment `review_comments.model` instead.
 - `run_events` — one row per captured error/warning (`severity` `error`/`warning`,
   `stage`, `context`, `message`, `traceback`, `occurred_at`), keyed to the run by
   `run_id` + `review_run_id`. Kept separate from the runs so failures/warnings are
@@ -104,8 +108,11 @@ tables:
 - `review_comments` — one row per review comment actually posted to a MR (from the
   run event's `posted_comments` array): `note_id` (GitLab note id, **unique** —
   the reaction join key), `discussion_id`, `comment_type` (`inline`/`note`),
-  `file`, `line`, `severity`, `mr_author_username`, keyed to the run. Upserted on
-  `note_id` so a re-emitted run is idempotent.
+  `file`, `line`, `severity`, `model`, `mr_author_username`, keyed to the run.
+  Upserted on `note_id` so a re-emitted run is idempotent. `model` is the model
+  that actually reviewed that comment's file — the only per-comment attribution
+  there is, and the one to group by when comparing models. It is NULL for rows
+  written before migration `0009`, which means "unknown", not "no failover".
 - `comment_scores` — one row per human 1–5 rating gathered from the emoji webhook:
   `note_id` (joins `review_comments`), `project_id`/`project_path` (the project the
   comment lives on), `mr_id`, reacting `user_id`/`username`/`user_name`, `emoji`
