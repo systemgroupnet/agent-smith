@@ -9,9 +9,48 @@ PostgreSQL directly (datasource uid `ffrgyjxlmntogb`).
 | `rating-stats.json` | Rating Stats | `cfsrndx5q1la8d` | Are the review comments any good — human 1–5 ratings, replies, worst-rated comments, per-model quality |
 | `run-stats.json` | Run Stats | `efrh010c710jkf` | Is the reviewer healthy — run outcomes, durations, throughput, failover |
 
-Update flow: edit in Grafana → **Dashboard settings → JSON Model** → copy over the
-file here → commit. Or edit the file and import it. Keep the `uid` and panel `id`s
-stable so an import updates the existing dashboard instead of creating a new one.
+## Applying a file to Grafana
+
+Use **Dashboards → New → Import → paste the JSON → Load → Import (overwrite)**.
+Because the file keeps its `uid`, that updates the existing dashboard in place
+rather than creating a copy. Panel `id`s are stable for the same reason — keep
+them.
+
+Do **not** paste into *Dashboard settings → JSON Model*: that path submits the
+model as an edit of the currently-loaded dashboard and is what produces the
+"someone else has updated this dashboard" error described below.
+
+### "Someone else has updated this dashboard" (when nobody has)
+
+Grafana version-locks dashboards optimistically. Every save increments a
+`version` counter, and a save whose payload carries a *different* version than
+the one stored is rejected as a concurrent edit — whether or not anyone else
+touched it. Editing a saved file and pasting it back is the usual way to trip
+this: the file's `version` is whatever it was when exported, and Grafana has
+moved on.
+
+These files therefore carry **no `version` field and `"id": null`** on purpose:
+
+* `version` — Grafana's optimistic lock. Stale by definition in a file, and the
+  sole cause of the phantom-conflict error. Omitted, so Grafana applies the
+  import to whatever version it currently holds.
+* `id` — the internal database row id, meaningful only to one Grafana instance.
+  `null` is what the import API expects; `uid` is the portable identity.
+
+If you re-export from Grafana to update a file here, **strip both again** before
+committing, or the next person hits the same error:
+
+```bash
+python3 - <<'PY'
+import json, glob
+for f in glob.glob("*.json"):
+    d = json.load(open(f)); d["id"] = None; d.pop("version", None)
+    json.dump(d, open(f, "w"), indent=2)
+PY
+```
+
+Update flow: edit in Grafana → **Dashboard settings → JSON Model** → copy the
+model into the file here → run the snippet above → commit.
 
 ## Things that will bite you
 

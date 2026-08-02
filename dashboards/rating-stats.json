@@ -18,7 +18,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 61,
+  "id": null,
   "links": [],
   "panels": [
     {
@@ -1637,6 +1637,5 @@
   "timepicker": {},
   "timezone": "browser",
   "title": "Rating Stats",
-  "uid": "cfsrndx5q1la8d",
-  "version": 31
+  "uid": "cfsrndx5q1la8d"
 }

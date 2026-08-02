@@ -18,7 +18,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 55,
+  "id": null,
   "links": [],
   "panels": [
     {
@@ -1776,6 +1776,5 @@
   "timepicker": {},
   "timezone": "browser",
   "title": "Run Stats",
-  "uid": "efrh010c710jkf",
-  "version": 72
+  "uid": "efrh010c710jkf"
 }
