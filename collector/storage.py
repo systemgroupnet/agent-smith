@@ -170,6 +170,55 @@ review_comments = Table(
     Index("idx_review_comments_project_mr", "project_path", "mr_id"),
 )
 
+# One row per review-summary comment the reviewer posted (the orientation note a
+# human reviewer reads before the findings). Kept in its own table rather than as
+# a ``comment_type`` on review_comments because a summary and a finding are
+# different artifacts: mixing them would silently change the meaning of every
+# "comments posted" count and every rating average that already exists. Same
+# reasoning splits their ratings into summary_scores below — separation at write
+# time means no query can accidentally combine them by forgetting a filter.
+review_summaries = Table(
+    "review_summaries",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("received_at", String, nullable=False),  # server-side ingest time (ISO UTC)
+    Column("run_id", String),           # reviewer run uuid (review_runs.run_id)
+    Column("review_run_id", Integer),   # review_runs.id of the owning run
+    Column("project_path", String),
+    Column("mr_id", String),
+    Column("note_id", BigInteger, nullable=False),  # GitLab note id (webhook awardable_id)
+    Column("discussion_id", String),    # the summary's thread, for reply matching
+    Column("model", String),            # model that produced the summary
+    Column("mr_author_username", String),
+    Index("idx_review_summaries_run_id", "run_id"),
+    Index("idx_review_summaries_note_id", "note_id", unique=True),
+    Index("idx_review_summaries_project_mr", "project_path", "mr_id"),
+)
+
+# Human 1–5 ratings of a *review summary*. Structurally identical to
+# comment_scores and deliberately separate from it — see review_summaries.
+summary_scores = Table(
+    "summary_scores",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("received_at", String, nullable=False),
+    Column("note_id", BigInteger, nullable=False),  # joins review_summaries.note_id
+    Column("project_id", Integer),
+    Column("project_path", String),
+    Column("mr_id", Integer),  # Integer to match comment_scores — same webhook source
+    Column("user_id", Integer),
+    Column("username", String),
+    Column("user_name", String),
+    Column("emoji", String),
+    Column("score", Integer),
+    Column("awarded_at", String),
+    Index("idx_summary_scores_note_id", "note_id"),
+    Index(
+        "idx_summary_scores_unique", "note_id", "user_id", "emoji", unique=True
+    ),
+    Index("idx_summary_scores_project", "project_path"),
+)
+
 # One row per human 1–5 rating of a review comment, gathered via GitLab's emoji
 # webhook: awarding :one:..:five: on a note upserts a row (unique per
 # note+user+emoji, so webhook redeliveries are idempotent); revoking deletes it,
@@ -225,6 +274,11 @@ comment_replies = Table(
     Column("noted_at", String),           # note created_at from GitLab
     Column("updated_at", String),
     Column("action", String),             # "create" | "update"
+    # Which artifact's thread this reply belongs to: "finding" (review_comments)
+    # or "summary" (review_summaries). Replies to both are worth capturing, but
+    # they answer different questions, so they stay distinguishable here rather
+    # than being silently pooled.
+    Column("parent_kind", String),
     Index("idx_comment_replies_note_id", "note_id", unique=True),
     Index("idx_comment_replies_discussion_id", "discussion_id"),
     Index("idx_comment_replies_parent_note_id", "parent_note_id"),
@@ -302,6 +356,8 @@ def insert_event(payload: dict[str, Any]) -> int:
 
     posted = payload.get("posted_comments")
     posted = posted if isinstance(posted, list) else []
+    posted_summary = payload.get("posted_summary")
+    posted_summary = posted_summary if isinstance(posted_summary, dict) else None
     project_path = values.get("project_path")
     mr_id = values.get("mr_id")
     mr_author = payload.get("mr_author_username")
@@ -361,6 +417,34 @@ def insert_event(payload: dict[str, Any]) -> int:
             )
             conn.execute(stmt)
 
+        # The review summary goes to its own table, never review_comments — see
+        # the review_summaries definition. Upserted on note_id for the same
+        # re-emission reasons as the comments above.
+        summary_note_id = _as_int((posted_summary or {}).get("note_id"))
+        if summary_note_id is not None:
+            stmt = pg_insert(review_summaries).values([{
+                "received_at": received_at,
+                "run_id": _text(run_id),
+                "review_run_id": review_run_id,
+                "project_path": project_path,
+                "mr_id": mr_id,
+                "note_id": summary_note_id,
+                "discussion_id": _text(posted_summary.get("discussion_id")),
+                "model": _text(posted_summary.get("model")),
+                "mr_author_username": mr_author,
+            }])
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["note_id"],
+                set_={
+                    "run_id": stmt.excluded.run_id,
+                    "review_run_id": stmt.excluded.review_run_id,
+                    "discussion_id": stmt.excluded.discussion_id,
+                    "model": stmt.excluded.model,
+                    "mr_author_username": stmt.excluded.mr_author_username,
+                },
+            )
+            conn.execute(stmt)
+
     return review_run_id
 
 
@@ -385,6 +469,33 @@ def _review_comment_exists(note_id: int) -> bool:
     return row is not None
 
 
+def _review_summary_exists(note_id: int) -> bool:
+    """True if ``note_id`` is a review *summary* comment the reviewer posted."""
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(review_summaries.c.id)
+            .where(review_summaries.c.note_id == note_id)
+            .limit(1)
+        ).first()
+    return row is not None
+
+
+def _scores_table_for(note_id: int):
+    """Which scores table a rating of ``note_id`` belongs in, or None to ignore.
+
+    This is where findings and summaries are kept apart: the target table is
+    decided by which artifact the note actually is, so a summary rating can never
+    land in ``comment_scores`` and skew a findings average. A note that is
+    neither (the review marker, an unrelated MR comment) returns None and the
+    event is dropped, exactly as before.
+    """
+    if _review_comment_exists(note_id):
+        return comment_scores
+    if _review_summary_exists(note_id):
+        return summary_scores
+    return None
+
+
 def _review_comment_by_discussion(discussion_id: str) -> Optional[dict[str, Any]]:
     """The tracked review comment that owns ``discussion_id``, or None.
 
@@ -406,7 +517,25 @@ def _review_comment_by_discussion(discussion_id: str) -> Optional[dict[str, Any]
             .order_by(review_comments.c.id.asc())
             .limit(1)
         ).mappings().first()
-    return dict(row) if row is not None else None
+    if row is not None:
+        return {**dict(row), "parent_kind": "finding"}
+
+    # Not a findings thread — it may be the review summary's. Replies to the
+    # summary are worth capturing too, but they answer a different question, so
+    # the kind travels with the row instead of the two being pooled.
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(
+                review_summaries.c.note_id,
+                review_summaries.c.run_id,
+                review_summaries.c.project_path,
+                review_summaries.c.mr_id,
+            )
+            .where(review_summaries.c.discussion_id == discussion_id)
+            .order_by(review_summaries.c.id.asc())
+            .limit(1)
+        ).mappings().first()
+    return {**dict(row), "parent_kind": "summary"} if row is not None else None
 
 
 def _event_row(
@@ -553,7 +682,9 @@ def record_note_event(payload: dict[str, Any]) -> dict[str, Any]:
     # The agent's own comments fire this hook as well (they open the thread), and
     # a redelivery could arrive after the run event created their review_comments
     # row — so drop any note we posted ourselves before the discussion lookup.
-    if _review_comment_exists(note_id):
+    # The summary opens a thread the same way, so it must be dropped here too or
+    # the agent's own summary would be recorded as a reply to itself.
+    if _review_comment_exists(note_id) or _review_summary_exists(note_id):
         return {"status": "ignored", "reason": "own review comment, not a reply"}
 
     parent = _review_comment_by_discussion(discussion_id)
@@ -572,6 +703,7 @@ def record_note_event(payload: dict[str, Any]) -> dict[str, Any]:
         "note_id": note_id,
         "discussion_id": discussion_id,
         "parent_note_id": _as_int(parent.get("note_id")),
+        "parent_kind": _text(parent.get("parent_kind")),
         "run_id": _text(parent.get("run_id")),
         "project_id": _as_int(payload.get("project_id")),
         "project_path": (
@@ -610,6 +742,7 @@ def record_note_event(payload: dict[str, Any]) -> dict[str, Any]:
         "status": "recorded",
         "note_id": note_id,
         "parent_note_id": row["parent_note_id"],
+        "parent_kind": row["parent_kind"],
         "discussion_id": discussion_id,
     }
 
@@ -672,14 +805,17 @@ def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
     mr = mr if isinstance(mr, dict) else {}
 
     if action == "revoke":
+        # Delete from both tables: a note is only ever in one of them, and this
+        # also clears rows written before the finding/summary split.
         with get_engine().begin() as conn:
-            conn.execute(
-                comment_scores.delete().where(
-                    (comment_scores.c.note_id == note_id)
-                    & (comment_scores.c.user_id == reactor_id)
-                    & (comment_scores.c.emoji == emoji)
+            for table in (comment_scores, summary_scores):
+                conn.execute(
+                    table.delete().where(
+                        (table.c.note_id == note_id)
+                        & (table.c.user_id == reactor_id)
+                        & (table.c.emoji == emoji)
+                    )
                 )
-            )
         return {"status": "revoked", "note_id": note_id, "emoji": emoji, "score": score}
 
     # Only record ratings on notes we actually posted as review comments. A
@@ -688,8 +824,12 @@ def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
     # than stored as an orphan score. The review_comments row lands with the run
     # event at the end of the run — before a human sits down to review and rate
     # the MR — so a genuine rating finds its comment here.
-    if not _review_comment_exists(note_id):
+    # ...and route it to the table for the artifact it actually is, so summary
+    # ratings never mix into findings averages (see _scores_table_for).
+    target = _scores_table_for(note_id)
+    if target is None:
         return {"status": "ignored", "reason": "not a tracked review comment"}
+    kind = "summary" if target is summary_scores else "finding"
 
     project = payload.get("project")
     project = project if isinstance(project, dict) else {}
@@ -710,7 +850,7 @@ def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
         "awarded_at": _text(attrs.get("created_at")),
     }
     with get_engine().begin() as conn:
-        stmt = pg_insert(comment_scores).values([row])
+        stmt = pg_insert(target).values([row])
         stmt = stmt.on_conflict_do_update(
             index_elements=["note_id", "user_id", "emoji"],
             set_={
@@ -725,7 +865,7 @@ def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
             },
         )
         conn.execute(stmt)
-    return {"status": "recorded", "note_id": note_id, "emoji": emoji, "score": score}
+    return {"status": "recorded", "kind": kind, "note_id": note_id, "emoji": emoji, "score": score}
 
 
 def list_review_comments(

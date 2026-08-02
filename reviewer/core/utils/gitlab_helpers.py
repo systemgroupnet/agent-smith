@@ -212,6 +212,20 @@ def resolve_inline_position(
 # runs only review the new commits instead of the whole MR diff.
 MARKER_TOKEN = "code-review-agent:last-reviewed-sha"
 
+# Machine-readable token embedded in the review-summary comment. The summary is
+# posted once per MR, and the gate is "does this note already exist" rather than
+# "is this the first pass" (i.e. is the review marker unset). Those differ in the
+# case that matters: a first pass that dies partway — rate limit, timeout — may
+# still have advanced nothing, but a first pass that *posted* the summary and
+# then failed must not post a second one on the retry. Keying on the note itself
+# makes the summary land exactly once, however many attempts it takes.
+SUMMARY_MARKER_TOKEN = "code-review-agent:review-summary"
+
+# Page cap for listing MR notes (100/page → up to 1000 notes). Enough to find a
+# marker note on any realistic MR, bounded so a pathological thread can't turn a
+# marker lookup into an unbounded crawl.
+MAX_NOTE_PAGES = 10
+
 # Award-emoji names (GitLab names, no colons) seeded on every posted review
 # comment as a 1..5 rating scale — :one: .. :five:. A human clicking one of
 # them awards the same emoji as themselves, which GitLab delivers to the
@@ -233,8 +247,10 @@ __all__ = [
     'get_gitlab_compare',
     'get_review_marker',
     'upsert_review_marker',
+    'has_review_summary',
     'add_mr_label',
     'MARKER_TOKEN',
+    'SUMMARY_MARKER_TOKEN',
     'SCORE_REACTION_EMOJIS',
 ]
 
@@ -427,28 +443,61 @@ class GitLabAPIClient:
 
     def list_merge_request_notes(self, project_path: str, mr_iid: str) -> Optional[List[Dict]]:
         """
-        List notes/comments on the merge request (most recent first).
+        List notes/comments on the merge request (most recently updated first).
+
+        Paginated. Callers scan the result for the agent's own hidden marker
+        tokens, so a single page is not enough: the results are ordered by
+        ``updated_at``, and while the review marker is rewritten every run (which
+        keeps it near the top), the review-summary note is written once and never
+        touched again — on a busy MR it sinks past the first page, and a caller
+        that couldn't find it would post a duplicate. Capped at MAX_NOTE_PAGES so
+        a pathological thread can't turn this into an unbounded crawl.
 
         Args:
             project_path: Project path (e.g., "group/project")
             mr_iid: Merge request IID
 
         Returns:
-            List of note dictionaries or None if failed
+            List of note dictionaries or None if the first request failed. A
+            later page failing returns what was collected so far rather than
+            discarding it.
         """
-        try:
-            project_id = quote(project_path, safe="")
-            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes")
+        project_id = quote(project_path, safe="")
+        url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes")
+        per_page = 100
+        notes: List[Dict] = []
 
-            params = {"per_page": 100, "sort": "desc", "order_by": "updated_at"}
-            response = requests.get(url, headers=self.headers, params=params, timeout=30)
-            response.raise_for_status()
+        for page in range(1, MAX_NOTE_PAGES + 1):
+            try:
+                response = requests.get(
+                    url,
+                    headers=self.headers,
+                    params={
+                        "per_page": per_page,
+                        "page": page,
+                        "sort": "desc",
+                        "order_by": "updated_at",
+                    },
+                    timeout=30,
+                )
+                response.raise_for_status()
+                batch = response.json()
+            except Exception as e:
+                print(f"  ❌ [GitLab API] Error listing notes (page {page}): {e}")
+                return notes if notes else None
 
-            return response.json()
+            if not batch:
+                break
+            notes.extend(batch)
+            if len(batch) < per_page:
+                break
+        else:
+            print(
+                f"  ⚠️  [GitLab API] Stopped listing notes at {MAX_NOTE_PAGES} pages "
+                f"({len(notes)} notes); an older marker note may not be visible."
+            )
 
-        except Exception as e:
-            print(f"  ❌ [GitLab API] Error listing notes: {e}")
-            return None
+        return notes
 
     def list_repository_tree(
         self,
@@ -858,6 +907,26 @@ async def get_review_marker(
         if match:
             return match.group(1), note.get("id")
     return None, None
+
+
+async def has_review_summary(
+    gitlab_url: str, project_path: str, mr_id: str, token: str
+) -> bool:
+    """True when the agent has already posted its review-summary comment on this MR.
+
+    Fails **closed** (returns True) if the notes can't be listed: not knowing
+    whether a summary exists should skip the summary, never risk posting a
+    duplicate on someone's MR.
+    """
+    try:
+        api_client = get_gitlab_api_client(gitlab_url, token)
+        notes = api_client.list_merge_request_notes(project_path, mr_id)
+    except Exception as e:
+        print(f"  ⚠️  [GitLab] Could not check for an existing review summary: {e}")
+        return True
+    if notes is None:
+        return True
+    return any(SUMMARY_MARKER_TOKEN in (note.get("body", "") or "") for note in notes)
 
 
 async def upsert_review_marker(

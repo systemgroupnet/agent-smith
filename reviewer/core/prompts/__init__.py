@@ -23,6 +23,9 @@ Exports:
     
     Comment Review Prompts:
         - get_comment_reviewer_prompt
+
+    Whole-MR Prompts:
+        - get_review_summary_prompt
 """
 
 from .service_prompts import (
@@ -38,6 +41,7 @@ from .pbook_prompts import get_pbook_reviewer_prompt
 from .dataview_prompts import get_dataview_reviewer_prompt
 from .starter_prompts import get_starter_agent_prompt
 from .comment_prompts import get_comment_reviewer_prompt
+from .summary_prompts import get_review_summary_prompt
 from .effort_prompts import get_effort_estimator_prompt
 
 

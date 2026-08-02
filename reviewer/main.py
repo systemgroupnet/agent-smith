@@ -36,12 +36,20 @@ from core.utils.gitlab_helpers import (
     get_gitlab_compare,
     get_review_marker,
     upsert_review_marker,
+    has_review_summary,
     add_mr_label,
     SCORE_REACTION_EMOJIS,
+    SUMMARY_MARKER_TOKEN,
 )
 from core.agents.file_reviewer import review_file_with_workflow, review_comments_with_agent
 from core.agents.effort_agent import estimate_review_effort
-from core.utils.comment_formatter import format_single_issue, extract_high_severity_issues, get_severity
+from core.agents.summary_agent import SummaryContext, generate_review_summary
+from core.utils.comment_formatter import (
+    format_single_issue,
+    format_review_summary,
+    extract_high_severity_issues,
+    get_severity,
+)
 from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
@@ -58,6 +66,79 @@ from core.config.langchain_config import (
 from core.utils.llm_retry import is_provider_hard_block, describe_error
 from core.analytics import send_run_analytics
 from dto.analytics import RunMetrics, record_error, record_warning
+
+
+async def _post_review_summary(
+    metrics: RunMetrics,
+    summary,
+    effort,
+    gitlab_url: str,
+    project_path: str,
+    mr_id: str,
+    gitlab_token: str,
+) -> None:
+    """Post the MR's review-summary comment, seed its rating reactions, and record it.
+
+    Posted through the same general-note path as a non-inline finding, which
+    creates an *unpositioned discussion* rather than a plain note — that is what
+    gives it a ``discussion_id``, so a human replying to the summary is captured
+    by the collector's Comments webhook like any other thread.
+
+    The body carries a hidden ``SUMMARY_MARKER_TOKEN`` comment; ``has_review_summary``
+    looks for exactly that, so a re-run finds this note and never posts a second.
+
+    Non-fatal end to end: a failure here records a warning and leaves the review
+    untouched.
+    """
+    body = (
+        f"<!-- {SUMMARY_MARKER_TOKEN} -->\n"
+        f"{format_review_summary(summary, effort=effort)}"
+    )
+    posted, error = await post_gitlab_comment(
+        gitlab_url, project_path, mr_id, gitlab_token, body
+    )
+    if error is not None or not posted:
+        print(f"  ⚠️  Could not post the review summary (non-fatal): {error}")
+        record_warning(metrics, "review_summary", f"failed to post the review summary: {error}")
+        return
+
+    metrics.summary_posted = True
+    print("  ✅ Posted review summary")
+
+    note_id = posted.get("note_id")
+    if note_id is None:
+        # Posted, but with no id to key reactions or scores to — the comment is on
+        # the MR and useful to a human, it just can't be rated. Say so.
+        record_warning(
+            metrics, "review_summary", "review summary posted but returned no note id; not rated"
+        )
+        return
+
+    # Deliberately NOT appended to metrics.posted_comments: a summary is a
+    # different artifact from a finding, and their ratings must never end up in
+    # the same average. Reported on its own so the collector can store it (and
+    # its scores) in dedicated tables, leaving every existing findings query
+    # correct without a filter someone has to remember to add.
+    metrics.posted_summary = {
+        "note_id": note_id,
+        "discussion_id": posted.get("discussion_id"),
+        "model": resolve_effective_model(),
+    }
+
+    reactions_enabled = os.getenv(
+        "COMMENT_REACTIONS_ENABLED", "true"
+    ).strip().lower() not in ("false", "0", "no", "off", "")
+    if reactions_enabled:
+        failed = await add_note_award_emojis(
+            gitlab_url, project_path, mr_id, gitlab_token, note_id
+        )
+        if failed:
+            record_warning(
+                metrics,
+                "comment_reaction",
+                f"failed to seed rating reaction(s) {', '.join(':' + n + ':' for n in failed)} "
+                f"on the review summary (note {note_id})",
+            )
 
 
 async def process_single_file(
@@ -478,6 +559,42 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         f"Jira: {jira_key if jira_key != 'N/A' else 'none'}\n"
     )
 
+    # Kick off the review summary alongside the effort estimate — the orientation
+    # note a human reviewer reads before the findings. Placed here (rather than
+    # with the effort task) because it wants the Jira ticket body, which is only
+    # fetched just above. Posted once per MR, gated on whether that comment
+    # already exists rather than on "is this the first pass": a first pass that
+    # dies on a rate limit leaves no summary and the retry should still post one,
+    # while a pass that posted a summary and *then* died must not post a second.
+    # It reads the FULL `changes`, not the incremental slice, since it describes
+    # the whole MR — and runs concurrently, so it costs ~no wall-clock against the
+    # much longer review pass. Non-fatal: a failure just means no summary comment.
+    summary_enabled = os.getenv(
+        "REVIEW_SUMMARY_ENABLED", "true"
+    ).strip().lower() not in ("false", "0", "no", "off", "")
+    summary_task = None
+    if summary_enabled:
+        if await has_review_summary(gitlab_url, project_path, mr_id, gitlab_token):
+            print("📝 Review summary already posted on this MR — skipping\n")
+        else:
+            summary_config = build_run_config(
+                thread_id,
+                run_name="review_summary",
+                extra_metadata={"mr_id": mr_id, "project_path": project_path, "commit": head_sha},
+                tags=["code-review", "review-summary"],
+            )
+            summary_task = asyncio.create_task(
+                generate_review_summary(
+                    SummaryContext(
+                        mr_data=mr_data,
+                        changes=changes,
+                        jira_body=jira_ticket_body,
+                        source_branch=source_branch,
+                    ),
+                    config=summary_config,
+                )
+            )
+
     # Process files concurrently in batches of 5
     all_comments = []
     # file path -> model that reviewed it, so each posted comment can be
@@ -639,6 +756,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                 metrics, "mr_label", f"failed to add '{label}' label to the MR", context=label
             )
 
+    effort = None
     if provider_blocked:
         if effort_task is not None:
             effort_task.cancel()
@@ -660,6 +778,35 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                 effort = None
             if effort:
                 await _label_mr(f"Review effort {effort}/5")
+
+    # Post the review summary here — after the review pass but *before* any
+    # findings, so it lands first in the MR timeline and orients the reviewer
+    # before they hit the comments. Awaited rather than fire-and-forget:
+    # run_with_cleanup tears the event loop down immediately after process_mr, so
+    # a detached task would simply be killed. Non-fatal at every step.
+    if summary_task is not None:
+        if provider_blocked:
+            summary_task.cancel()
+            try:
+                await summary_task
+            except BaseException:
+                pass
+        else:
+            try:
+                summary = await summary_task
+            except Exception as e:
+                summary = None
+                print(f"  ⚠️  Review summary failed (non-fatal): {describe_error(e)}")
+            if summary is not None:
+                await _post_review_summary(
+                    metrics=metrics,
+                    summary=summary,
+                    effort=effort,
+                    gitlab_url=gitlab_url,
+                    project_path=project_path,
+                    mr_id=mr_id,
+                    gitlab_token=gitlab_token,
+                )
 
     # Filter high-severity issues using comment reviewer agent
     print(f"\n{'=' * 60}")

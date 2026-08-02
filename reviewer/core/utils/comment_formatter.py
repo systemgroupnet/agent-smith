@@ -243,3 +243,73 @@ def extract_high_severity_issues(all_comments: list) -> list:
         all_high_severity_issues.extend(high_issues)
 
     return all_high_severity_issues
+
+
+# Hard caps on the review summary. The prompt states these too, but a prompt is a
+# request and this is the last writer before the comment is posted — the same
+# belt-and-braces the suggestion field gets (SUGGESTION_FIELD_RULE +
+# sanitize_suggestion). A summary nobody reads is worth nothing, and the failure
+# mode of a chatty model is a wall of text that gets scrolled past, so length is
+# enforced rather than asked for.
+MAX_SUMMARY_OVERVIEW_CHARS = 400
+MAX_SUMMARY_KEY_CHANGES = 5
+MAX_SUMMARY_REVIEW_FOCUS = 3
+# Per-entry cap is the loosest of the three on purpose: the *count* caps above do
+# most of the length work, and clipping an entry mid-thought ("…the most
+# failure-prone…") destroys the very information the entry existed to convey —
+# worse than one slightly longer line. Worst case overall is still ~2k chars.
+MAX_SUMMARY_ENTRY_CHARS = 220
+
+
+def _clip(text: str, limit: int) -> str:
+    """Trim to ``limit`` at a word boundary, with an ellipsis when trimmed."""
+    text = " ".join(str(text).split())  # collapse newlines/runs so entries stay one line
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return f"{cut or text[:limit]}…"
+
+
+def _summary_entries(items, max_items: int) -> list:
+    """Cap an entry list by count and per-entry length. Entries are ordered
+    most-significant-first by the prompt, so dropping the tail loses the least."""
+    out = []
+    for item in items or []:
+        text = _clip(item, MAX_SUMMARY_ENTRY_CHARS)
+        if text:
+            out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def format_review_summary(summary, effort: Optional[int] = None) -> str:
+    """Render a ``ReviewSummary`` as the MR's orientation comment.
+
+    Deliberately plain markdown with no ```suggestion fences: this comment is
+    context, not a finding, so it must never render an "Apply suggestion" button
+    that would commit prose into someone's source (see sanitize_suggestion).
+
+    Sections with nothing in them are omitted rather than left as empty headings.
+    """
+    parts = ["**🤖 Review Summary** — what this MR does and where to look. "
+             "Not a review; findings are posted separately.\n"]
+
+    overview = _clip(getattr(summary, "overview", "") or "", MAX_SUMMARY_OVERVIEW_CHARS)
+    if overview:
+        parts.append(f"\n{overview}\n")
+
+    key_changes = _summary_entries(getattr(summary, "key_changes", None), MAX_SUMMARY_KEY_CHANGES)
+    if key_changes:
+        parts.append("\n**What changed**\n")
+        parts.extend(f"- {item}\n" for item in key_changes)
+
+    review_focus = _summary_entries(getattr(summary, "review_focus", None), MAX_SUMMARY_REVIEW_FOCUS)
+    if review_focus:
+        parts.append("\n**Where to focus**\n")
+        parts.extend(f"- {item}\n" for item in review_focus)
+
+    if effort is not None:
+        parts.append(f"\n_Estimated review effort: **{effort}/5**_\n")
+
+    return "".join(parts)

@@ -129,6 +129,19 @@ class RunMetrics(BaseModel):
     # join key. Bounded in practice by the comment-reviewer filter (~10/run).
     posted_comments: list = Field(default_factory=list)
 
+    # True when this run posted the MR's review-summary comment (the orientation
+    # note for human reviewers). At most one per MR ever, so across a project this
+    # counts MRs that got a summary, not runs.
+    summary_posted: bool = False
+
+    # The posted summary comment, kept OUT of ``posted_comments`` on purpose:
+    # a summary and a finding are different artifacts, and a rating of one must
+    # never be averaged with a rating of the other. Separating them here means the
+    # collector can store them in their own tables, so every existing
+    # "how good are the findings" query stays correct without needing a filter it
+    # would be easy to forget. Shape: {note_id, discussion_id, model}.
+    posted_summary: Optional[dict] = None
+
     duration_seconds: Optional[float] = None
     # True when the overall-timeout budget truncated the review (some files were
     # not reviewed; the marker is held so a re-run picks them up).

@@ -113,6 +113,16 @@ tables:
   that actually reviewed that comment's file — the only per-comment attribution
   there is, and the one to group by when comparing models. It is NULL for rows
   written before migration `0009`, which means "unknown", not "no failover".
+- `review_summaries` / `summary_scores` — the reviewer's one-off **review summary**
+  comment per MR, and its human ratings. Deliberately *not* stored in
+  `review_comments`/`comment_scores` with a `comment_type` discriminator: a summary
+  and a finding answer different questions, so pooling their ratings is
+  meaningless, and a filter-based split would have silently changed every existing
+  count and average the moment the first summary was rated. Separating them at
+  write time (`_scores_table_for` routes each webhook award by which table owns the
+  note) means **every query over `review_comments`/`comment_scores` still means
+  findings only, with no filter**. Replies carry `comment_replies.parent_kind`
+  (`finding`|`summary`) for the same reason.
 - `comment_scores` — one row per human 1–5 rating gathered from the emoji webhook:
   `note_id` (joins `review_comments`), `project_id`/`project_path` (the project the
   comment lives on), `mr_id`, reacting `user_id`/`username`/`user_name`, `emoji`
