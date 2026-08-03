@@ -62,12 +62,13 @@ from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
 from core.config.langfuse_config import get_langfuse_handler, flush_langfuse
 from core.config.langchain_config import (
+    fallback_configured,
     get_default_model,
     get_fallback_model,
     int_env,
 )
-from core.llm.gateway import LLMGateway
-from core.utils.llm_retry import is_provider_hard_block, describe_error
+from core.llm.gateway import FALLBACK, LLMGateway
+from core.utils.llm_retry import is_provider_hard_block, describe_error, parse_llm_error
 from core.analytics import send_run_analytics
 from dto.analytics import RunMetrics, record_error, record_warning
 
@@ -280,25 +281,71 @@ async def process_single_file(
         raise
 
 
-async def llm_preflight() -> Optional[BaseException]:
+async def _probe_fallback_endpoint(timeout_s: int) -> str:
+    """One-line verdict on whether the fallback provider could take over.
+
+    Called only when the primary answered the pre-flight with a throttle, and only
+    to *report*: the run is not committed to the fallback here. A single 429 says
+    the primary is busy this second, not that it will still be busy in five —
+    while committing the whole review to the second provider on that one data
+    point means running every file on the worse endpoint. The gateway switches
+    per call, once a throttle has actually outlived a retry budget and earned it.
+
+    What this buys is the line a person reading the pipeline log wants: "primary
+    throttled, fallback answers" (the run will recover) versus "both throttled"
+    (expect a timeout, and go look at the account limits).
+    """
+    if not fallback_configured():
+        return "not configured — set FALLBACK_LLM_MODEL to give this run an escape hatch"
+    target = LLMGateway.fallback_provider()
+    probe = LLMGateway(
+        lambda model: model,
+        label="LLM pre-flight (fallback)",
+        max_tokens=100,
+        retries=False,
+        pin=FALLBACK,
+    )
+    try:
+        await asyncio.wait_for(
+            probe.ainvoke("Reply with the single word OK."), timeout=timeout_s
+        )
+        return f"{target.describe()} answers — the run can fail over to it"
+    except Exception as e:  # noqa: BLE001 — diagnostic only, never fatal
+        info = parse_llm_error(e)
+        return f"{target.describe()} also unavailable ({info.label}): {describe_error(e)[:110]}"
+
+
+async def llm_preflight(metrics: RunMetrics) -> Optional[BaseException]:
     """One tiny bounded LLM call before any review work.
 
-    Fails fast (clear message + non-zero exit) when the LLM endpoint is dead —
-    e.g. the internal reverse proxy swallowing requests — instead of hanging
-    partway through a review with GitLab state already touched.
+    Answers exactly two questions: is the endpoint **reachable**, and is the key
+    **accepted**. Failing fast on either beats hanging partway through a review
+    with GitLab state already touched — the reverse proxy swallowing requests is
+    the case this was built for.
 
-    Returns ``None`` on success, or the exception that killed it. The caller
-    records that exception: a preflight abort used to ``return 1`` silently, so
-    the run event said ``status="error"`` with ``error_count=0`` and no
-    ``run_events`` row — a failure with nothing at all explaining it.
+    Returns ``None`` when the review may proceed, or the exception that killed it.
+    The caller records that exception: a preflight abort used to ``return 1``
+    silently, so the run event said ``status="error"`` with ``error_count=0`` and
+    no ``run_events`` row — a failure with nothing at all explaining it.
+
+    **A rate limit is not a failed pre-flight.** A 429 came back *from the
+    provider*, over the network, after authentication — which is a stronger
+    liveness signal than anything else short of a completion, and it answers both
+    questions with a yes. Aborting on it threw away the entire review over a
+    condition that clears in seconds, ignored a configured fallback provider that
+    never got a chance, and guaranteed zero comments where grinding through the
+    retry/failover machinery might well have produced all of them. Observed on
+    MR 11629: one throttled probe, run over, nothing reviewed.
+
+    Hard denials (quota/credit) and provider config blocks still abort, because
+    those are deterministic — every request in the run would fail identically.
     """
     timeout_s = int_env("LLM_PREFLIGHT_TIMEOUT_S", 60)
     base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     print(f"🩺 LLM endpoint pre-flight ({base_url})...")
-    # Through the gateway like every other call, but with retries=False: this is a
-    # liveness probe, and its job is to report the endpoint's state rather than to
-    # work around it. Retrying or failing over here would mask the very condition
-    # it exists to detect, and it has its own wall-clock budget besides.
+    # retries=False: the probe reports the endpoint's state, it does not work
+    # around it, and it has one wall-clock budget to do that in. Transient-failure
+    # handling belongs to the per-call gateways during the review itself.
     probe = LLMGateway(
         lambda model: model,
         label="LLM pre-flight",
@@ -321,6 +368,22 @@ async def llm_preflight() -> Optional[BaseException]:
         print("   Aborting before review. Check the endpoint/proxy and retry.")
         return err
     except Exception as e:
+        info = parse_llm_error(e)
+        if info.is_rate_limit and not info.is_hard_limit and not info.is_config_block:
+            print(f"⚠️  LLM endpoint is reachable but throttling ({info.label}).")
+            escape = await _probe_fallback_endpoint(timeout_s)
+            print(f"   Fallback provider: {escape}")
+            print(
+                "   Proceeding with the review — each call retries on its own "
+                "backoff and fails over once the throttle outlives it.\n"
+            )
+            record_warning(
+                metrics,
+                "preflight",
+                f"endpoint reachable but rate limited at pre-flight ({info.label}); "
+                f"review proceeded. Fallback: {escape}. {describe_error(e)}",
+            )
+            return None
         print(f"❌ LLM endpoint pre-flight failed after <= {timeout_s}s: {describe_error(e)}")
         print("   Aborting before review. Check the endpoint/proxy and retry.")
         return e
@@ -404,8 +467,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         record_error(metrics, "config", "GITLAB_TOKEN is not set")
         return 1
 
-    # Fail fast if the LLM endpoint is unreachable — nothing below works without it.
-    preflight_error = await llm_preflight()
+    # Fail fast if the LLM endpoint is unreachable or the key is rejected. A
+    # *throttled* endpoint is not a failure — see llm_preflight.
+    preflight_error = await llm_preflight(metrics)
     if preflight_error is not None:
         metrics.status = "config_error"
         record_error(

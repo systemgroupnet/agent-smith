@@ -139,6 +139,7 @@ class LLMGateway:
         streaming: bool = False,
         max_tokens: Optional[int] = None,
         retries: bool = True,
+        pin: Optional[str] = None,
     ):
         """
         Args:
@@ -159,6 +160,11 @@ class LLMGateway:
             retries: False for probes that want a single attempt and no failover
                      (the startup pre-flight, whose job is to report the endpoint's
                      state, not to work around it).
+            pin: PRIMARY or FALLBACK to bind this gateway to one endpoint regardless
+                 of the latch. Only the pre-flight uses it, to ask "can the fallback
+                 serve?" without committing the run to it. It exists so that probe
+                 still builds its client *here* — a chat model constructed anywhere
+                 else is the one thing this layering cannot tolerate.
         """
         self._build = build
         self.label = label
@@ -170,6 +176,7 @@ class LLMGateway:
         self.streaming = streaming
         self.max_tokens = max_tokens
         self.retries = retries
+        self._pin = pin
 
         self._runnable: Optional[Runnable] = None
         self._built_epoch: int = -1
@@ -183,10 +190,15 @@ class LLMGateway:
         return fallback_configured() and not cls._fallback_blocked
 
     @classmethod
+    def fallback_provider(cls) -> Provider:
+        """The fallback endpoint, whether or not it is currently in force."""
+        return Provider(FALLBACK, get_fallback_model(), fallback_api_key(), fallback_base_url())
+
+    @classmethod
     def active_provider(cls, requested: Optional[str] = None) -> Provider:
         """The provider currently in force."""
         if cls._fallback_active and cls._fallback_usable():
-            return Provider(FALLBACK, get_fallback_model(), fallback_api_key(), fallback_base_url())
+            return cls.fallback_provider()
         return Provider(PRIMARY, requested or get_default_model(), primary_api_key(), primary_base_url())
 
     @classmethod
@@ -268,7 +280,10 @@ class LLMGateway:
         provider the run has already abandoned.
         """
         if self._runnable is None or self._built_epoch != LLMGateway._epoch:
-            provider = self.active_provider(self.model_name)
+            provider = (
+                self.fallback_provider() if self._pin == FALLBACK
+                else self.active_provider(self.model_name)
+            )
             model = build_chat_model(
                 model=provider.model,
                 api_key=provider.api_key,
