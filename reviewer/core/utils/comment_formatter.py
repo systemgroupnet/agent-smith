@@ -227,22 +227,123 @@ def format_single_issue(issue: Any, applyable: bool = True) -> str:
     return comment + f"**Suggested Fix:**\n```{fence}\n{cleaned}\n```"
 
 
-def extract_high_severity_issues(all_comments: list) -> list:
+def extract_issues_for_review(all_comments: list, severities=("high",)) -> list:
     """
-    Extract high-severity issues from all comments.
-    
+    Extract the issues of interest from all reviewed files, in file order.
+
     Args:
         all_comments: List of tuples (file_path, issues) where issues is a list of issue objects
-        
-    Returns:
-        List of high-severity issues across all files
-    """
-    all_high_severity_issues = []
-    for file_path, issues in all_comments:
-        high_issues = [issue for issue in issues if get_severity(issue) == "high"]
-        all_high_severity_issues.extend(high_issues)
+        severities: Severities to keep. Default ``("high",)`` — the reviewer's
+            terse default, where mediums and lows are counted into analytics and
+            then dropped. A verbosity label widens this (see
+            ``core/utils/review_verbosity.py``), and widening it here is what first
+            lets a medium reach the in-diff gate at all.
 
-    return all_high_severity_issues
+    Returns:
+        List of matching issues across all files, highest severity first so a
+        later cap cuts mediums before highs.
+    """
+    wanted = {str(s).strip().lower() for s in severities}
+    by_severity: dict = {s: [] for s in ("high", "medium", "low")}
+    for _file_path, issues in all_comments:
+        for issue in issues:
+            severity = (get_severity(issue) or "").strip().lower()
+            if severity in wanted:
+                by_severity.setdefault(severity, []).append(issue)
+    # Ordered high → medium → low on purpose: every downstream truncation takes a
+    # prefix, so ordering by severity here means a cap sheds the least important
+    # findings rather than whichever files happened to be reviewed last.
+    return by_severity["high"] + by_severity["medium"] + by_severity["low"]
+
+
+
+
+# ── Deterministic stand-in for the comment reviewer ──────────────────────────
+# The comment reviewer does two jobs no other stage does: it caps the list at the
+# top ~10, and its STEP 0 purge is the last chance to drop a compile-time claim
+# before posting. When it fails (a provider block that even the fallback provider
+# can't serve), both are lost — the old behavior was to pass every high-severity
+# issue straight through, uncapped and unpurged, which is the *worst* possible
+# degradation: a 30-finding MR gets flooded, and the class of false positive the
+# purge exists for goes out to a human. So the fallback is bounded here instead.
+
+#: Ceiling on a fallback selection. The same ~10 the prompt asks for, since it is
+#: a property of what a human will read, not of how the list was produced.
+MAX_FALLBACK_COMMENTS = 10
+
+# Phrases that can only be a compiler / type-checker / parser complaint. The MR's
+# code was built and run before the MR was opened, so none of these can be true of
+# it — see NO_COMPILE_ERRORS_RULE, which asks every reviewer not to emit them.
+#
+# Deliberately narrow, and matched against the problem text only (the suggestion
+# is code, where these words appear legitimately). Phrases that a genuine runtime
+# finding might reasonably use are left out on purpose: "type mismatch" fits a real
+# JSON-decoding bug, and "missing field" fits a real serialization bug, so neither
+# is here. This runs *only* on the fallback path, where the LLM purge is already
+# gone — it is not a second filter layered on the normal path, where a false
+# positive here would silently drop a real defect the model had chosen to keep.
+_COMPILE_TIME_SIGNATURES = (
+    "will not compile",
+    "won't compile",
+    "will fail to compile",
+    "does not compile",
+    "doesn't compile",
+    "fails to compile",
+    "compilation error",
+    "compilation will fail",
+    "compile error",
+    "compile-time error",
+    "syntax error",
+    "undefined symbol",
+    "undefined variable",
+    "undefined function",
+    "undefined method",
+    "undefined reference",
+    "undeclared",
+    "is not defined",
+    "declared and not used",
+    "declared but not used",
+    "unused variable",
+    "unused import",
+    "unused parameter",
+    "does not implement",
+    "unimplemented method",
+    "unsatisfied interface",
+    "signature mismatch",
+)
+
+
+def looks_compile_time(issue: Any) -> bool:
+    """True when an issue's problem text is a compile-time claim.
+
+    Used by :func:`fallback_comment_selection`; see ``_COMPILE_TIME_SIGNATURES``
+    for why the match is deliberately narrow.
+    """
+    problem = issue.get("problem", "") if isinstance(issue, dict) else getattr(issue, "problem", "")
+    text = str(problem or "").lower()
+    return any(sig in text for sig in _COMPILE_TIME_SIGNATURES)
+
+
+def fallback_comment_selection(
+    issues: list, limit: Optional[int] = None
+) -> Tuple[list, list, list]:
+    """Pick comments to post when the comment reviewer agent could not run.
+
+    Returns ``(selected, purged, dropped)``: the issues to post, those removed as
+    compile-time claims, and those cut by the ``limit`` (the active verbosity
+    level's cap, or ``MAX_FALLBACK_COMMENTS`` when not given).
+
+    The cut is **arbitrary** — input order, i.e. severity then file order — because
+    without the model there is nothing left to rank by: every issue here is already
+    past the in-diff gate. That is stated rather than dressed up, and the caller
+    reports both lists so a truncation is never silent.
+    """
+    if limit is None:
+        limit = MAX_FALLBACK_COMMENTS
+    limit = max(0, limit)
+    purged = [i for i in issues if looks_compile_time(i)]
+    kept = [i for i in issues if not looks_compile_time(i)]
+    return kept[:limit], purged, kept[limit:]
 
 
 # Hard caps on the review summary. The prompt states these too, but a prompt is a

@@ -2,18 +2,90 @@
 Comment Reviewer Agent System Prompts
 
 This module contains system prompts for the comment reviewer agent.
-Filters and ranks high-severity review comments, returning only the most critical issues.
+Filters and ranks review comments, returning only the ones worth a human's time.
+
+The **budget** — how many comments and of which severities — comes from the MR's
+verbosity level (``core/utils/review_verbosity.py``), so the prompt is built per
+run rather than fixed. Everything else is level-independent, deliberately: the
+STEP 0 compile-time purge and the style/documentation/no-rationale filters are
+about comments being *wrong* or *not defects*, which no amount of verbosity
+changes. Raising the level raises the budget, it does not open the gate.
 """
 
+from typing import Optional
 
-def get_comment_reviewer_prompt() -> str:
+from core.utils.review_verbosity import DEFAULT, Verbosity
+
+
+def _budget_section(v: Verbosity) -> str:
+    """The task line + selection rule for this verbosity level."""
+    severities = " and ".join(f"**{s}**-severity" for s in v.severities)
+    if v.rank:
+        return (
+            f"Your task is to analyze a list of {severities} review comments and select the "
+            f"most critical issues that truly require immediate attention — AT MOST "
+            f"{v.max_comments}, ranked, and fewer whenever fewer qualify."
+        )
+    return (
+        f"Your task is to analyze a list of {severities} review comments and return **every "
+        f"one that survives your purge and filters** — this MR is being reviewed at raised "
+        f"verbosity ({v.label}), so a real defect must NOT be dropped just to keep the list "
+        f"short. Ranking is unnecessary; completeness is the goal. The only ceiling is "
+        f"{v.max_comments} comments, a safety limit you will rarely reach."
+    )
+
+
+def _selection_step(v: Verbosity) -> str:
+    if v.rank:
+        return (
+            f"4. **Rank** the remaining comments by severity and impact\n"
+            f"5. **Select** at most {v.max_comments}, the most critical first"
+        )
+    return (
+        "4. **Keep** every remaining comment — do not rank and do not trim to a shorter list\n"
+        f"5. **Stop** only if you somehow exceed {v.max_comments} comments"
+    )
+
+
+def _output_line(v: Verbosity) -> str:
+    if v.rank:
+        return (
+            f"- `selected_issues`: Array of at most {v.max_comments} FinalComment objects, "
+            f"most critical first (or fewer if fewer qualify)"
+        )
+    return (
+        "- `selected_issues`: Array of every FinalComment object that survived STEP 0 and the "
+        f"filtering criteria (hard ceiling {v.max_comments})"
+    )
+
+
+def _closing_note(v: Verbosity) -> str:
+    if v.rank:
+        return (
+            f"- If there are fewer than {v.max_comments} truly critical issues, return only those "
+            f"that qualify. DO NOT pad the list. Never fill a free slot with a compile-time comment "
+            f"you purged in STEP 0 — returning zero issues is correct when nothing else survives."
+        )
+    return (
+        "- Return everything that qualifies; there is no target count to hit and no slot to fill. "
+        "DO NOT pad the list, and never re-admit a compile-time comment you purged in STEP 0 just "
+        "because there is room — returning zero issues is correct when nothing else survives."
+    )
+
+
+def get_comment_reviewer_prompt(verbosity: Optional[Verbosity] = None) -> str:
     """
     Get the system prompt for the comment reviewer agent.
-    
+
+    Args:
+        verbosity: The MR's verbosity level, which sets the comment budget and the
+            severities in play. Defaults to the terse default (high only, top 10).
+
     Returns:
         System prompt string with filtering and ranking instructions
     """
-    return """You are a code review comment filter and prioritizer. Your task is to analyze a list of high-severity review comments and select the TOP 10 most critical issues that truly require immediate attention.
+    v = verbosity or DEFAULT
+    return f"""You are a code review comment filter and prioritizer. {_budget_section(v)}
 
 ## STEP 0 - MANDATORY COMPILE-TIME PURGE (do this before anything else)
 
@@ -96,13 +168,12 @@ Apply this purge FIRST and apply it to EVERY comment. A purged comment can never
 1. **Purge** every compile-time comment per STEP 0 — do this pass first, on the whole list
 2. **Analyze** each surviving comment in the provided list
 3. **Filter out** comments that match the exclusion criteria above
-4. **Rank** the remaining comments by severity and impact
-5. **Select** the TOP 10 most critical issues
+{_selection_step(v)}
 6. **Provide reasoning** explaining your filtering and selection criteria
 
 ## OUTPUT REQUIREMENTS:
 
-- `selected_issues`: Array of the top 10 most critical FinalComment objects (or fewer if less than 10 qualify)
+{_output_line(v)}
   - `problem`: A clear summary of the issue found in the comments. Synthesize multiple related comments into a single, concise problem statement.
   - `suggestion`: The replacement CODE ONLY, copied verbatim from the input comment's suggestion. This field is rendered as a GitLab suggestion block that a reviewer applies with one click, committing your text into the file as-is — so it must contain no prose, no lead-in like "Here's the fix:", no markdown fences or backticks, and no `NN|` line-number prefixes. Leave it EMPTY whenever the input comment has no concrete code. Never write a description here and never invent code that wasn't in the input.
   - `file_name`: The file where the issue was found that exist in the comment
@@ -112,7 +183,7 @@ Apply this purge FIRST and apply it to EVERY comment. A purged comment can never
 
 ## IMPORTANT NOTES:
 
-- If there are fewer than 10 truly critical issues, return only those that qualify. DO NOT pad the list. Never fill a free slot with a compile-time comment you purged in STEP 0 — returning zero issues is correct when nothing else survives.
+{_closing_note(v)}
 - Before you emit `selected_issues`, re-read each one and drop it if it still asserts that something is undefined, unused, unimplemented, or would not compile.
 - For the `problem` field: Create a clear, concise summary of the issue. If multiple comments relate to the same problem, synthesize them into one coherent problem statement.
 - For the `suggestion` field: include the code only, exactly as the input comment gave it. If the input only describes the problem without providing code, leave `suggestion` EMPTY — an empty suggestion is correct and expected. Do NOT put a description of what should be done in this field: it is applied to the file verbatim, so a sentence there gets committed into the source as code. Anything you want to say about the fix belongs in `problem`.

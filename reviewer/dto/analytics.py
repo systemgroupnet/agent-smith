@@ -83,6 +83,13 @@ class RunMetrics(BaseModel):
 
     # "full" | "incremental" | "none" (no code to review) | None (never got there)
     review_type: Optional[str] = None
+    # Verbosity level in force, from an MR label: "default" | "review:-v" |
+    # "review:-vv" | "review:-vvv" (see core/utils/review_verbosity.py). Without it
+    # a dashboard cannot interpret comment counts — a -vvv run legitimately posts
+    # several times what a default run does, and pooling them makes both meaningless.
+    # No collector column yet, so it rides in ``raw_json``; that is the documented
+    # contract (unknown fields are preserved, never dropped).
+    review_verbosity: Optional[str] = None
     # The *configured* (primary) LLM model, e.g. "glm-5.2". Kept as-is even when
     # the run fails over, so "what was this deployment set to" stays answerable.
     model: Optional[str] = None

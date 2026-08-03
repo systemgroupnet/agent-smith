@@ -47,8 +47,15 @@ from core.agents.summary_agent import SummaryContext, generate_review_summary
 from core.utils.comment_formatter import (
     format_single_issue,
     format_review_summary,
-    extract_high_severity_issues,
+    extract_issues_for_review,
     get_severity,
+)
+from core.utils.review_verbosity import (
+    all_labels,
+    cap_comments,
+    effort_label,
+    has_effort_label,
+    parse_verbosity,
 )
 from core.utils.mr_context import build_mr_context, fetch_jira_ticket_body
 from core.utils.file_classifier import StaticFileClassifier
@@ -426,6 +433,17 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     # the collector's evaluation tables know whose MR each scored comment is on.
     metrics.mr_author_username = (mr_data.get("author") or {}).get("username")
 
+    # How much to post is a per-MR decision, taken from an MR label so a human can
+    # ask for more and re-run without touching pipeline config. Resolved here, once,
+    # because it widens which severities are collected for review at all — mediums
+    # never reach the in-diff gate at the default level.
+    verbosity = parse_verbosity(mr_data.get("labels"))
+    metrics.review_verbosity = verbosity.name
+    if verbosity.level:
+        print(f"🔊 Verbosity label found: {verbosity.describe()}")
+    else:
+        print(f"🔈 Default verbosity (add {' / '.join(all_labels())} to the MR for more)")
+
     # Get commit SHAs for posting line comments
     diff_refs = mr_data.get("diff_refs", {})
     base_sha = diff_refs.get("base_sha")
@@ -498,16 +516,17 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     # changes" exit. It only needs MR metadata (file list, per-file line counts, dir
     # tree, scope) computed from the FULL `changes`, not the review results, so it
     # overlaps the much-longer review pass for ~no added wall-clock. Awaited (and its
-    # "Review effort N/5" label applied) in the labeling section below; non-fatal.
+    # "review effort::N/5" label applied) in the labeling section below; non-fatal.
     # Skipped when disabled or when an effort label is already on the MR (no
     # re-estimation on incremental re-runs).
     existing_labels = [str(lbl) for lbl in (mr_data.get("labels") or [])]
     effort_estimate_enabled = os.getenv(
         "EFFORT_ESTIMATE_ENABLED", "true"
     ).strip().lower() not in ("false", "0", "no", "off", "")
-    effort_already_labeled = any(
-        lbl.startswith("Review effort ") and lbl.endswith("/5") for lbl in existing_labels
-    )
+    # Matches the scoped "review effort::4/5" *and* the legacy space-separated
+    # "Review effort 4/5", so an MR labelled before the scoped form was adopted is
+    # still recognised — otherwise it would be re-estimated and end up carrying both.
+    effort_already_labeled = has_effort_label(existing_labels)
     effort_task = None
     if effort_estimate_enabled and not effort_already_labeled:
         effort_config = build_run_config(
@@ -616,6 +635,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     # Set when a file fails with an account-level provider block (data-policy /
     # guardrail / quota): every other file would fail identically, so we stop.
     provider_blocked = False
+    # Set when the comment reviewer could not run, so the comments being posted came
+    # from the deterministic fallback rather than the model's ranking + purge.
+    comment_review_failed = False
 
     print(f"🔄 Processing {len(changes_to_review)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently")
     print(f"⏳ Overall review budget: {overall_timeout_s}s\n")
@@ -770,14 +792,14 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         if review_label:
             await _label_mr(review_label)
 
-        # Review effort N/5 — await the estimate started at the top of the run.
+        # review effort::N/5 — await the estimate started at the top of the run.
         if effort_task is not None:
             try:
                 effort = await effort_task
             except Exception:
                 effort = None
             if effort:
-                await _label_mr(f"Review effort {effort}/5")
+                await _label_mr(effort_label(effort))
 
     # Post the review summary here — after the review pass but *before* any
     # findings, so it lands first in the MR timeline and orients the reviewer
@@ -808,14 +830,15 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                     gitlab_token=gitlab_token,
                 )
 
-    # Filter high-severity issues using comment reviewer agent
+    # Filter the findings using the comment reviewer agent
     print(f"\n{'=' * 60}")
-    print(f"🔍 Filtering high-severity comments...")
+    print(f"🔍 Filtering comments (verbosity: {verbosity.describe()})...")
     print(f"{'=' * 60}\n")
-    
-    all_high_severity_issues = extract_high_severity_issues(all_comments)
 
-    print(f"📊 Found {len(all_high_severity_issues)} high-severity issues across all files")
+    issues_for_review = extract_issues_for_review(all_comments, verbosity.severities)
+
+    scope = "/".join(verbosity.severities)
+    print(f"📊 Found {len(issues_for_review)} {scope}-severity issues across all files")
 
     # Build inline-position maps from the FULL MR diff (GitLab inline positions are
     # against the MR diff_refs, not the incremental compare). Maps each changed
@@ -833,10 +856,10 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     # fabricated file / miscounted line — slip through. Resolve every issue against
     # the authoritative MR diff BEFORE the comment reviewer: a line outside the
     # diff hunks can never be a valid inline comment, so drop it here instead of
-    # letting it take one of the ~10 comment slots and end up as a noisy general
-    # note. Each drop is recorded as a warning for analytics.
+    # letting it take one of the level's comment slots and end up as a noisy
+    # general note. Each drop is recorded as a warning for analytics.
     in_diff_issues = []
-    for issue in all_high_severity_issues:
+    for issue in issues_for_review:
         file_name = issue.get("file_name") if isinstance(issue, dict) else issue.file_name
         line = issue.get("line") if isinstance(issue, dict) else issue.line
         _real_path, _old_line, in_diff, file_in_mr = resolve_inline_position(
@@ -860,16 +883,16 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                 f"{file_name}:{line} is not a line in the MR diff; dropped before comment filtering",
                 context=f"{file_name}:{line}",
             )
-    dropped_count = len(all_high_severity_issues) - len(in_diff_issues)
+    dropped_count = len(issues_for_review) - len(in_diff_issues)
     if dropped_count:
         print(
             f"🚧 In-diff gate: dropped {dropped_count} issue(s) not on MR diff lines; "
             f"{len(in_diff_issues)} remain"
         )
-    all_high_severity_issues = in_diff_issues
+    issues_for_review = in_diff_issues
 
     # Apply comment reviewer agent if there are high-severity issues
-    if all_high_severity_issues:
+    if issues_for_review:
         comment_config = build_run_config(
             thread_id,
             run_name="comment_review",
@@ -880,12 +903,46 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             },
             tags=["code-review", "comment-review"],
         )
-        filtered_issues = await review_comments_with_agent(
-            all_high_severity_issues, config=comment_config
+        filtered_issues, comment_review_error = await review_comments_with_agent(
+            issues_for_review, config=comment_config, verbosity=verbosity
         )
+        # Deterministic backstop for the level's budget. The prompt states the cap,
+        # but the prompt is a request and this is the last writer before posting —
+        # same belt-and-braces as the suggestion field and the summary length. A
+        # model that returns 40 comments at -vvv must not post 40.
+        filtered_issues, over_cap = cap_comments(filtered_issues, verbosity)
+        if over_cap:
+            print(
+                f"  ✂️  {len(over_cap)} comment(s) over the {verbosity.max_comments}-comment "
+                f"cap for {verbosity.name} — not posted"
+            )
+            for issue in over_cap:
+                file_name = issue.get("file_name") if isinstance(issue, dict) else issue.file_name
+                line = issue.get("line") if isinstance(issue, dict) else issue.line
+                record_warning(
+                    metrics,
+                    "comment_over_cap",
+                    f"{file_name}:{line} not posted — over the {verbosity.max_comments}-comment "
+                    f"cap for verbosity {verbosity.name}",
+                    context=f"{file_name}:{line}",
+                )
         metrics.comments_selected = len(filtered_issues)
+        if comment_review_error is not None:
+            # Degraded, not fatal: a bounded deterministic selection was substituted
+            # (see fallback_comment_selection). Recorded as an error because the run
+            # posted comments that never passed the reviewer's ranking or its
+            # compile-time purge — that changes what a human sees on the MR, and
+            # used to be visible only in the CI log.
+            comment_review_failed = True
+            record_error(
+                metrics,
+                "comment_review",
+                comment_review_error,
+                context=f"{len(issues_for_review)} issue(s) in, "
+                        f"{len(filtered_issues)} posted by deterministic fallback",
+            )
     else:
-        print(f"ℹ️  No high-severity issues to filter")
+        print(f"ℹ️  No {scope}-severity issues to filter")
         # A timeout truncation is a partial review (marker held), but it exits 0 —
         # it posted what it could, by design; only real file errors exit non-zero.
         if provider_blocked:
@@ -1061,7 +1118,11 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     elif timed_out:
         metrics.status = "timeout"
     else:
-        metrics.status = "partial_failure" if (file_error_count or total_failed) else "success"
+        # A failed comment reviewer counts as a partial failure: the run posted, but
+        # what it posted skipped the ranking and the compile-time purge. Without this
+        # the status stayed "success" and nothing distinguished it from a clean run.
+        degraded = file_error_count or total_failed or comment_review_failed
+        metrics.status = "partial_failure" if degraded else "success"
 
     # Non-zero exit if any file failed to review or any comment failed to post, so
     # GitLab CI reflects the failure instead of showing a green job. A timeout
