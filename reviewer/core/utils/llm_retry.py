@@ -359,10 +359,20 @@ def maybe_print_traceback(exc: BaseException, *, indent: str = "     ") -> None:
         print(f"{indent}↳ Provider hard limit/quota reached — not a code error; retry after reset or raise the limit.")
         return
     if info.is_rate_limit:
+        # Don't advise setting FALLBACK_LLM_MODEL when one *is* set — it was the
+        # standing advice on every throttled file of a run whose fallback had
+        # already been taken away, which read as "you never configured one".
+        # Whether the fallback survived is the gateway's business and is reported
+        # in its own log lines and in the run event's warnings.
+        remedy = (
+            "lower FILE_BATCH_SIZE (a fallback provider is configured; check the "
+            "[llm-fallback] lines above for whether it was still available)"
+            if fallback_configured()
+            else "lower FILE_BATCH_SIZE or set FALLBACK_LLM_MODEL"
+        )
         print(
-            f"{indent}↳ Provider rate/concurrency limit ({info.label}) survived every retry"
-            f"{'' if fallback_configured() else ' and no fallback provider is configured'}"
-            f" — not a code error; lower FILE_BATCH_SIZE or set FALLBACK_LLM_MODEL."
+            f"{indent}↳ Provider rate/concurrency limit ({info.label}) survived every retry "
+            f"— not a code error; {remedy}."
         )
         return
     import traceback

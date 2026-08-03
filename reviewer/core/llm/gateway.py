@@ -44,8 +44,27 @@ Two, each allowed at most once per call, so a call can never ping-pong:
    a gateway blip says nothing about the provider being over capacity.
 2. **fallback → primary**, when the *fallback* answers with a deterministic block
    (data policy / guardrail / quota). Retrying that is futile, but the primary was
-   only ever throttled, and a throttle clears. The fallback is then marked
-   unusable for the rest of the run so no other agent switches onto it.
+   only ever throttled, and a throttle clears.
+
+The second transition also marks the fallback unusable, so no other agent
+switches onto a known-dead endpoint — but **how much** of it is unusable depends
+on what answered. A quota/credit denial kills the endpoint outright. A
+data-policy / guardrail block on a **structured** call does not: ``with_structured_output``
+sends a *forced* ``tool_choice``, which OpenRouter routes to a narrower set of
+providers than the agent loop's ``tool_choice: auto``, so a 404 there is a
+statement about the call *shape*, not the endpoint. Retiring the whole fallback
+for it throws away a provider that is still serving every loop call — which is
+exactly what happened in production (job 3741223): the fallback took over on a
+1302 throttle, completed two file reviews, and was then retired for the whole run
+by a single salvage call, after which the remaining batches went back to the
+throttled primary and died. So that block is scoped: structured calls return to
+the primary, the agent loop keeps the fallback.
+
+Every transition is recorded (:meth:`transitions`) and drained into the run
+event's ``warnings`` by ``process_mr``. Losing the escape hatch mid-run is the
+most consequential thing that can happen to a run's outcome, and it used to be
+visible only as one line in a CI job log — a run whose revert was then absorbed
+by a successful primary retry recorded *nothing at all*.
 """
 
 from __future__ import annotations
@@ -95,6 +114,22 @@ class Provider:
         return f"{self.model} @ {self.base_url or 'api.openrouter.ai'}"
 
 
+@dataclass(frozen=True)
+class ProviderTransition:
+    """One provider change, kept so the run event can report it.
+
+    ``kind`` is the stage name used in the analytics warning, ``label`` is the
+    call that triggered it, ``detail`` says which provider answered with what.
+    """
+
+    kind: str  # llm_fallback_activated | llm_fallback_blocked | llm_fallback_blocked_structured
+    label: str
+    detail: str
+
+    def describe(self) -> str:
+        return f"{self.label}: {self.detail}" if self.detail else self.label
+
+
 #: An agent's contribution: turn a chat model into the runnable it wants to call.
 #: Called again whenever the provider changes, so it must be pure wiring — prompt
 #: and tool assembly only, no I/O.
@@ -124,9 +159,11 @@ class LLMGateway:
     # That is what stops a late-constructed agent from being stranded on a
     # provider the run has already abandoned.
     _fallback_active: bool = False
-    _fallback_blocked: bool = False  # the fallback answered with a hard/config block
+    _fallback_blocked: bool = False  # the fallback is unusable for everything
+    _fallback_blocked_structured: bool = False  # ...only for forced-tool_choice calls
     _fallback_ever_used: bool = False  # for analytics; survives a revert
     _epoch: int = 0
+    _transitions: tuple = ()  # ProviderTransition records, drained into the run event
 
     def __init__(
         self,
@@ -185,9 +222,15 @@ class LLMGateway:
     # ── provider resolution ─────────────────────────────────────────────────
 
     @classmethod
-    def _fallback_usable(cls) -> bool:
-        """Configured *and* not already proven dead this run."""
-        return fallback_configured() and not cls._fallback_blocked
+    def _fallback_usable(cls, structured: bool = False) -> bool:
+        """Configured *and* not already proven dead this run — for this call shape.
+
+        ``structured`` calls send a forced ``tool_choice`` and are routed more
+        narrowly, so they can be blocked while the agent loop is not.
+        """
+        if not fallback_configured() or cls._fallback_blocked:
+            return False
+        return not (structured and cls._fallback_blocked_structured)
 
     @classmethod
     def fallback_provider(cls) -> Provider:
@@ -195,9 +238,14 @@ class LLMGateway:
         return Provider(FALLBACK, get_fallback_model(), fallback_api_key(), fallback_base_url())
 
     @classmethod
-    def active_provider(cls, requested: Optional[str] = None) -> Provider:
-        """The provider currently in force."""
-        if cls._fallback_active and cls._fallback_usable():
+    def active_provider(cls, requested: Optional[str] = None, *, structured: bool = False) -> Provider:
+        """The provider currently in force **for a call of this shape**.
+
+        With the fallback blocked for structured calls only, two gateways resolve
+        differently at the same instant — the reviewers' loops stay on the fallback
+        while a salvage call goes to the primary. That asymmetry is the point.
+        """
+        if cls._fallback_active and cls._fallback_usable(structured):
             return cls.fallback_provider()
         return Provider(PRIMARY, requested or get_default_model(), primary_api_key(), primary_base_url())
 
@@ -214,38 +262,77 @@ class LLMGateway:
     # ── latch control ───────────────────────────────────────────────────────
 
     @classmethod
-    def activate_fallback(cls) -> bool:
+    def _record(cls, kind: str, label: str, detail: str) -> None:
+        """Append a transition record, bounded — a run has a handful at most."""
+        if len(cls._transitions) < 20:
+            cls._transitions = (*cls._transitions, ProviderTransition(kind, label, detail))
+
+    @classmethod
+    def transitions(cls) -> tuple:
+        """Every provider change this run made, oldest first.
+
+        ``process_mr`` drains this into ``RunMetrics.warnings``. Without it a run
+        that lost its fallback recorded nothing: the revert is *absorbed* when the
+        retry on the primary then succeeds, so there is no error event either.
+        """
+        return cls._transitions
+
+    @classmethod
+    def activate_fallback(cls, *, label: str = "", detail: str = "") -> bool:
         """Switch the run to the fallback provider. True if this call flipped it."""
         if cls._fallback_active or not cls._fallback_usable():
             return False
         cls._fallback_active = True
         cls._fallback_ever_used = True
         cls._epoch += 1
+        cls._record("llm_fallback_activated", label, detail or cls.fallback_provider().describe())
         return True
 
     @classmethod
-    def block_fallback(cls) -> bool:
-        """Mark the fallback unusable and return the run to the primary.
+    def block_fallback(cls, *, structured_only: bool = False, label: str = "", detail: str = "") -> bool:
+        """Mark the fallback unusable and return the affected calls to the primary.
 
         Called when the fallback answers with a deterministic block: it will answer
-        every request identically, so both the switch back *and* the poison flag
-        matter — without the flag the next agent to be throttled would switch
-        straight back onto it.
+        every request of that kind identically, so both the switch back *and* the
+        poison flag matter — without the flag the next agent to be throttled would
+        switch straight back onto it.
+
+        ``structured_only`` scopes the block to forced-``tool_choice`` calls. The
+        latch stays *on*, because the endpoint is still serving the agent loop; only
+        structured gateways re-resolve to the primary. The epoch bump is what makes
+        them do so before their next attempt.
+
+        Returns True when this call newly established the block (so the caller logs
+        it once).
         """
+        if structured_only:
+            if cls._fallback_blocked or cls._fallback_blocked_structured:
+                return False
+            cls._fallback_blocked_structured = True
+            cls._epoch += 1
+            cls._record("llm_fallback_blocked_structured", label, detail)
+            return True
+
         already = cls._fallback_blocked
         cls._fallback_blocked = True
         if cls._fallback_active:
             cls._fallback_active = False
             cls._epoch += 1
+            cls._record("llm_fallback_blocked", label, detail)
             return True
-        return not already
+        if already:
+            return False
+        cls._record("llm_fallback_blocked", label, detail)
+        return True
 
     @classmethod
     def reset(cls) -> None:
         """Clear all provider state. Per *run*, not per process."""
         cls._fallback_active = False
         cls._fallback_blocked = False
+        cls._fallback_blocked_structured = False
         cls._fallback_ever_used = False
+        cls._transitions = ()
         cls._epoch += 1
 
     @classmethod
@@ -271,6 +358,17 @@ class LLMGateway:
         """The provider this instance's runnable is currently built against."""
         return self._built_provider
 
+    def _where(self) -> str:
+        """``primary glm-5.2`` — which endpoint a log line is talking about.
+
+        Every retry and give-up line carries this. Without it a job log full of
+        ``429/1302`` says nothing about *whose* limit was hit, and diagnosing a run
+        that lost its fallback meant querying the analytics database instead of
+        reading the log.
+        """
+        provider = self._built_provider
+        return f"{provider.name} {provider.model}" if provider else "unbuilt"
+
     @property
     def runnable(self) -> Runnable:
         """The runnable, rebuilt if the active provider changed since it was built.
@@ -282,7 +380,7 @@ class LLMGateway:
         if self._runnable is None or self._built_epoch != LLMGateway._epoch:
             provider = (
                 self.fallback_provider() if self._pin == FALLBACK
-                else self.active_provider(self.model_name)
+                else self.active_provider(self.model_name, structured=self.structured)
             )
             model = build_chat_model(
                 model=provider.model,
@@ -334,7 +432,27 @@ class LLMGateway:
                     # 1. The fallback itself is blocked. Deterministic, so no amount
                     #    of retrying helps — but the primary was merely throttled.
                     if on_fallback and not reverted and (info.is_config_block or info.is_hard_limit):
-                        if LLMGateway.block_fallback():
+                        # How much of the fallback this condemns depends on what it
+                        # was. A quota/credit denial is about the account, so the
+                        # endpoint is gone. A data-policy/guardrail 404 on a
+                        # *structured* call is about the forced tool_choice being
+                        # routed more narrowly than the agent loop's auto — the same
+                        # endpoint keeps serving every loop call, and retiring it
+                        # wholesale sends the whole run back to the throttled primary.
+                        structured_only = (
+                            info.is_config_block and self.structured and not info.is_hard_limit
+                        )
+                        detail = f"{self._where()} answered {info.label}"
+                        if structured_only:
+                            if LLMGateway.block_fallback(
+                                structured_only=True, label=self.label, detail=detail
+                            ):
+                                print(
+                                    f"  ↩️  [llm-fallback] {self.label}: the fallback provider cannot "
+                                    f"serve a forced tool_choice ({info.label}) — structured calls "
+                                    f"return to the primary provider; the agent loop keeps using it"
+                                )
+                        elif LLMGateway.block_fallback(label=self.label, detail=detail):
                             print(
                                 f"  ↩️  [llm-fallback] {self.label}: the fallback provider is blocked "
                                 f"({info.label}) — returning this run to the primary provider "
@@ -355,17 +473,15 @@ class LLMGateway:
                         and not switched
                         and not reverted
                         and not on_fallback
-                        and self._fallback_usable()
+                        and self._fallback_usable(self.structured)
                         and (exhausted or LLMGateway._fallback_active)
                     ):
-                        if LLMGateway.activate_fallback():
-                            target = Provider(
-                                FALLBACK, get_fallback_model(), fallback_api_key(), fallback_base_url()
-                            )
+                        detail = f"{self._where()} answered {info.label}"
+                        if LLMGateway.activate_fallback(label=self.label, detail=detail):
                             print(
                                 f"  🔀 [llm-fallback] {self.label}: rate limited ({info.label}) after "
-                                f"every attempt on the primary provider — switching the rest of this "
-                                f"run to {target.describe()}"
+                                f"every attempt on {self._where()} — switching the rest of this "
+                                f"run to {LLMGateway.fallback_provider().describe()}"
                             )
                         else:
                             print(
@@ -378,11 +494,19 @@ class LLMGateway:
                         continue
 
                 if exhausted or not info.is_retryable or not self.retries:
+                    if self.retries:
+                        # Name the endpoint that gave up. The caller's own error line
+                        # carries the exception but not the provider, and with a
+                        # fallback in play "429" alone doesn't say whose limit it was.
+                        print(
+                            f"  ⛔ [llm] {self.label}: giving up on {self._where()} after "
+                            f"{attempt} attempt(s) ({info.label})"
+                        )
                     raise
 
                 delay = retry_wait_seconds()
                 print(
-                    f"  ⏳ [llm-retry] {self.label}: transient failure "
+                    f"  ⏳ [llm-retry] {self.label}: transient failure on {self._where()} "
                     f"({info.label}, attempt {attempt}/{budget}) — retrying in {delay:.1f}s: "
                     f"{describe_error(e)[:140]}"
                 )

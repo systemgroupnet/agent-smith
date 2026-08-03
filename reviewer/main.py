@@ -419,6 +419,16 @@ async def process_mr(mr_url: str):
         if LLMGateway.fallback_ever_used():
             metrics.model_fallback_used = True
             metrics.model_fallback_model = get_fallback_model()
+        # Every provider transition, as a warning. `model_fallback_used` says only
+        # *that* the run was mixed; these say when it switched, and — crucially —
+        # whether it lost the fallback again and why. A revert is invisible
+        # otherwise: when the retry on the primary succeeds the gateway absorbs the
+        # block entirely, so no error event is recorded and the only trace is one
+        # line in the CI log. That is how a run could switch to the fallback,
+        # complete two file reviews on it, be returned to a throttled primary by a
+        # single salvage call, and report nothing but `model_fallback_used = true`.
+        for transition in LLMGateway.transitions():
+            record_warning(metrics, transition.kind, transition.describe())
         await send_run_analytics(metrics)
 
 
