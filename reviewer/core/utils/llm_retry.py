@@ -21,26 +21,27 @@ So the policy is:
   backoff makes them collide again on every retry. Independent random waits
   spread the herd out.
 * **Fall back** to a second provider when a rate limit survives the whole retry
-  budget — see :func:`with_llm_retry` and ``langchain_config``'s fallback latch.
+  budget, and back again if that provider turns out to be blocked.
 * **Never** retry a hard limit/quota denial or a provider config block; surface
   those immediately so the run fails fast instead of hammering a wall.
+
+This module is the **policy**: how to classify a failure, how many attempts it
+deserves, how long to wait. Executing that policy — the loop, the provider
+switches, rebuilding the caller's model-bound runnable — belongs to
+:class:`core.llm.gateway.LLMGateway`, the one object every LLM call goes through.
+The split keeps this module free of state and of any import of the gateway, so
+either can be read on its own.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import random
 import re
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
-from core.config.langchain_config import (
-    activate_fallback_provider,
-    describe_fallback_provider,
-    fallback_configured,
-    is_fallback_active,
-)
+from core.config.langchain_config import fallback_configured
 
 # Hard denials — retrying is futile until a reset; surface immediately.
 _HARD_LIMIT_SIGNATURES = (
@@ -232,8 +233,15 @@ class LLMErrorInfo:
 
     @property
     def label(self) -> str:
-        """Short ``429/1302``-style tag for logs."""
-        parts = [str(p) for p in (self.status_code, self.provider_code) if p]
+        """Short ``429/1302``-style tag for logs.
+
+        The provider code is dropped when it merely echoes the HTTP status (some
+        bodies carry ``{"code": 404}``), which would render an uninformative
+        ``404/404``.
+        """
+        parts = [str(self.status_code)] if self.status_code else []
+        if self.provider_code and str(self.provider_code) != str(self.status_code):
+            parts.append(str(self.provider_code))
         return "/".join(parts) if parts else "unclassified"
 
 
@@ -376,92 +384,17 @@ def retry_wait_seconds() -> float:
     return random.uniform(low, high)
 
 
-def _switch_to_fallback(label: str, info: LLMErrorInfo) -> bool:
-    """Flip the process-wide fallback latch. Returns False when no fallback is
-    configured, in which case the caller keeps its normal retry/raise behavior.
+def retry_attempt_budget(info: LLMErrorInfo) -> int:
+    """How many attempts a failure of this class deserves.
 
-    The latch is global and sticky on purpose: with several file reviews in
-    flight, a per-call switch would make every other agent spend its own full
-    retry budget against a provider already known to be throttling us.
-    """
-    if not fallback_configured():
-        return False
-    if activate_fallback_provider():
-        print(
-            f"  🔀 [llm-fallback] {label}: rate limited ({info.label}) after every attempt on the "
-            f"primary provider — switching the rest of this run to {describe_fallback_provider()}"
-        )
-    else:
-        print(f"  🔀 [llm-fallback] {label}: rebuilding on the already-active fallback provider")
-    return True
+    LLM_RETRY_ATTEMPTS (default 3) for most transient failures, but timeout-class
+    ones are capped at ``_TIMEOUT_MAX_ATTEMPTS``: each of their attempts costs a
+    *full* OPENROUTER_TIMEOUT_MS window rather than failing fast, so three of them
+    would spend ~15 min on one file and starve the run's OVERALL_TIMEOUT_S budget.
 
-
-async def with_llm_retry(
-    operation: Callable[[], object],
-    *,
-    label: str = "LLM call",
-    on_fallback: Optional[Callable[[], None]] = None,
-):
-    """Await ``operation()`` (a zero-arg coroutine factory), retrying transient
-    failures after a random wait, and failing over to the fallback provider when
-    a rate limit outlives the retry budget.
-
-    ``operation`` must return a *fresh* awaitable each call (e.g.
-    ``lambda: chain.ainvoke(...)``) so each retry issues a new request.
-
-    ``on_fallback`` rebuilds the caller's model-bound runnable — the chain or
-    agent executor was constructed against the primary provider, so it has to be
-    reconstructed for the swap to take effect. The retry budget resets after a
-    switch, giving the fallback a full set of attempts of its own. Call sites
-    that pass nothing simply never fail over.
-
-    Re-raises immediately on a hard limit/quota denial, a provider config block,
-    or any non-transient error, and re-raises the last error after the final
-    attempt. Timeout-class failures are capped at ``_TIMEOUT_MAX_ATTEMPTS``
-    regardless of LLM_RETRY_ATTEMPTS, since each of their attempts costs a full
-    request-timeout window rather than failing fast.
-
-    Env knobs: LLM_RETRY_ATTEMPTS (default 3), LLM_RETRY_WAIT_MIN_S (0.5),
-    LLM_RETRY_WAIT_MAX_S (5).
+    The budget is per *provider* — :class:`core.llm.gateway.LLMGateway` resets the
+    attempt count on a provider switch, so the new endpoint gets a full set of its
+    own.
     """
     attempts = max(1, _int_env("LLM_RETRY_ATTEMPTS", 3))
-    switched = False
-    attempt = 0
-
-    while True:
-        attempt += 1
-        try:
-            return await operation()
-        except Exception as e:  # noqa: BLE001 — classify then re-raise
-            info = parse_llm_error(e)
-            budget = min(attempts, _TIMEOUT_MAX_ATTEMPTS) if info.is_timeout else attempts
-            exhausted = attempt >= budget
-
-            # A throttle that outlived the whole budget is what the fallback
-            # provider exists for. Only rate limits trigger it: a timeout or a
-            # gateway blip says nothing about the provider being over capacity.
-            #
-            # ``is_fallback_active()`` short-circuits the budget: with a batch of
-            # file reviews in flight they are all being throttled at once, so once
-            # any one of them has switched, the rest should join immediately
-            # rather than each spending three more attempts proving the primary is
-            # still busy. Their runnables are still bound to the primary client,
-            # so joining means rebuilding — the latch alone changes nothing.
-            if info.is_rate_limit and not switched and on_fallback is not None:
-                if (exhausted or is_fallback_active()) and _switch_to_fallback(label, info):
-                    on_fallback()
-                    switched = True
-                    attempt = 0
-                    await asyncio.sleep(retry_wait_seconds())
-                    continue
-
-            if exhausted or not info.is_retryable:
-                raise
-
-            delay = retry_wait_seconds()
-            print(
-                f"  ⏳ [llm-retry] {label}: transient failure "
-                f"({info.label}, attempt {attempt}/{budget}) — retrying in {delay:.1f}s: "
-                f"{describe_error(e)[:140]}"
-            )
-            await asyncio.sleep(delay)
+    return min(attempts, _TIMEOUT_MAX_ATTEMPTS) if info.is_timeout else attempts

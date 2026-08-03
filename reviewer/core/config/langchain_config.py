@@ -1,10 +1,19 @@
 """
-LangChain Configuration Module — one OpenAI-compatible client for every endpoint
+Provider configuration and chat-model construction — one OpenAI-compatible client.
 
-Every chat model is a ``ChatOpenAI`` pointed at ``OPENROUTER_BASE_URL``. That one
-client covers OpenRouter, OpenRouter behind an internal reverse proxy, and a
-vendor's own OpenAI-compatible API (e.g. an internal GLM/Zhipu ``/v4`` endpoint),
-because they all speak ``POST {base}/chat/completions``.
+This module is deliberately **stateless**: it reads the environment and builds a
+``ChatOpenAI``, and that is all. It answers "what providers are configured, and
+how do I build a client for one of them?" It does *not* decide which provider is
+in force, retry anything, or fail over — that is
+:class:`core.llm.gateway.LLMGateway`, the single object every LLM call goes
+through. Keeping the two apart is what lets the gateway own all the mutable
+state (one latch, in one place) while this stays a pure builder that cannot
+disagree with itself.
+
+Every chat model is a ``ChatOpenAI`` pointed at an OpenAI-compatible base URL.
+That one client covers OpenRouter, OpenRouter behind an internal reverse proxy,
+and a vendor's own API (e.g. an internal GLM/Zhipu ``/v4`` endpoint), because
+they all speak ``POST {base}/chat/completions``.
 
 This replaced ``langchain-openrouter``'s ``ChatOpenRouter``, which could only talk
 to OpenRouter: it validates *responses* against OpenRouter's schema, so a GLM
@@ -24,6 +33,7 @@ window expiring is what produced the `httpx.ReadTimeout` failures in CI.
 import json
 import os
 from typing import Any, Optional
+
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
@@ -45,24 +55,30 @@ def int_env(name: str, default: int) -> int:
         return default
 
 
-def get_default_model() -> str:
-    """
-    Return the default LLM model id from the environment (OpenRouter format).
+# ── The primary provider ─────────────────────────────────────────────────────
+# All read at call time, so a change after import is respected (tests, web mode).
 
-    Read at call time so changes to DEFAULT_LLM_MODEL after import are respected.
-    """
+
+def get_default_model() -> str:
+    """The primary model id, as the configured endpoint names it — ``provider/model``
+    on OpenRouter, native (``glm-5.2``) on a vendor API."""
     return os.getenv("DEFAULT_LLM_MODEL", "deepseek/deepseek-v4-pro")
 
 
-# ── Fallback provider ────────────────────────────────────────────────────────
-# A second endpoint the whole run switches to when the primary keeps answering
-# with a rate/concurrency limit (see core/utils/llm_retry.py). The switch is a
-# process-wide, sticky latch rather than a per-call choice: several file reviews
-# are in flight at once and they hit the limit together, so once one of them has
-# established that the primary is throttling, the others should not each spend a
-# full retry budget rediscovering it. It is never switched back — a provider that
-# just shed load under our concurrency will still be shedding it this run.
-_fallback_active = False
+def primary_api_key() -> str:
+    """Key for the primary endpoint."""
+    return os.getenv("OPENROUTER_API_KEY", "").strip()
+
+
+def primary_base_url() -> str:
+    """Primary endpoint, or "" for api.openrouter.ai."""
+    return os.getenv("OPENROUTER_BASE_URL", "").strip()
+
+
+# ── The fallback provider ────────────────────────────────────────────────────
+# A second endpoint the run switches to when the primary keeps answering with a
+# rate/concurrency limit. Only the *configuration* lives here; whether the switch
+# has happened is LLMGateway's business.
 
 
 def get_fallback_model() -> str:
@@ -70,15 +86,15 @@ def get_fallback_model() -> str:
     return os.getenv("FALLBACK_LLM_MODEL", "").strip()
 
 
-def _fallback_api_key() -> str:
+def fallback_api_key() -> str:
     """Fallback key. Defaults to the primary key, so a fallback that is another
     model on the *same* account needs only FALLBACK_LLM_MODEL."""
-    return os.getenv("FALLBACK_LLM_API_KEY", "").strip() or os.getenv("OPENROUTER_API_KEY", "").strip()
+    return os.getenv("FALLBACK_LLM_API_KEY", "").strip() or primary_api_key()
 
 
-def _fallback_base_url() -> str:
+def fallback_base_url() -> str:
     """Fallback endpoint. Defaults to the primary endpoint, for the same reason."""
-    return os.getenv("FALLBACK_LLM_BASE_URL", "").strip() or os.getenv("OPENROUTER_BASE_URL", "").strip()
+    return os.getenv("FALLBACK_LLM_BASE_URL", "").strip() or primary_base_url()
 
 
 def fallback_configured() -> bool:
@@ -86,70 +102,27 @@ def fallback_configured() -> bool:
     the key and base URL each fall back to the primary's when unset, so pointing at
     a different model on the same endpoint takes one variable, and a genuinely
     separate provider takes all three."""
-    return bool(get_fallback_model() and _fallback_api_key())
+    return bool(get_fallback_model() and fallback_api_key())
 
 
-def is_fallback_active() -> bool:
-    """True once the run has switched to the fallback provider."""
-    return _fallback_active
+# Legacy model name mapping for backward compatibility with old agent code.
+MODEL_NAME_MAPPING = {
+    "gpt-5-nano": "openai/gpt-4o-mini",  # gpt-5-nano doesn't exist, map to gpt-4o-mini
+    "gpt-4o-mini": "openai/gpt-4o-mini",
+    "gpt-4o": "openai/gpt-4o",
+    "o1-mini": "openai/o1-mini",
+    "o1-preview": "openai/o1-preview",
+    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+}
 
 
-def activate_fallback_provider() -> bool:
-    """Latch the fallback on for the rest of the process.
-
-    Returns True if this call flipped it, False if it was already on — the caller
-    uses that only to decide how to phrase its log line, since concurrent agents
-    all arrive here after the same throttle.
-    """
-    global _fallback_active
-    if _fallback_active:
-        return False
-    _fallback_active = True
-    return True
-
-
-def reset_fallback_provider() -> None:
-    """Clear the latch. For tests and for web mode, where one process serves many
-    reviews and a throttle during one MR should not permanently demote the next."""
-    global _fallback_active
-    _fallback_active = False
-
-
-def describe_fallback_provider() -> str:
-    """Human-readable fallback target for log lines (never includes the key)."""
-    base = _fallback_base_url()
-    return f"{get_fallback_model()} @ {base}" if base else f"{get_fallback_model()} @ api.openrouter.ai"
-
-
-def resolve_effective_model(model_name: Optional[str] = None) -> str:
-    """The model id actually sent — the fallback's once the fallback is active.
-
-    Every caller's requested model is overridden, because the latch means "the
-    primary endpoint is throttling us", which is true of every model on it.
-    """
-    if _fallback_active and fallback_configured():
-        return get_fallback_model()
-    return model_name or get_default_model()
-
-
-def _resolve_endpoint(model_name: Optional[str]) -> tuple[str, str, str]:
-    """``(model, api_key, base_url)`` for the provider currently in force."""
-    if _fallback_active and fallback_configured():
-        return get_fallback_model(), _fallback_api_key(), _fallback_base_url()
-    return (
-        model_name or get_default_model(),
-        os.getenv("OPENROUTER_API_KEY", "").strip(),
-        os.getenv("OPENROUTER_BASE_URL", "").strip(),
-    )
-
-
-def _get_openrouter_provider() -> Optional[dict]:
+def _openrouter_provider() -> Optional[dict]:
     """
     Optional OpenRouter provider-routing config, read from OPENROUTER_PROVIDER.
 
     Set OPENROUTER_PROVIDER to a JSON object to pin/sort providers or enforce a
     data policy — e.g. '{"order": ["Anthropic"], "allow_fallbacks": true}' or
-    '{"data_collection": "deny"}'. This is the lever for "No endpoints matching
+    '{"data_collection": "allow"}'. This is the lever for "No endpoints matching
     your data policy" guardrail errors. Returns None when unset or invalid.
     """
     raw = os.getenv("OPENROUTER_PROVIDER", "").strip()
@@ -163,20 +136,27 @@ def _get_openrouter_provider() -> Optional[dict]:
         return None
 
 
-def get_llm_model(
-    model_name: Optional[str] = None,
+def build_chat_model(
+    *,
+    model: str,
+    api_key: str,
+    base_url: str = "",
     temperature: float = 0.0,
     streaming: bool = False,
     max_tokens: Optional[int] = None,
     reasoning: Optional[dict] = None,
 ) -> BaseChatModel:
     """
-    Get a ChatOpenAI model pointed at the configured endpoint.
+    Build a ``ChatOpenAI`` for one explicit endpoint.
+
+    Every argument is passed in rather than read from the environment here: the
+    caller (LLMGateway) has already decided which provider is in force, and a
+    builder that re-derived it could disagree with that decision.
 
     Args:
-        model_name: Model id as the endpoint names it — "provider/model" on
-                    OpenRouter, native (e.g. "glm-5.2") on a vendor API. Falls
-                    back to DEFAULT_LLM_MODEL when None.
+        model: Model id as the endpoint names it.
+        api_key: Key for that endpoint.
+        base_url: Endpoint, or "" for api.openrouter.ai.
         temperature: Sampling temperature (0.0 = deterministic).
         streaming: Enable streaming for ``invoke``. (``astream`` streams anyway.)
         max_tokens: Maximum tokens for the response (optional).
@@ -184,24 +164,12 @@ def get_llm_model(
                    request field via ``extra_body`` (e.g. {"effort": "none"} to
                    turn thinking off). Honored by OpenRouter; ignored by
                    endpoints that don't know the field.
-
-    Returns:
-        Configured ChatOpenAI (a BaseChatModel).
-
-    Environment Variables:
-        - OPENROUTER_API_KEY: required (the key for whichever endpoint is set).
-        - DEFAULT_LLM_MODEL: fallback model when model_name is not provided.
-        - OPENROUTER_BASE_URL: optional custom endpoint (reverse proxy, vendor API).
-        - OPENROUTER_PROVIDER: optional JSON provider-routing config (OpenRouter).
-        - OPENROUTER_TIMEOUT_MS: per-request timeout in milliseconds.
     """
-    # Which provider is in force: the primary, or the fallback once the rate-limit
-    # latch has been flipped (see activate_fallback_provider).
-    model, api_key, base_url = _resolve_endpoint(model_name)
     if not api_key:
         raise ValueError(
-            "OPENROUTER_API_KEY not found in environment variables. "
-            "Please set OPENROUTER_API_KEY in your .env file."
+            "No LLM API key found in environment variables. "
+            "Please set OPENROUTER_API_KEY (and FALLBACK_LLM_API_KEY if the "
+            "fallback provider uses a different account) in your .env file."
         )
 
     # "provider/model" is *OpenRouter's* id convention, so only assume a missing
@@ -228,7 +196,6 @@ def get_llm_model(
     }
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
-
     if base_url:
         kwargs["base_url"] = base_url
 
@@ -237,7 +204,7 @@ def get_llm_model(
     # know them ignores them (checked against GLM: a request carrying
     # reasoning={"effort":"none"} is answered normally).
     extra_body: dict[str, Any] = {}
-    provider = _get_openrouter_provider()
+    provider = _openrouter_provider()
     if provider:
         extra_body["provider"] = provider
     if reasoning is not None:
@@ -248,7 +215,7 @@ def get_llm_model(
     return ChatOpenAI(**kwargs)
 
 
-def _structured_reasoning_for(model: str) -> Optional[dict]:
+def structured_reasoning_for(model: str) -> Optional[dict]:
     """
     Reasoning override for structured-output calls, decided per model.
 
@@ -258,6 +225,12 @@ def _structured_reasoning_for(model: str) -> Optional[dict]:
     tool_choice" — historically surfaced as "Function call should not be used
     with prefix"), so for those models structured calls must run with
     reasoning disabled. All other models keep their reasoning behavior.
+
+    The argument must be the model *actually being sent*, not the one an agent
+    asked for: once the gateway has switched providers those differ, and falling
+    back from GLM (fine with a forced tool_choice while thinking) to a DeepSeek V4
+    model (which rejects it) has to disable reasoning even though the primary id
+    never needed it.
 
     The model list is comma-separated id prefixes in
     STRUCTURED_NO_REASONING_MODELS (default "deepseek/").
@@ -273,80 +246,3 @@ def _structured_reasoning_for(model: str) -> Optional[dict]:
     if any(model.startswith(p) for p in prefixes):
         return {"effort": "none"}
     return None
-
-
-def get_reasoning_model(effort: str = "medium", temperature: float = 0.0) -> BaseChatModel:
-    """Get a reasoning model (o1 series) configured for OpenRouter."""
-    effort_to_model = {
-        "low": "openai/o1-mini",
-        "medium": "openai/o1-mini",
-        "high": "openai/o1-preview",
-    }
-    return get_llm_model(effort_to_model.get(effort, "openai/o1-mini"), temperature=temperature)
-
-
-def get_fast_model(temperature: float = 0.0) -> BaseChatModel:
-    """Get a fast, cost-effective model for simple tasks (FAST_LLM_MODEL)."""
-    return get_llm_model(os.getenv("FAST_LLM_MODEL", "openai/gpt-4o-mini"), temperature=temperature)
-
-
-def get_smart_model(temperature: float = 0.0) -> BaseChatModel:
-    """Get a powerful model for complex reasoning tasks (SMART_LLM_MODEL)."""
-    return get_llm_model(os.getenv("SMART_LLM_MODEL", "openai/gpt-4o"), temperature=temperature)
-
-
-# Legacy model name mapping for backward compatibility with old agent code.
-MODEL_NAME_MAPPING = {
-    "gpt-5-nano": "openai/gpt-4o-mini",  # gpt-5-nano doesn't exist, map to gpt-4o-mini
-    "gpt-4o-mini": "openai/gpt-4o-mini",
-    "gpt-4o": "openai/gpt-4o",
-    "o1-mini": "openai/o1-mini",
-    "o1-preview": "openai/o1-preview",
-    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
-}
-
-
-def get_model_for_agent(
-    agent_model_name: str,
-    temperature: float = 0.0,
-    streaming: bool = False,
-    max_tokens: Optional[int] = None,
-    reasoning: Optional[dict] = None,
-) -> BaseChatModel:
-    """
-    Get a model configured for a specific agent, mapping legacy model names to
-    OpenRouter ids.
-    """
-    actual_model = MODEL_NAME_MAPPING.get(agent_model_name, agent_model_name)
-    return get_llm_model(
-        actual_model,
-        temperature=temperature,
-        streaming=streaming,
-        max_tokens=max_tokens,
-        reasoning=reasoning,
-    )
-
-
-def get_structured_model_for_agent(
-    agent_model_name: str,
-    temperature: float = 0.0,
-) -> BaseChatModel:
-    """
-    Model instance for ``with_structured_output(method="function_calling")``
-    calls. Same as get_model_for_agent, except reasoning is disabled for
-    models whose thinking mode rejects a forced tool_choice (see
-    _structured_reasoning_for). Agent-loop calls (tool_choice auto) should
-    keep using get_model_for_agent so reasoning stays on.
-    """
-    actual_model = MODEL_NAME_MAPPING.get(agent_model_name, agent_model_name)
-    # Decide the reasoning override against the model that will actually be sent.
-    # Once the fallback latch is on that is the *fallback* id, and the two can
-    # disagree: falling back from GLM (fine with a forced tool_choice while
-    # thinking) to a DeepSeek V4 model (which rejects it) must disable reasoning,
-    # even though the primary id never needed it.
-    return get_llm_model(
-        actual_model,
-        temperature=temperature,
-        streaming=False,
-        reasoning=_structured_reasoning_for(resolve_effective_model(actual_model)),
-    )

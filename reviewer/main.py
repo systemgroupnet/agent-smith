@@ -64,12 +64,9 @@ from core.config.langfuse_config import get_langfuse_handler, flush_langfuse
 from core.config.langchain_config import (
     get_default_model,
     get_fallback_model,
-    get_llm_model,
     int_env,
-    is_fallback_active,
-    reset_fallback_provider,
-    resolve_effective_model,
 )
+from core.llm.gateway import LLMGateway
 from core.utils.llm_retry import is_provider_hard_block, describe_error
 from core.analytics import send_run_analytics
 from dto.analytics import RunMetrics, record_error, record_warning
@@ -129,7 +126,7 @@ async def _post_review_summary(
     metrics.posted_summary = {
         "note_id": note_id,
         "discussion_id": posted.get("discussion_id"),
-        "model": resolve_effective_model(),
+        "model": LLMGateway.effective_model(),
     }
 
     reactions_enabled = os.getenv(
@@ -266,7 +263,7 @@ async def process_single_file(
         # attempt was rate limited) is attributed to the fallback. Recorded per
         # file rather than per run because the failover latch flips mid-run.
         if model_by_file is not None:
-            model_by_file[file_path] = resolve_effective_model()
+            model_by_file[file_path] = LLMGateway.effective_model()
 
 
         file_elapsed_time = time.time() - file_start_time
@@ -298,9 +295,19 @@ async def llm_preflight() -> Optional[BaseException]:
     timeout_s = int_env("LLM_PREFLIGHT_TIMEOUT_S", 60)
     base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     print(f"🩺 LLM endpoint pre-flight ({base_url})...")
+    # Through the gateway like every other call, but with retries=False: this is a
+    # liveness probe, and its job is to report the endpoint's state rather than to
+    # work around it. Retrying or failing over here would mask the very condition
+    # it exists to detect, and it has its own wall-clock budget besides.
+    probe = LLMGateway(
+        lambda model: model,
+        label="LLM pre-flight",
+        max_tokens=100,
+        retries=False,
+    )
     try:
         await asyncio.wait_for(
-            get_llm_model(max_tokens=100).ainvoke("Reply with the single word OK."),
+            probe.ainvoke("Reply with the single word OK."),
             timeout=timeout_s,
         )
         print("✅ LLM endpoint reachable\n")
@@ -333,7 +340,7 @@ async def process_mr(mr_url: str):
     # The LLM fallback latch is sticky for a run, not for a process. In web mode
     # (app.py) one process serves many reviews, so an MR that got rate-limited
     # would otherwise demote every later review to the fallback model forever.
-    reset_fallback_provider()
+    LLMGateway.reset()
     try:
         return await _run_review(mr_url, metrics)
     except Exception as e:
@@ -346,7 +353,7 @@ async def process_mr(mr_url: str):
         # Read the failover latch here rather than at the switch site: the finally
         # block is the one place every exit path passes through, so a run that
         # crashed after failing over still reports that it did.
-        if is_fallback_active():
+        if LLMGateway.fallback_ever_used():
             metrics.model_fallback_used = True
             metrics.model_fallback_model = get_fallback_model()
         await send_run_analytics(metrics)
@@ -1084,7 +1091,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                     "model": (
                         model_by_file.get(canonical)
                         or model_by_file.get(file_name)
-                        or resolve_effective_model()
+                        or LLMGateway.effective_model()
                     ),
                 })
                 if reactions_enabled:

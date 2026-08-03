@@ -12,8 +12,9 @@ from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
-from core.config.langchain_config import get_structured_model_for_agent, get_default_model
-from core.utils.llm_retry import with_llm_retry, describe_error
+from core.config.langchain_config import get_default_model
+from core.llm.gateway import LLMGateway
+from core.utils.llm_retry import describe_error
 from dto.general import ReviewResponse, ReviewIssue
 
 
@@ -45,62 +46,50 @@ class BaseReviewAgent(ABC, Generic[T]):
             temperature: Model temperature (0.0 = deterministic)
             output_model: Pydantic model for structured output
         """
-        resolved_model = model_name or get_default_model()
-        self.model_name = resolved_model
+        self.model_name = model_name or get_default_model()
         self.temperature = temperature
         self.output_model = output_model
-        
-        # Initialize LLM. This agent's only LLM use is the structured-output
-        # chain (forced tool_choice), so use the structured variant — it turns
-        # reasoning off for models whose thinking mode rejects forced tool_choice.
-        self.llm = get_structured_model_for_agent(
-            resolved_model,
+
+        # Every call this agent makes goes through the gateway, which owns the
+        # provider choice, the client, the retry loop and the failover. All the
+        # agent contributes is how to build its chain from a model — the gateway
+        # re-invokes _build_chain whenever the provider changes.
+        #
+        # structured=True because this agent's only LLM use is a
+        # with_structured_output(method="function_calling") chain, which sends a
+        # forced tool_choice: the gateway then turns reasoning off for models whose
+        # thinking mode rejects that, per the model it is actually sending.
+        self._gateway = LLMGateway(
+            self._build_chain,
+            label=f"{self.__class__.__name__} structured call",
+            model_name=self.model_name,
             temperature=temperature,
+            structured=True,
         )
-        
-        # Build chain
-        self._build_chain()
-    
+
     @abstractmethod
     def get_system_prompt(self) -> str:
         """
         Get the system prompt for this agent.
         Must be implemented by subclasses.
-        
+
         Returns:
             System prompt string
         """
         pass
-    
-    def _build_chain(self):
-        """Build the LangChain chain with prompt + LLM + parser."""
-        # Get system prompt from subclass
-        system_prompt = self.get_system_prompt()
-        
-        # Use structured output with the LLM directly. Force function_calling so it
-        # routes to the same providers as tool calls (avoids the json-schema/strict
-        # "no endpoints match your data policy" 404 on OpenRouter).
-        llm_with_structure = self.llm.with_structured_output(self.output_model, method="function_calling")
-        
-        # Create prompt template (no format instructions needed with structured output)
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{input}")
-        ])
-        
-        # Create chain: prompt | llm_with_structure
-        self.chain = self.prompt | llm_with_structure
 
-    def _rebuild_for_fallback(self):
-        """Re-resolve the model and rebuild the chain on the fallback provider.
+    def _build_chain(self, model):
+        """Build the prompt → structured-LLM chain around ``model``.
 
-        Handed to ``with_llm_retry`` as its ``on_fallback`` hook: the chain below
-        is bound to a client built at __init__ against the primary endpoint, so
-        the swap only takes effect if it is reconstructed. ``run``'s lambda reads
-        ``self.chain`` at call time, so the retry after this picks up the new one.
+        Called by the gateway, once per provider. ``function_calling`` is forced so
+        the call routes to the same providers as tool calls (avoiding the
+        json-schema/strict "no endpoints match your data policy" 404 on OpenRouter).
         """
-        self.llm = get_structured_model_for_agent(self.model_name, temperature=self.temperature)
-        self._build_chain()
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", self.get_system_prompt()),
+            ("human", "{input}"),
+        ])
+        return prompt | model.with_structured_output(self.output_model, method="function_calling")
 
     async def run(
         self,
@@ -131,14 +120,9 @@ class BaseReviewAgent(ABC, Generic[T]):
             if context:
                 input_data.update(context)
 
-            # Invoke chain, retrying transient gateway failures (e.g. the egress
-            # security proxy's burst 403) but not hard quota/limit denials.
-            result = await with_llm_retry(
-                lambda: self.chain.ainvoke(input_data, config=config),
-                label=f"{agent_name} structured call",
-                on_fallback=self._rebuild_for_fallback,
-            )
-            
+            result = await self._gateway.ainvoke(input_data, config=config)
+
+
             elapsed_time = time.time() - start_time
             print(f"⏱️  {agent_name} completed in {elapsed_time:.2f}s")
             
@@ -151,12 +135,13 @@ class BaseReviewAgent(ABC, Generic[T]):
     
     def run_sync(self, input_text: str, context: Optional[dict] = None) -> T:
         """
-        Run the agent synchronously.
-        
+        Run the agent synchronously. One attempt, no retry and no failover — the
+        reviewer itself is async end to end and goes through ``run``.
+
         Args:
             input_text: Input text for the agent
             context: Optional context dictionary
-        
+
         Returns:
             Structured output from the agent
         """
@@ -165,11 +150,10 @@ class BaseReviewAgent(ABC, Generic[T]):
             input_data = {"input": input_text}
             if context:
                 input_data.update(context)
-            
-            # Invoke chain
-            result = self.chain.invoke(input_data)
-            return result
-            
+
+            return self._gateway.invoke(input_data)
+
+
         except Exception as e:
             print(f"❌ Error in {self.__class__.__name__}: {describe_error(e)}")
             raise

@@ -29,12 +29,9 @@ from langchain_core.runnables import RunnableConfig
 from langchain_classic.agents import create_openai_tools_agent, AgentExecutor
 from langchain_core.tools import BaseTool
 
-from core.config.langchain_config import (
-    get_model_for_agent,
-    get_structured_model_for_agent,
-    get_default_model,
-)
-from core.utils.llm_retry import with_llm_retry, describe_error
+from core.config.langchain_config import get_default_model
+from core.llm.gateway import LLMGateway
+from core.utils.llm_retry import describe_error
 from core.MCP.toolkit_manager import get_mcp_toolkit_manager
 from dto.general import ReviewResponse
 
@@ -82,19 +79,32 @@ class ToolEnabledAgent:
         self.output_model = output_model
         self.max_iterations = max_iterations
         self.verbose = verbose
-        
-        # Initialize LLM
-        self.llm = get_model_for_agent(
-            resolved_model,
+
+        # Two gateways, because this agent makes two different kinds of call and
+        # they need different clients. The agent loop runs with tool_choice=auto so
+        # reasoning stays on (structured=False); the salvage call forces a
+        # tool_choice, which thinking-mode models reject (structured=True). Each
+        # owns its own bound runnable and rebuilds it if the provider changes;
+        # neither agent code nor this class touches retries or failover.
+        self._loop = LLMGateway(
+            self._build_executor,
+            label=f"{self.__class__.__name__} agent",
+            model_name=resolved_model,
             temperature=temperature,
-            streaming=False
         )
-        
-        # Build agent
-        self._build_agent()
-    
-    def _build_agent(self):
-        """Build the LangChain agent with tools."""
+        self._salvage = LLMGateway(
+            self._build_salvage_chain,
+            label=f"{self.__class__.__name__} salvage",
+            model_name=resolved_model,
+            temperature=temperature,
+            structured=True,
+        ) if output_model else None
+
+    def _build_executor(self, model):
+        """Build the tool-calling AgentExecutor around ``model``.
+
+        Called by the gateway, once per provider — prompt and tool wiring only, no I/O.
+        """
         # Create prompt template
         if self.output_model:
             # Add structured output instructions
@@ -117,13 +127,13 @@ class ToolEnabledAgent:
         
         # Create OpenAI tools agent
         agent = create_openai_tools_agent(
-            llm=self.llm,
+            llm=model,
             tools=self.tools,
             prompt=prompt,
         )
-        
+
         # Create agent executor
-        self.agent_executor = AgentExecutor(
+        return AgentExecutor(
             agent=agent,
             tools=self.tools,
             verbose=self.verbose,
@@ -134,22 +144,6 @@ class ToolEnabledAgent:
             # from what was gathered when the agent doesn't emit clean JSON.
             return_intermediate_steps=True,
         )
-
-    def _rebuild_for_fallback(self):
-        """Re-resolve the model and rebuild the executor on the fallback provider.
-
-        Handed to ``with_llm_retry`` as its ``on_fallback`` hook: the executor is
-        bound to a client built at __init__ against the primary endpoint, so it
-        has to be reconstructed for the swap to take effect. ``run``'s lambda
-        reads ``self.agent_executor`` at call time, so the retry after this picks
-        up the new one. Rebuilding is prompt/tool wiring only — no I/O.
-        """
-        self.llm = get_model_for_agent(
-            self.model_name,
-            temperature=self.temperature,
-            streaming=False,
-        )
-        self._build_agent()
 
     def _parse_text_output(self, output: str):
         """Best-effort parse of the agent's free-text answer into ``output_model``.
@@ -215,17 +209,16 @@ class ToolEnabledAgent:
         if isinstance(output, str) and "Agent stopped due to max iterations" in output:
             print("  ⚠️  [ToolEnabledAgent] hit max_iterations without emitting a final answer")
 
-    def _get_structured_llm(self):
-        """LLM for the salvage structured-output call.
+    def _build_salvage_chain(self, model):
+        """Structured-output chain for the salvage call, built around ``model``.
 
         function_calling routes to the same providers as the agent's tool calls
         (avoids the json-schema/strict data-policy 404), but it sends a forced
-        tool_choice, which thinking-mode models (DeepSeek V4) reject — so this
-        uses the structured model variant, which disables reasoning for those
-        models only. The agent loop itself stays on self.llm with reasoning on.
+        tool_choice, which thinking-mode models (DeepSeek V4) reject — hence the
+        gateway that owns this chain is created with ``structured=True``, which
+        disables reasoning for exactly those models. The agent loop keeps reasoning on.
         """
-        llm = get_structured_model_for_agent(self.model_name, temperature=self.temperature)
-        return llm.with_structured_output(self.output_model, method="function_calling")
+        return model.with_structured_output(self.output_model, method="function_calling")
 
     def _build_structuring_prompt(self, output, steps):
         """Bounded prompt to derive structured output from what the agent gathered,
@@ -279,13 +272,7 @@ class ToolEnabledAgent:
             if context:
                 input_data.update(context)
 
-            # Invoke agent, retrying transient gateway failures (e.g. the egress
-            # security proxy's burst 403) but not hard quota/limit denials.
-            result = await with_llm_retry(
-                lambda: self.agent_executor.ainvoke(input_data, config=config),
-                label=f"{self.__class__.__name__} agent",
-                on_fallback=self._rebuild_for_fallback,
-            )
+            result = await self._loop.ainvoke(input_data, config=config)
 
             # Extract the final output + the tool call/result trace
             output = result.get("output", "")
@@ -301,14 +288,8 @@ class ToolEnabledAgent:
                     # structured result from what it actually gathered, via a single
                     # reliable with_structured_output call.
                     print("  ⚠️  [ToolEnabledAgent] No parseable final answer; deriving structured output from gathered context")
-                    prompt = self._build_structuring_prompt(output, steps)
-                    # _get_structured_llm builds its client per call, so it already
-                    # honors the latch; the hook is still passed so this call can
-                    # be the one that *trips* it.
-                    parsed_output = await with_llm_retry(
-                        lambda: self._get_structured_llm().ainvoke(prompt),
-                        label=f"{self.__class__.__name__} salvage",
-                        on_fallback=self._rebuild_for_fallback,
+                    parsed_output = await self._salvage.ainvoke(
+                        self._build_structuring_prompt(output, steps)
                     )
                 return parsed_output
 
@@ -320,12 +301,13 @@ class ToolEnabledAgent:
     
     def run_sync(self, input_text: str, context: Optional[dict] = None) -> Union[T, dict]:
         """
-        Run the agent synchronously.
-        
+        Run the agent synchronously. One attempt, no retry and no failover — the
+        reviewer itself is async end to end and goes through ``run``.
+
         Args:
             input_text: Input text for the agent
             context: Optional context dictionary
-        
+
         Returns:
             Structured output (if output_model specified) or dict
         """
@@ -334,9 +316,8 @@ class ToolEnabledAgent:
             input_data = {"input": input_text}
             if context:
                 input_data.update(context)
-            
-            # Invoke agent
-            result = self.agent_executor.invoke(input_data)
+
+            result = self._loop.invoke(input_data)
 
             # Extract the final output + the tool call/result trace
             output = result.get("output", "")
@@ -348,7 +329,7 @@ class ToolEnabledAgent:
                 parsed_output = self._parse_text_output(output)
                 if parsed_output is None:
                     print("  ⚠️  [ToolEnabledAgent] No parseable final answer; deriving structured output from gathered context")
-                    parsed_output = self._get_structured_llm().invoke(
+                    parsed_output = self._salvage.invoke(
                         self._build_structuring_prompt(output, steps)
                     )
                 return parsed_output
