@@ -76,6 +76,24 @@ So every panel over `review_comments` / `comment_scores` means **findings only**
 with no filter needed. That is the whole point of the split — see collector
 migration `0010`.
 
+**Issues *found* and comments *posted* are different numbers in different tables.**
+`review_runs.issues_high/medium/low` count what the reviewers reported; the severity
+of what a human actually sees is one row per comment in `review_comments.severity`
+(`Comments posted by severity` / `Posted severity mix` on Run Stats, matching the
+🔴/🟠/🔵 badge in the comment body). Posted is always the smaller number, and the gap
+is not loss — it is the in-diff gate, the compile-time purge and the verbosity cap
+doing their job. Two consequences for a query:
+
+* At the default verbosity only **high** findings are collected at all, so mediums
+  in the posted mix mean someone put a `review::-vv` label on that MR. Mediums in the
+  *found* counts mean nothing of the sort — they are counted and then discarded.
+* Severity is stored as the model emitted it, so match with `lower(severity)`.
+
+Both panels bucket on `coalesce(review_runs.timestamp, review_comments.received_at)`:
+the run's own timestamp is what `Issues found over time` uses, so found and posted
+bars for the same review land in the same bucket, and the `LEFT JOIN` + `coalesce`
+keeps a comment whose run row is missing from vanishing.
+
 **`review_runs.model` is the *configured* model, not necessarily the one that ran.**
 When a rate limit forces a failover mid-run, `model` still reports the primary;
 `model_fallback_used` / `model_fallback_model` record the switch. A failed-over run

@@ -187,6 +187,7 @@ Apply this purge FIRST and apply it to EVERY comment. A purged comment can never
 - Before you emit `selected_issues`, re-read each one and drop it if it still asserts that something is undefined, unused, unimplemented, or would not compile.
 - For the `problem` field: Create a clear, concise summary of the issue. If multiple comments relate to the same problem, synthesize them into one coherent problem statement.
 - For the `suggestion` field: include the code only, exactly as the input comment gave it. If the input only describes the problem without providing code, leave `suggestion` EMPTY — an empty suggestion is correct and expected. Do NOT put a description of what should be done in this field: it is applied to the file verbatim, so a sentence there gets committed into the source as code. Anything you want to say about the fix belongs in `problem`.
+- For the `severity` field: copy the input comment's severity through **unchanged**. Do not re-grade it. It is rendered as a 🔴/🟠/🔵 badge on the comment a human reads and is recorded per comment in analytics — and an omitted severity is stored as "low", which would label a high-severity finding as trivial.
 - Focus on issues that, if not addressed, could cause real problems in production
 - When in doubt, prioritize issues that affect correctness, security, and data integrity over everything else
 

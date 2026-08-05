@@ -193,6 +193,32 @@ def get_severity(issue: Any) -> str:
     return issue.get("severity", "low") if isinstance(issue, dict) else issue.severity
 
 
+#: Severity marker prefixed to every posted comment. A severity is decided during
+#: the review and then, until now, survived only in the analytics store — on the MR
+#: itself a dozen findings rendered as a dozen identical bubbles with nothing saying
+#: which one to read first. The colours match the "posted by severity" panels in
+#: ``dashboards/run-stats.json`` (red / orange / blue) so a chart and a comment agree.
+SEVERITY_BADGES = {
+    "high": "🔴 High",
+    "medium": "🟠 Medium",
+    "low": "🔵 Low",
+}
+
+
+def severity_badge(issue: Any) -> str:
+    """Return the ``🔴 High``-style marker for an issue, or ``""`` when unknown.
+
+    Unknown rather than defaulted to low: this is the one place a human reads the
+    severity, and labelling an unlabelled finding is worse than labelling nothing.
+    Note this differs from :func:`get_severity`, whose ``"low"`` default exists to
+    keep *counting* total — a count of unknowns is harmless, a wrong badge is not.
+    """
+    severity = (
+        issue.get("severity") if isinstance(issue, dict) else getattr(issue, "severity", None)
+    )
+    return SEVERITY_BADGES.get(str(severity or "").strip().lower(), "")
+
+
 def format_single_issue(issue: Any, applyable: bool = True) -> str:
     """
     Format a single issue for GitLab comment.
@@ -213,8 +239,12 @@ def format_single_issue(issue: Any, applyable: bool = True) -> str:
     problem = issue.get("problem", "") if isinstance(issue, dict) else issue.problem
     suggestion = issue.get("suggestion", "") if isinstance(issue, dict) else getattr(issue, "suggestion", "")
 
-    # Format the comment
-    comment = f"**Issue:**\n{problem}\n\n"
+    # Format the comment. The heading carries the severity badge when there is one,
+    # rather than adding a line of its own — an inline comment is read in a narrow
+    # column next to the code and every extra line pushes the finding down.
+    badge = severity_badge(issue)
+    heading = f"**{badge} severity issue**" if badge else "**Issue:**"
+    comment = f"{heading}\n{problem}\n\n"
 
     cleaned, is_code = sanitize_suggestion(suggestion)
     if cleaned is None:
