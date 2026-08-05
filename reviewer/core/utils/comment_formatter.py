@@ -478,6 +478,70 @@ MAX_SUMMARY_REVIEW_FOCUS = 3
 MAX_SUMMARY_ENTRY_CHARS = 220
 
 
+# ── Inline code in the review summary ────────────────────────────────────────
+# The summary's whole value is in the paths and symbols it names, and it is read
+# by someone skimming for ~20 seconds. GitLab renders `like this` as code, which
+# is what separates "the tax is computed in order.go" from the prose around it.
+# The prompt requires backticks (rule 6); this is the deterministic half, because
+# a prompt is a request and the model drops them often enough to notice on a real
+# MR — the same belt-and-braces as the suggestion field and the summary caps.
+
+#: Regions that are already markup and must be left exactly as they are: an inline
+#: code span (already done), a markdown link (wrapping part of the target breaks
+#: the link) and a bare URL (a slash-separated run inside one is not a repo path).
+_PROTECTED_SPAN = re.compile(r"`[^`]*`|\[[^\]]*\]\([^)]*\)|<?https?://[^\s>)]+>?")
+
+#: Extensions the reviewers classify, plus the config/doc files an MR touches.
+_SOURCE_EXTENSIONS = (
+    "go", "ts", "tsx", "js", "jsx", "vue", "py", "sql", "html", "scss", "css",
+    "json", "yml", "yaml", "md", "sh", "proto", "toml", "ini", "xml", "cs", "java",
+)
+_EXT_ALTERNATION = "|".join(_SOURCE_EXTENSIONS)
+
+#: What gets wrapped — only the two shapes that cannot be an English word: something
+#: path-shaped and something call-shaped. A bare CamelCase or snake_case identifier
+#: is deliberately *not* matched: guessing wrong there puts backticks around a word
+#: in the middle of a sentence, which is worse than leaving a symbol plain.
+#: ``ts`` precedes ``tsx`` in the alternation and the trailing lookahead rejects the
+#: leftover, so ``x.tsx`` backtracks to the longer extension instead of matching
+#: ``x.ts`` and failing — and ``main.gopher`` matches nothing at all.
+_BARE_SYMBOL = re.compile(
+    r"(?<![\w/.`~-])("
+    r"(?:[\w.@+-]+/){2,}[\w.@+-]+"                        # three or more segments
+    rf"|[\w.@+-]+/[\w.@+-]*\.(?:{_EXT_ALTERNATION})"      # dir/file.go
+    rf"|[\w@+-]+\.(?:{_EXT_ALTERNATION})"                 # file.go
+    r"|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\(\)"               # Do(), svc.Do()
+    r")(?![\w/])"
+)
+
+
+def emphasize_symbols(text: str) -> str:
+    """Backtick bare paths and calls so GitLab renders them as code.
+
+    Existing inline code, markdown links and URLs are passed through untouched.
+    """
+    if not text:
+        return text
+    pieces, last = [], 0
+    for span in _PROTECTED_SPAN.finditer(text):
+        pieces.append(_BARE_SYMBOL.sub(r"`\1`", text[last:span.start()]))
+        pieces.append(span.group(0))
+        last = span.end()
+    pieces.append(_BARE_SYMBOL.sub(r"`\1`", text[last:]))
+    return "".join(pieces)
+
+
+def _balance_backticks(text: str) -> str:
+    """Close a code span the length cap cut in half.
+
+    ``_clip`` truncates at a word boundary and does not know about markup, so a
+    long entry could end mid-span and leave one stray backtick — which GitLab
+    renders as a literal backtick and then treats the *next* one as an opener,
+    turning the rest of the comment into code.
+    """
+    return text if text.count("`") % 2 == 0 else f"{text}`"
+
+
 def _clip(text: str, limit: int) -> str:
     """Trim to ``limit`` at a word boundary, with an ellipsis when trimmed."""
     text = " ".join(str(text).split())  # collapse newlines/runs so entries stay one line
@@ -487,12 +551,21 @@ def _clip(text: str, limit: int) -> str:
     return f"{cut or text[:limit]}…"
 
 
+def _summary_prose(text: Any, limit: int) -> str:
+    """Cap a summary field, then make its paths and symbols render as code.
+
+    Order matters: clip first so a backtick this adds can never be the one the cap
+    cuts, then balance whatever the model itself left open, then wrap.
+    """
+    return emphasize_symbols(_balance_backticks(_clip(text, limit)))
+
+
 def _summary_entries(items, max_items: int) -> list:
     """Cap an entry list by count and per-entry length. Entries are ordered
     most-significant-first by the prompt, so dropping the tail loses the least."""
     out = []
     for item in items or []:
-        text = _clip(item, MAX_SUMMARY_ENTRY_CHARS)
+        text = _summary_prose(item, MAX_SUMMARY_ENTRY_CHARS)
         if text:
             out.append(text)
         if len(out) >= max_items:
@@ -512,7 +585,7 @@ def format_review_summary(summary, effort: Optional[int] = None) -> str:
     parts = ["**🤖 Review Summary** — what this MR does and where to look. "
              "Not a review; findings are posted separately.\n"]
 
-    overview = _clip(getattr(summary, "overview", "") or "", MAX_SUMMARY_OVERVIEW_CHARS)
+    overview = _summary_prose(getattr(summary, "overview", "") or "", MAX_SUMMARY_OVERVIEW_CHARS)
     if overview:
         parts.append(f"\n{overview}\n")
 
