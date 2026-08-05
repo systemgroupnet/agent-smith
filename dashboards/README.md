@@ -79,15 +79,35 @@ migration `0010`.
 **Issues *found* and comments *posted* are different numbers in different tables.**
 `review_runs.issues_high/medium/low` count what the reviewers reported; the severity
 of what a human actually sees is one row per comment in `review_comments.severity`
-(`Comments posted by severity` / `Posted severity mix` on Run Stats, matching the
-🔴/🟠/🔵 badge in the comment body). Posted is always the smaller number, and the gap
-is not loss — it is the in-diff gate, the compile-time purge and the verbosity cap
-doing their job. Two consequences for a query:
+(`Comments posted by severity` / `Posted severity mix`, and the `PostedHigh` /
+`PostedMedium` columns of `Latest runs`, matching the 🔴/🟠/🔵 badge in the comment
+body). Posted is always the smaller number, and the gap is not loss — it is the
+in-diff gate, the compile-time purge and the verbosity cap doing their job.
+
+**Do not put a found count and a posted count in the same row** unless the row also
+explains the gap. `Latest runs` used to show `issues_high` beside `comments_posted`,
+where "HighSeverity 2, CommentsPosted 0" reads as a bug but is usually the in-diff
+gate having dropped both, and "MediumSeverity 2, posted 0" is the default verbosity
+discarding mediums exactly as designed. It now counts `review_comments` per run
+(`LEFT JOIN LATERAL … WHERE review_run_id = r.id`) and carries the run's `Verbosity`
+beside them, so every number in the row is the same kind of number. Verbosity comes
+from `raw_json ->> 'review_verbosity'` — there is no typed column yet — and reads `—`
+for runs predating the field.
+
+Two consequences for a query:
 
 * At the default verbosity only **high** findings are collected at all, so mediums
   in the posted mix mean someone put a `review::-vv` label on that MR. Mediums in the
   *found* counts mean nothing of the sort — they are counted and then discarded.
 * Severity is stored as the model emitted it, so match with `lower(severity)`.
+* **A `low` row before v0.7.4 is an artifact, not a posted low.** Lows are out of
+  scope at every verbosity level, so nothing low can ever be posted. The comment
+  reviewer used to be able to drop the `severity` field, and `ReviewIssue.severity`
+  defaults to `"low"` — five rows from 2026-08-05 are genuine **highs** recorded as
+  lows. The reviewer now restores the severity deterministically
+  (`restore_issue_severities`); the historical rows are still wrong in the table, and
+  `UPDATE review_comments SET severity = 'high' WHERE severity = 'low';` is provably
+  correct for them (their runs were all default-verbosity, i.e. highs-only input).
 
 Both panels bucket on `coalesce(review_runs.timestamp, review_comments.received_at)`:
 the run's own timestamp is what `Issues found over time` uses, so found and posted

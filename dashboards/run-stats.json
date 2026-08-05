@@ -711,6 +711,42 @@
                 ]
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Verbosity"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 95
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PostedHigh"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 105
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PostedMedium"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 125
+              }
+            ]
           }
         ]
       },
@@ -744,7 +780,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  'https://gitlab.example.com/' || project_path || '/-/merge_requests/' || mr_id AS \"Link\",\n  project_path AS \"Project\",\n  mr_id AS \"MergeRequest\",\n  review_type AS \"ReviewType\",\n  status AS \"Status\",\n  issues_high AS \"HighSeverity\",\n  issues_medium AS \"MediumSeverity\",\n  issues_low AS \"LowSeverity\",\n  comments_posted AS \"CommentsPosted\",\n  comments_failed AS \"CommentsFailed\",\n  round(duration_seconds / 60) AS \"DurationMinutes\",\n  timestamp :: timestamptz AS \"Time\"\nFROM\n  review_runs\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(timestamp :: timestamptz)\nORDER BY\n  timestamp :: timestamptz DESC\nLIMIT\n  100;",
+          "rawSql": "SELECT\n  'https://gitlab.example.com/' || r.project_path || '/-/merge_requests/' || r.mr_id AS \"Link\",\n  r.project_path AS \"Project\",\n  r.mr_id AS \"MergeRequest\",\n  r.review_type AS \"ReviewType\",\n  r.status AS \"Status\",\n  coalesce(\n    replace(nullif(r.raw_json ->> 'review_verbosity', ''), 'review::', ''),\n    '\u2014'\n  ) AS \"Verbosity\",\n  p.high AS \"PostedHigh\",\n  p.medium AS \"PostedMedium\",\n  r.comments_posted AS \"CommentsPosted\",\n  r.comments_failed AS \"CommentsFailed\",\n  round(r.duration_seconds / 60) AS \"DurationMinutes\",\n  r.timestamp :: timestamptz AS \"Time\"\nFROM\n  review_runs r\n  LEFT JOIN LATERAL (\n    SELECT\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'high'\n      ) AS high,\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'medium'\n      ) AS medium\n    FROM\n      review_comments\n    WHERE\n      review_run_id = r.id\n  ) p ON TRUE\nWHERE\n  r.project_path IN ($project)\n  AND $__timeFilter(r.timestamp :: timestamptz)\nORDER BY\n  r.timestamp :: timestamptz DESC\nLIMIT\n  100;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -766,7 +802,8 @@
         }
       ],
       "title": "Latest runs",
-      "type": "table"
+      "type": "table",
+      "description": "PostedHigh / PostedMedium are comments actually posted on the MR (from review_comments), not issues found \u2014 the reviewers' raw counts pass through the in-diff gate, the compile-time purge and the verbosity cap before anything is posted, so they belong to 'Issues found over time', not here. Verbosity is the MR label in force: at the default level mediums are counted and then discarded, so PostedMedium 0 there is by design, not a loss. '\u2014' means the run predates the field. PostedHigh + PostedMedium below CommentsPosted means something else was posted (a low, or a comment with no severity)."
     },
     {
       "datasource": {
