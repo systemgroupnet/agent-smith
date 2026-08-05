@@ -1870,7 +1870,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  $__timeGroup(coalesce(r.timestamp, c.received_at) :: timestamptz, '1d') AS time,\n  count(*) FILTER (\n    WHERE\n      lower(c.severity) = 'high'\n  ) AS \"HighSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(c.severity) = 'medium'\n  ) AS \"MediumSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(c.severity) = 'low'\n  ) AS \"LowSeverity\"\nFROM\n  review_comments c\n  LEFT JOIN review_runs r ON r.id = c.review_run_id\nWHERE\n  c.project_path IN ($project)\n  AND $__timeFilter(coalesce(r.timestamp, c.received_at) :: timestamptz)\nGROUP BY\n  1\nORDER BY\n  1;",
+          "rawSql": "SELECT\n  $__timeGroup(occurred_at, '1d') AS time,\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'high'\n  ) AS \"HighSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'medium'\n  ) AS \"MediumSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'low'\n  ) AS \"LowSeverity\"\nFROM\n  (\n    SELECT\n      coalesce(r.timestamp, c.received_at) :: timestamptz AS occurred_at,\n      c.project_path,\n      c.severity\n    FROM\n      review_comments c\n      LEFT JOIN review_runs r ON r.id = c.review_run_id\n  ) posted\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(occurred_at)\nGROUP BY\n  1\nORDER BY\n  1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2020,7 +2020,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  count(*) FILTER (\n    WHERE\n      lower(c.severity) = 'high'\n  ) AS \"HighSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(c.severity) = 'medium'\n  ) AS \"MediumSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(c.severity) = 'low'\n  ) AS \"LowSeverity\",\n  count(*) FILTER (\n    WHERE\n      c.severity IS NULL\n      OR lower(c.severity) NOT IN ('high', 'medium', 'low')\n  ) AS \"Unlabelled\"\nFROM\n  review_comments c\n  LEFT JOIN review_runs r ON r.id = c.review_run_id\nWHERE\n  c.project_path IN ($project)\n  AND $__timeFilter(coalesce(r.timestamp, c.received_at) :: timestamptz);",
+          "rawSql": "SELECT\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'high'\n  ) AS \"HighSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'medium'\n  ) AS \"MediumSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'low'\n  ) AS \"LowSeverity\",\n  count(*) FILTER (\n    WHERE\n      severity IS NULL\n      OR lower(severity) NOT IN ('high', 'medium', 'low')\n  ) AS \"Unlabelled\"\nFROM\n  (\n    SELECT\n      coalesce(r.timestamp, c.received_at) :: timestamptz AS occurred_at,\n      c.project_path,\n      c.severity\n    FROM\n      review_comments c\n      LEFT JOIN review_runs r ON r.id = c.review_run_id\n  ) posted\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(occurred_at);",
           "refId": "A",
           "sql": {
             "columns": [

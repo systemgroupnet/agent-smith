@@ -92,7 +92,30 @@ doing their job. Two consequences for a query:
 Both panels bucket on `coalesce(review_runs.timestamp, review_comments.received_at)`:
 the run's own timestamp is what `Issues found over time` uses, so found and posted
 bars for the same review land in the same bucket, and the `LEFT JOIN` + `coalesce`
-keeps a comment whose run row is missing from vanishing.
+keeps a comment whose run row is missing from vanishing. That expression is computed
+in a **derived table** (`… ) posted`) and the macros then take the bare column
+`occurred_at` — see the next item for why it cannot be inlined.
+
+**A Grafana macro argument may not contain a comma or a `)`.** The macro engine
+matches `$__timeGroup\((.*?)\)` — non-greedy, so the **first** `)` ends it — and then
+splits what it captured on `,`. A function call as an argument therefore falls apart
+silently in the file and only fails in the browser:
+
+```sql
+-- ✗ Grafana reads `c.received_at` as the interval, and $__timeFilter takes
+--   `coalesce(r.timestamp` as its column — a TEXT column compared to a timestamptz:
+--     interpolation failed: error parsing interval c.received_at
+--     operator does not exist: character varying <= timestamp with time zone
+$__timeGroup(coalesce(r.timestamp, c.received_at) :: timestamptz, '1d')
+
+-- ✓ compute it once in a subquery, pass a bare column name
+FROM ( SELECT coalesce(r.timestamp, c.received_at) :: timestamptz AS occurred_at … ) posted
+$__timeGroup(occurred_at, '1d')
+```
+
+A cast is fine (`$__timeGroup(timestamp :: timestamptz, '1d')`) — it has neither
+character. This is also why hand-expanding a macro is not a test: the expansion is
+correct while the *parse* is what breaks.
 
 **`review_runs.model` is the *configured* model, not necessarily the one that ran.**
 When a rate limit forces a failover mid-run, `model` still reports the primary;
@@ -111,9 +134,20 @@ models, or those rows land in a bogus bucket.
 ## Validating changes
 
 Panel SQL is easy to break silently (a bad cast returns rows in one environment and
-errors in another). To check every panel against a real schema, run the collector's
-migrations into a scratch database, seed a run, and execute each `rawSql` with the
-Grafana macros stubbed — `$project` → a literal, `$__timeFilter(x)` → a plain
-comparison, `$__timeGroup(x, '1w')` → `date_trunc`. Run each query on its own
-connection: one failure inside a shared transaction aborts it and every later query
-reports the misleading "current transaction is aborted" instead of its own error.
+errors in another). To check every panel against a real schema, create a scratch
+database from `collector/storage.py`'s own SQLAlchemy metadata (or run the
+migrations), seed a run, and execute each `rawSql` with the Grafana macros expanded.
+Run each query on its own connection: one failure inside a shared transaction aborts
+it and every later query reports the misleading "current transaction is aborted"
+instead of its own error.
+
+**Expand the macros the way Grafana *parses* them, not the way they are documented.**
+Substituting `$__timeGroup(x, '1d')` → `date_trunc(...)` by hand tests the meaning and
+misses the argument-splitting rule above — which is exactly how the two errors quoted
+there reached a live dashboard. A faithful stub is ~30 lines: match
+`\$__(timeGroup|timeGroupAlias|timeFilter|timeFrom|timeTo|unixEpoch…)\b(?:\((.*?)\))?`,
+split the capture on `,`, then emit
+`floor(extract(epoch from args[0])/S)*S` for `timeGroup` and
+`args[0] BETWEEN 'from' AND 'to'` for `timeFilter` — and make it **raise** on an
+unparseable interval, since that is the failure you are hunting. Render `$project` as
+a quoted comma-separated list, the way a multi-value variable arrives.
