@@ -219,6 +219,92 @@ def severity_badge(issue: Any) -> str:
     return SEVERITY_BADGES.get(str(severity or "").strip().lower(), "")
 
 
+#: Severity ordering, for resolving a collision and for picking a fallback.
+_SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1, "": 0}
+
+
+def _issue_field(issue: Any, name: str) -> Any:
+    return issue.get(name) if isinstance(issue, dict) else getattr(issue, name, None)
+
+
+def _set_severity(issue: Any, severity: str) -> None:
+    if isinstance(issue, dict):
+        issue["severity"] = severity
+    else:
+        setattr(issue, "severity", severity)
+
+
+def restore_issue_severities(
+    selected: list, originals: list, severities=("high",)
+) -> Tuple[list, list]:
+    """Put the reviewers' severity back over whatever the comment reviewer returned.
+
+    Returns ``(selected, changes)`` where each change is ``(file_name, line, was,
+    now)``. ``selected`` is the same list, its issues updated in place.
+
+    The comment reviewer *synthesizes* ``selected_issues``, and
+    ``ReviewIssue.severity`` defaults to ``"low"`` — so a model that omits the field
+    silently turns every finding it picked into a low. Observed in production: three
+    runs at the **default** verbosity, where ``extract_issues_for_review`` passes
+    nothing but highs, posted five comments all recorded ``low`` (and it is
+    per-response — when the field goes missing it goes missing for the whole array).
+    That severity then reaches the analytics store, the dashboards, and — since the
+    badge exists — the comment a human reads, where a 🔵 on a real high is a lie.
+
+    The prompt asks the model to copy the field through; this does not depend on it.
+    A severity is a fact the reviewers already established, and it is recoverable:
+    the issue must keep its ``file_name``/``line`` to be posted at all, so matching
+    on position gives the original back. Note ``low`` is never in ``severities`` at
+    any verbosity level, so any low in the model's output is corrected by definition.
+    """
+    allowed = tuple(dict.fromkeys(
+        str(s).strip().lower() for s in (severities or ()) if str(s).strip()
+    ))
+    if not allowed or not selected:
+        return selected, []
+
+    def _norm(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _rank(severity: str) -> int:
+        return _SEVERITY_RANK.get(severity, 0)
+
+    # A merged comment ("if multiple comments relate to the same problem, synthesize
+    # them into one") inherits the most severe of the group, so a position that
+    # carried several findings resolves to the highest rather than the first seen.
+    by_pos: dict = {}
+    by_base: dict = {}
+    for issue in originals:
+        severity = _norm(get_severity(issue))
+        if severity not in allowed:
+            continue
+        file_name = str(_issue_field(issue, "file_name") or "")
+        line = _issue_field(issue, "line")
+        if not file_name:
+            continue
+        for index, key in ((by_pos, (file_name, line)), (by_base, (file_name.rsplit("/", 1)[-1], line))):
+            if _rank(severity) > _rank(index.get(key, "")):
+                index[key] = severity
+
+    fallback = max(allowed, key=_rank)
+    changes = []
+    for issue in selected:
+        current = _norm(get_severity(issue))
+        file_name = str(_issue_field(issue, "file_name") or "")
+        line = _issue_field(issue, "line")
+        want = by_pos.get((file_name, line)) or by_base.get((file_name.rsplit("/", 1)[-1], line))
+        if want is None:
+            # No positional match: the model rewrote file_name or line. Keep its own
+            # value when the level could have produced it, otherwise assume the most
+            # severe severity in scope — the input is ordered highs-first and the
+            # model is asked to rank by severity, so that is the likelier truth.
+            want = current if current in allowed else fallback
+        if want != current:
+            changes.append((file_name, line, current or "<missing>", want))
+            _set_severity(issue, want)
+    return selected, changes
+
+
 def format_single_issue(issue: Any, applyable: bool = True) -> str:
     """
     Format a single issue for GitLab comment.

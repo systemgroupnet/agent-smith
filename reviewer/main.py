@@ -49,6 +49,7 @@ from core.utils.comment_formatter import (
     format_review_summary,
     extract_issues_for_review,
     get_severity,
+    restore_issue_severities,
 )
 from core.utils.review_verbosity import (
     all_labels,
@@ -987,6 +988,28 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         filtered_issues, comment_review_error = await review_comments_with_agent(
             issues_for_review, config=comment_config, verbosity=verbosity
         )
+        # Deterministic backstop for the *severity*, before anything reads it. The
+        # comment reviewer synthesizes its output and ReviewIssue.severity defaults
+        # to "low", so a response that omits the field labels every finding it
+        # selected as low — which then reaches the comment badge, the analytics store
+        # and the dashboards. Observed on three default-verbosity runs (where only
+        # highs are ever passed in) that posted nothing but "low" comments.
+        filtered_issues, severity_fixes = restore_issue_severities(
+            filtered_issues, issues_for_review, verbosity.severities
+        )
+        if severity_fixes:
+            print(
+                f"  🩹 Restored the reviewers' severity on {len(severity_fixes)} "
+                f"comment(s) the comment reviewer re-labelled"
+            )
+            for file_name, line, was, now in severity_fixes:
+                record_warning(
+                    metrics,
+                    "comment_severity_restored",
+                    f"{file_name}:{line} came back from the comment reviewer as "
+                    f"'{was}'; restored to '{now}' from the reviewers' finding",
+                    context=f"{file_name}:{line}",
+                )
         # Deterministic backstop for the level's budget. The prompt states the cap,
         # but the prompt is a request and this is the last writer before posting —
         # same belt-and-braces as the suggestion field and the summary length. A
