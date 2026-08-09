@@ -30,6 +30,9 @@ from core.utils.gitlab_helpers import (
     get_gitlab_mr_changes,
     get_file_content,
     post_gitlab_comment,
+    post_gitlab_note,
+    upsert_summary_in_description,
+    strip_summary_block,
     add_note_award_emojis,
     build_diff_position_map,
     resolve_inline_position,
@@ -85,22 +88,59 @@ async def _post_review_summary(
 ) -> None:
     """Post the MR's review-summary comment, seed its rating reactions, and record it.
 
-    Posted through the same general-note path as a non-inline finding, which
-    creates an *unpositioned discussion* rather than a plain note — that is what
-    gives it a ``discussion_id``, so a human replying to the summary is captured
-    by the collector's Comments webhook like any other thread.
+    Posted as a **plain note**, not as the unpositioned discussion a general
+    finding gets. A discussion is a *resolvable thread*, and the summary is the
+    one comment with nothing to resolve — it reports no defect and asks for no
+    change, so its "Resolve thread" button is pure noise, and on a project that
+    requires all threads resolved before merging it is an outright obstacle: the
+    author has to dismiss the orientation note to merge. The findings keep their
+    threads, where resolving actually means something.
+
+    The cost is reply capture. GitLab's note API returns no ``discussion_id``, so
+    ``metrics.posted_summary["discussion_id"]`` is None and the collector cannot
+    match a human's answer to this comment (``comment_replies.parent_kind ==
+    "summary"`` now only ever comes from rows written before this change). That is
+    inherent rather than a regression: GitLab offers no thread reply on a plain
+    note in the first place. Ratings are unaffected — the ``:one:``..``:five:``
+    reactions and ``summary_scores`` key on the note id, which a plain note has.
+
+    The same text is also mirrored into the **MR description**
+    (``REVIEW_SUMMARY_IN_DESCRIPTION``), which is the closest thing GitLab has to
+    pinning: there is no pinned flag on a note, so the description — the one
+    region that always renders above every comment — is the only place a summary
+    is guaranteed to be seen without scrolling. The note remains canonical; the
+    description copy carries no reactions and is not reported to analytics.
+    Mirrored *first* and independently of the note, so a failed note post still
+    leaves the MR oriented, and a failed mirror still leaves a rateable comment.
 
     The body carries a hidden ``SUMMARY_MARKER_TOKEN`` comment; ``has_review_summary``
-    looks for exactly that, so a re-run finds this note and never posts a second.
+    looks for exactly that, so a re-run finds this note and never posts a second
+    (it lists plain notes too — the review marker is one).
 
     Non-fatal end to end: a failure here records a warning and leaves the review
     untouched.
     """
-    body = (
-        f"<!-- {SUMMARY_MARKER_TOKEN} -->\n"
-        f"{format_review_summary(summary, effort=effort)}"
-    )
-    posted, error = await post_gitlab_comment(
+    summary_text = format_review_summary(summary, effort=effort)
+
+    mirror_enabled = os.getenv(
+        "REVIEW_SUMMARY_IN_DESCRIPTION", "true"
+    ).strip().lower() not in ("false", "0", "no", "off", "")
+    if mirror_enabled:
+        mirror_error = await upsert_summary_in_description(
+            gitlab_url, project_path, mr_id, gitlab_token, summary_text
+        )
+        if mirror_error is None:
+            print("  📌 Mirrored review summary into the MR description")
+        else:
+            print(f"  ⚠️  Could not mirror the summary into the MR description (non-fatal): {mirror_error}")
+            record_warning(
+                metrics,
+                "review_summary_description",
+                f"failed to mirror the review summary into the MR description: {mirror_error}",
+            )
+
+    body = f"<!-- {SUMMARY_MARKER_TOKEN} -->\n{summary_text}"
+    posted, error = await post_gitlab_note(
         gitlab_url, project_path, mr_id, gitlab_token, body
     )
     if error is not None or not posted:
@@ -504,6 +544,16 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         print("Error: Could not fetch MR information.")
         metrics.status = "error"
         return 1
+
+    # Strip the agent's own mirrored summary out of the description immediately,
+    # in place, so *every* later consumer reads only what a human wrote. The
+    # description is an input as well as an output surface here — it feeds every
+    # reviewer prompt via build_mr_context, the Jira-key scan, and the summary
+    # agent's own payload (which takes the whole mr_data, so sanitising a local
+    # copy would miss it). Left in, an MR reviewed twice would hand the agent its
+    # previous summary back as the author's statement of intent.
+    if mr_data.get("description"):
+        mr_data["description"] = strip_summary_block(mr_data["description"])
 
     mr_title = mr_data.get("title", "")
     source_branch = mr_data.get("source_branch", "")

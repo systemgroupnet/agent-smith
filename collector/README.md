@@ -122,7 +122,14 @@ tables:
   write time (`_scores_table_for` routes each webhook award by which table owns the
   note) means **every query over `review_comments`/`comment_scores` still means
   findings only, with no filter**. Replies carry `comment_replies.parent_kind`
-  (`finding`|`summary`) for the same reason.
+  (`finding`|`summary`) for the same reason. Note that `review_summaries.discussion_id`
+  is **NULL for summaries posted by a current reviewer**: the summary is now a plain
+  note rather than a resolvable thread (nothing about it is resolvable, and an
+  unresolved thread blocks merging on projects that require them all closed), and
+  GitLab's note API returns no discussion id — so no new `parent_kind = 'summary'`
+  reply can ever be recorded, and GitLab offers no thread reply on such a note to
+  begin with. Existing rows keep their meaning; the summary's **ratings** are
+  unaffected, since those key on `note_id`.
 - `comment_scores` — one row per human 1–5 rating gathered from the emoji webhook:
   `note_id` (joins `review_comments`), `project_id`/`project_path` (the project the
   comment lives on), `mr_id`, reacting `user_id`/`username`/`user_name`, `emoji`

@@ -233,6 +233,18 @@ MAX_NOTE_PAGES = 10
 # renders reactions in first-award order, so seeding 1→5 keeps the scale sorted.
 SCORE_REACTION_EMOJIS = ("one", "two", "three", "four", "five")
 
+# Delimiters for the copy of the review summary spliced into the MR description.
+# GitLab has no way to pin a comment — the Notes API has no "pinned" field, and
+# backdating a note's created_at (the only other way to force it to the top of
+# the timeline) needs admin/owner rights. The description is the one region of an
+# MR that always renders above every comment, so "at the top" means putting it
+# there. Delimiters rather than "append if absent": they make the write
+# idempotent, so re-running the agent replaces its own block instead of stacking
+# a second copy, and they bound exactly what the agent owns — everything outside
+# them is the author's text and is never touched.
+SUMMARY_BLOCK_START = "<!-- code-review-agent:summary-block -->"
+SUMMARY_BLOCK_END = "<!-- /code-review-agent:summary-block -->"
+
 
 __all__ = [
     'GitLabAPIClient',
@@ -241,6 +253,9 @@ __all__ = [
     'get_gitlab_mr_changes',
     'get_file_content',
     'post_gitlab_comment',
+    'post_gitlab_note',
+    'upsert_summary_in_description',
+    'strip_summary_block',
     'add_note_award_emojis',
     'build_diff_position_map',
     'resolve_inline_position',
@@ -301,9 +316,10 @@ class GitLabAPIClient:
             return response.json()
             
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             print(f"  ❌ [GitLab API] Error fetching MR: {e}")
             return None
-    
+
     def get_merge_request_changes(self, project_path: str, mr_iid: str) -> Optional[List[Dict]]:
         """
         Get merge request changes (diffs).
@@ -439,6 +455,38 @@ class GitLabAPIClient:
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {e}"
             print(f"  ❌ [GitLab API] Error adding MR labels: {e}")
+            return None
+
+    def update_merge_request_description(
+        self, project_path: str, mr_iid: str, description: str
+    ) -> Optional[Dict]:
+        """
+        Replace the merge request's description.
+
+        Unlike ``add_merge_request_labels``'s incremental ``add_labels``, GitLab
+        offers no partial description update — the whole field is overwritten. So
+        the caller must read the current description, splice its own block into
+        it, and pass the *complete* result back; anything it drops is gone.
+
+        Args:
+            project_path: Project path (e.g., "group/project")
+            mr_iid: Merge request IID
+            description: The full new description text
+
+        Returns:
+            Updated MR data or None if failed (sets ``last_error``).
+        """
+        try:
+            project_id = quote(project_path, safe="")
+            url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}")
+            response = requests.put(
+                url, headers=self.headers, json={"description": description}, timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            print(f"  ❌ [GitLab API] Error updating MR description: {e}")
             return None
 
     def list_merge_request_notes(self, project_path: str, mr_iid: str) -> Optional[List[Dict]]:
@@ -831,6 +879,165 @@ async def post_gitlab_comment(
     except Exception as e:
         print(f"  ❌ Failed to post comment: {e}")
         return None, f"{type(e).__name__}: {e}"
+
+
+async def post_gitlab_note(
+    gitlab_url: str,
+    project_path: str,
+    mr_id: str,
+    token: str,
+    comment: str,
+    warnings_sink: Optional[List[dict]] = None,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    """Post a **plain note** (not a thread) on the merge request.
+
+    The deliberate counterpart to ``post_gitlab_comment``'s general-note path,
+    which creates an *unpositioned discussion*. Both render as a comment on the
+    MR, but a discussion is a resolvable thread — it carries a "Resolve thread"
+    button and counts against a project's "all threads resolved" merge check.
+    That is right for a finding (someone should act on it and mark it done) and
+    wrong for anything purely informational, which would otherwise sit there
+    unresolved and block the merge for no reason.
+
+    The cost is replies: GitLab's note API returns **no** ``discussion_id`` (and
+    the UI offers no thread reply on a plain note), so ``posted["discussion_id"]``
+    is always None and the collector cannot tie a human's answer back to this
+    comment. Use a discussion whenever capturing replies matters more than
+    staying out of the resolve workflow.
+
+    Args:
+        gitlab_url: GitLab instance URL
+        project_path: Project path (e.g., "group/project")
+        mr_id: Merge request IID
+        token: GitLab access token
+        comment: Comment text (markdown supported)
+        warnings_sink: Optional list; each retried POST attempt appends one entry
+
+    Returns:
+        ``(posted, error)`` in the same shape as ``post_gitlab_comment``:
+        ``{"note_id", "discussion_id": None, "comment_type": "note"}`` on
+        success (the note id is what reaction seeding and the collector's emoji
+        webhook key on), otherwise ``(None, reason)``.
+    """
+    print(f"  🔍 [GitLab] Posting note via REST API...")
+    api_client = get_gitlab_api_client(gitlab_url, token)
+
+    try:
+        result = api_client.create_merge_request_note(
+            project_path, mr_id, comment, warnings_sink=warnings_sink
+        )
+        if result is None:
+            return None, (api_client.last_error or "note post failed")
+        # A plain note's JSON *is* the note — its id sits at the top level, unlike
+        # a discussion's, which hides on notes[0]. Parsing it as a discussion is
+        # how you silently lose the note id and with it the whole rating loop.
+        return {
+            "note_id": result.get("id"),
+            "discussion_id": None,
+            "comment_type": "note",
+        }, None
+    except Exception as e:
+        print(f"  ❌ Failed to post note: {e}")
+        return None, f"{type(e).__name__}: {e}"
+
+
+def splice_summary_block(description: str, body: str) -> str:
+    """Return ``description`` with the agent's summary block set to ``body``.
+
+    Replaces an existing block in place (so a re-run updates rather than
+    duplicates) and otherwise appends one after the author's text — appended, not
+    prepended, because the description opens with what the *author* wanted said
+    about their MR and the agent's orientation note is not entitled to displace
+    it. Either position is above every comment, which is the point.
+
+    A start delimiter with no matching end (someone edited the description and
+    cut half of it) is treated as *no* block and left exactly where it is: the
+    text between an opener and a guessed end is unknown, and possibly the
+    author's, so appending a fresh block is the only move that cannot delete
+    someone else's writing.
+
+    The start marker is located with ``rfind``, which is what makes that promise
+    survive a *second* pass. Once a fresh block has been appended after a
+    dangling opener, the description holds two openers — and searching forward
+    would pair the orphaned one with the real block's end and replace everything
+    between them, deleting exactly the author's text this is meant to protect.
+    Searching backward always pairs the block with its own delimiters.
+    """
+    block = f"{SUMMARY_BLOCK_START}\n{body.strip()}\n{SUMMARY_BLOCK_END}"
+    existing = description or ""
+
+    start = existing.rfind(SUMMARY_BLOCK_START)
+    end = existing.find(SUMMARY_BLOCK_END, start + 1) if start != -1 else -1
+    if start != -1 and end > start:
+        return existing[:start] + block + existing[end + len(SUMMARY_BLOCK_END):]
+
+    head = existing.rstrip()
+    return f"{head}\n\n{block}" if head else block
+
+
+def strip_summary_block(description: str) -> str:
+    """Return ``description`` with the agent's own summary block removed.
+
+    The inverse of ``splice_summary_block``, and not optional: the MR description
+    is an **input** to this agent as well as a surface it writes to. It is
+    injected into every reviewer prompt through ``build_mr_context`` and is one of
+    the two fields scanned for a Jira key, so once a summary has been mirrored
+    into it, every later run of that MR would read the agent's own prose back as
+    the author's statement of intent — output fed to input, compounding on each
+    incremental re-run and invisible in the result.
+
+    Applied once to the fetched MR data, so every consumer of the description
+    sees only what a human wrote. Same delimiter pairing as the splice (see there
+    for why the start marker is found backward), and the same refusal to guess:
+    an opener with no closer removes nothing.
+    """
+    existing = description or ""
+    start = existing.rfind(SUMMARY_BLOCK_START)
+    if start == -1:
+        return existing
+    end = existing.find(SUMMARY_BLOCK_END, start + 1)
+    if end < start:
+        return existing
+    return (existing[:start] + existing[end + len(SUMMARY_BLOCK_END):]).strip()
+
+
+async def upsert_summary_in_description(
+    gitlab_url: str,
+    project_path: str,
+    mr_id: str,
+    token: str,
+    body: str,
+) -> Optional[str]:
+    """Mirror the review summary into the MR description, idempotently.
+
+    The summary's *pinned* copy: GitLab cannot pin a note, so the only place a
+    comment can be guaranteed to sit above everything is the description. The
+    note stays the canonical artifact — it is what carries the ``:one:``..
+    ``:five:`` rating reactions and what analytics records — and this is a
+    read-modify-write copy of the same text for people who never scroll.
+
+    The description is **re-fetched here** rather than reused from the MR data
+    read at the start of the run: a review takes minutes, the author may well
+    have edited in the meantime, and a whole-field overwrite built on a stale
+    read would silently revert their edit.
+
+    Returns None on success, or a message describing the failure — every caller
+    treats this as non-fatal decoration.
+    """
+    api_client = get_gitlab_api_client(gitlab_url, token)
+
+    mr_data = api_client.get_merge_request(project_path, mr_id)
+    if mr_data is None:
+        return f"could not read the MR description ({api_client.last_error or 'unknown error'})"
+
+    current = mr_data.get("description") or ""
+    updated = splice_summary_block(current, body)
+    if updated == current:
+        return None
+
+    if api_client.update_merge_request_description(project_path, mr_id, updated) is None:
+        return api_client.last_error or "description update failed"
+    return None
 
 
 async def add_note_award_emojis(

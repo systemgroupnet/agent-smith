@@ -521,8 +521,15 @@ def _review_comment_by_discussion(discussion_id: str) -> Optional[dict[str, Any]
         return {**dict(row), "parent_kind": "finding"}
 
     # Not a findings thread — it may be the review summary's. Replies to the
-    # summary are worth capturing too, but they answer a different question, so
-    # the kind travels with the row instead of the two being pooled.
+    # summary answer a different question from replies to a finding, so the kind
+    # travels with the row instead of the two being pooled.
+    #
+    # Only ever matches **legacy** rows now: the reviewer posts the summary as a
+    # plain note (nothing about it is resolvable, and an unresolved thread blocks
+    # merging where all threads must be closed), and GitLab's note API returns no
+    # discussion id — so current summaries store NULL here and a NULL never
+    # equals an incoming discussion id. Kept rather than deleted because rows
+    # written before that change are real replies and still resolve through it.
     with get_engine().connect() as conn:
         row = conn.execute(
             select(
