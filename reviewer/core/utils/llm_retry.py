@@ -39,7 +39,7 @@ import os
 import random
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from core.config.langchain_config import fallback_configured
 
@@ -125,6 +125,12 @@ _STATUS_RE = re.compile(r"(?:error code|status[ _]?code|status|http)\W{0,3}([45]
 # input to classification, since the integers mean different things per provider.
 # Anchored to four digits so it can't capture the HTTP status from `"code": 429`.
 _PROVIDER_CODE_RE = re.compile(r"['\"]code['\"]\s*:\s*['\"]?(\d{4})['\"]?")
+# The other half of that same line: a body-carried code that IS an HTTP status,
+# for a response whose status lives only in the envelope (see _envelope_status).
+# The two regexes partition the space by range — 4xx/5xx is a status, four digits
+# is a provider code — so neither can claim the other's number. The lookahead
+# stops `4001` from matching as `400`.
+_ENVELOPE_STATUS_RE = re.compile(r"['\"]code['\"]\s*:\s*['\"]?([45]\d\d)(?!\d)")
 
 
 def _int_env(name: str, default: int) -> int:
@@ -183,12 +189,67 @@ def _error_text(err: BaseException) -> str:
     return " ".join(parts).lower()
 
 
+def _as_http_status(raw: Any) -> Optional[int]:
+    """Coerce ``raw`` to an HTTP status, or None if it isn't one.
+
+    The range check is the whole point and is applied **after** coercion: it is
+    what keeps a provider's own code (z.ai's ``1302``) from being read as a
+    status, which is the invariant :func:`parse_llm_error` rests on.
+    """
+    if isinstance(raw, bool):  # bool is an int subclass; never a status
+        return None
+    if isinstance(raw, int):
+        return raw if 400 <= raw <= 599 else None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        value = int(raw.strip())
+        return value if 400 <= value <= 599 else None
+    return None
+
+
+def _envelope_status(err: BaseException) -> Optional[int]:
+    """The HTTP status carried *inside* an error body, for failures that have no
+    status anywhere else.
+
+    Some endpoints answer **HTTP 200** with an error envelope in the body rather
+    than a real status — OpenRouter does this when it relays an upstream
+    provider's failure. ``langchain_openai`` turns that into
+    ``raise ValueError(response_dict.get("error"))``: a bare ``ValueError`` whose
+    only argument is a dict. It has no ``.status_code``, no ``.response``, and its
+    text says nothing a signature matches, so the throttle was invisible —
+    ``ValueError({'message': 'Provider returned error', 'code': 429})`` classified
+    as *unclassified*, which means one attempt, no retry, and (because the
+    failover gate reads ``is_rate_limit``) **no failover either**.
+
+    Reading the envelope's ``code`` as a status does not weaken the
+    provider-agnostic rule, because of the range check in ``_as_http_status``: a
+    code inside 400–599 is the OpenAI convention's mirror of the HTTP status,
+    while a provider's own numbering (1302, 1304) falls outside it and stays a
+    label-only diagnostic exactly as before.
+    """
+    for exc in _causes(err):
+        bodies = [getattr(exc, "body", None), getattr(exc, "json_body", None)]
+        args = getattr(exc, "args", None) or ()
+        if args:
+            bodies.append(args[0])
+        for body in bodies:
+            if not isinstance(body, dict):
+                continue
+            nested = body.get("error")
+            for raw in (body.get("code"), nested.get("code") if isinstance(nested, dict) else None):
+                status = _as_http_status(raw)
+                if status is not None:
+                    return status
+    return None
+
+
 def _status_code(err: BaseException, text: str) -> Optional[int]:
     """HTTP status for the failure, read from the exception before the text.
 
     The OpenAI SDK's ``APIStatusError`` carries ``.status_code`` (and a
     ``.response``), which is exact; the regex over the message is the fallback
-    for errors that only stringify their status (proxies, wrapped errors).
+    for errors that only stringify their status (proxies, wrapped errors), and
+    the error *envelope* is the last resort for a body-only status (see
+    :func:`_envelope_status`).
     """
     for exc in _causes(err):
         for candidate in (
@@ -200,6 +261,16 @@ def _status_code(err: BaseException, text: str) -> Optional[int]:
             if isinstance(candidate, str) and candidate.strip().isdigit():
                 return int(candidate.strip())
     match = _STATUS_RE.search(text)
+    if match:
+        return int(match.group(1))
+    envelope = _envelope_status(err)
+    if envelope is not None:
+        return envelope
+    # Same envelope, but the exception was re-wrapped and only its *text*
+    # survived. The negative lookahead is load-bearing: without it a four-digit
+    # provider code like 4001 matches on its first three digits and fabricates an
+    # HTTP 400 out of something that was never a status.
+    match = _ENVELOPE_STATUS_RE.search(text)
     return int(match.group(1)) if match else None
 
 
@@ -255,6 +326,15 @@ def parse_llm_error(err: BaseException) -> LLMErrorInfo:
     call cap, 1305 frequency) means nothing on OpenRouter or a vendor API that
     reuses the same integers for something else — reading them universally turns
     another provider's unrelated ``"code": 1304`` into a fabricated hard block.
+
+    That rule is about *provider* codes, and the boundary is numeric: a ``code``
+    inside 400–599 in an error body is the OpenAI convention's mirror of the HTTP
+    status and **is** read as one (:func:`_envelope_status`), because some
+    endpoints answer HTTP 200 with the real status only in the envelope; anything
+    outside that range is a provider code and stays label-only. Without that, a
+    relayed throttle arriving as ``ValueError({'message': 'Provider returned
+    error', 'code': 429})`` classified as *unclassified* — one attempt, no retry,
+    and no failover, since the failover gate reads ``is_rate_limit``.
 
     Ordering still matters. A rate limit is decided **first** and suppresses the
     hard-limit match, because throttle bodies routinely contain the word "limit"
