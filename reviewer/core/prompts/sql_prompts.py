@@ -13,6 +13,7 @@ from core.prompts.common import (
     format_code_index_guidance,
     NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
+    SYMBOL_FORMATTING_RULE,
 )
 
 if TYPE_CHECKING:
@@ -69,6 +70,8 @@ def get_sql_reviewer_prompt(context: "SqlContext", additional_content: str = "")
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}
+
+{SYMBOL_FORMATTING_RULE}
 
 ## TOOLS AVAILABLE
 You have access to MCP tools for GitLab, Jira, Confluence, and the cocoindex code index that can help you:

@@ -330,15 +330,18 @@ def format_single_issue(issue: Any, applyable: bool = True) -> str:
     # column next to the code and every extra line pushes the finding down.
     badge = severity_badge(issue)
     heading = f"**{badge} severity issue**" if badge else "**Issue:**"
-    comment = f"{heading}\n{problem}\n\n"
+    comment = f"{heading}\n{_comment_prose(problem)}\n\n"
 
     cleaned, is_code = sanitize_suggestion(suggestion)
     if cleaned is None:
         return comment
     if not is_code:
         # Prose survived where code was asked for. Post it as text — fencing it as
-        # a suggestion would let a reviewer commit English into their source.
-        return comment + f"**Suggested Fix:**\n{cleaned}"
+        # a suggestion would let a reviewer commit English into their source. It is
+        # prose, so it gets the same symbol emphasis as `problem`; the code branch
+        # below never does, since a backtick inside a suggestion block is a
+        # character that gets committed into the file rather than markup.
+        return comment + f"**Suggested Fix:**\n{_comment_prose(cleaned)}"
     fence = "suggestion:-0+0" if applyable else ""
     return comment + f"**Suggested Fix:**\n```{fence}\n{cleaned}\n```"
 
@@ -486,7 +489,23 @@ MAX_SUMMARY_ENTRY_CHARS = 220
 # a prompt is a request and the model drops them often enough to notice on a real
 # MR — the same belt-and-braces as the suggestion field and the summary caps.
 
-#: Regions that are already markup and must be left exactly as they are: an inline
+#: A fenced code block. Split out **before** anything inline, mirroring the way
+#: markdown itself parses: fences are block-level and are resolved before inline
+#: spans, so a stray backtick in the prose cannot reach inside one.
+#:
+#: This is not redundant with the inline-span rule below, and it cannot be folded
+#: into it as another alternative. A finding's `problem` may quote the offending
+#: code in a ``` block, and with only the inline rule a fence is protected by
+#: *accident* — its six backticks happen to pair up around the body. One unclosed
+#: inline backtick earlier in the text shifts that pairing: the inline span starts
+#: before the fence, so it wins on position regardless of alternation order, and
+#: it consumes the fence's *first* backtick. The rest of the fence then parses as
+#: open text. Observed turning ```` ```go\nload(data.go)\n``` ```` into
+#: ``load(`data.go`)`` — backticks written *into* quoted source, where they are
+#: characters rather than markup — while leaving the real path after the fence bare.
+_FENCED_BLOCK = re.compile(r"```[\s\S]*?```")
+
+#: Regions that are already inline markup and must be left exactly as they are: a
 #: code span (already done), a markdown link (wrapping part of the target breaks
 #: the link) and a bare URL (a slash-separated run inside one is not a repo path).
 _PROTECTED_SPAN = re.compile(r"`[^`]*`|\[[^\]]*\]\([^)]*\)|<?https?://[^\s>)]+>?")
@@ -515,19 +534,33 @@ _BARE_SYMBOL = re.compile(
 )
 
 
-def emphasize_symbols(text: str) -> str:
-    """Backtick bare paths and calls so GitLab renders them as code.
-
-    Existing inline code, markdown links and URLs are passed through untouched.
-    """
-    if not text:
-        return text
+def _emphasize_inline(text: str) -> str:
+    """Wrap bare symbols in one run of text known to contain no fenced block."""
     pieces, last = [], 0
     for span in _PROTECTED_SPAN.finditer(text):
         pieces.append(_BARE_SYMBOL.sub(r"`\1`", text[last:span.start()]))
         pieces.append(span.group(0))
         last = span.end()
     pieces.append(_BARE_SYMBOL.sub(r"`\1`", text[last:]))
+    return "".join(pieces)
+
+
+def emphasize_symbols(text: str) -> str:
+    """Backtick bare paths and calls so GitLab renders them as code.
+
+    Fenced code blocks, existing inline code, markdown links and URLs are passed
+    through untouched. Fences are carved out **first** (see ``_FENCED_BLOCK``):
+    resolving them at the same level as inline spans lets an unclosed backtick in
+    the prose swallow a fence delimiter and expose the quoted code to rewriting.
+    """
+    if not text:
+        return text
+    pieces, last = [], 0
+    for block in _FENCED_BLOCK.finditer(text):
+        pieces.append(_emphasize_inline(text[last:block.start()]))
+        pieces.append(block.group(0))
+        last = block.end()
+    pieces.append(_emphasize_inline(text[last:]))
     return "".join(pieces)
 
 
@@ -549,6 +582,24 @@ def _clip(text: str, limit: int) -> str:
         return text
     cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
     return f"{cut or text[:limit]}…"
+
+
+def _comment_prose(text: Any) -> str:
+    """Make the paths and symbols in a posted finding render as code.
+
+    The same treatment the summary gets, for the same reason: a finding is read
+    in a narrow column beside the diff, and `order.go` set as code is what lets
+    the eye find the subject of the sentence. The reviewer prompts ask for the
+    backticks (``SYMBOL_FORMATTING_RULE``) and this is the deterministic half —
+    and here it is more than belt-and-braces, because the comment reviewer
+    *synthesizes* the text it posts and can drop markup the reviewer emitted.
+
+    Unlike :func:`_summary_prose` there is no clip, so there is nothing to
+    balance either: ``_balance_backticks`` repairs a span that the length cap cut
+    in half, a finding's ``problem`` has no cap, and ``emphasize_symbols`` only
+    ever adds backticks in pairs, so it cannot create an imbalance of its own.
+    """
+    return emphasize_symbols(text or "")
 
 
 def _summary_prose(text: Any, limit: int) -> str:

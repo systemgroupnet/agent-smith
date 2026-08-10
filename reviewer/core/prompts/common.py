@@ -138,6 +138,28 @@ SUGGESTION_FIELD_RULE = (
 )
 
 
+# Shared across every reviewer prompt: how to write a symbol inside `problem`.
+# A finding is read in a narrow column beside the diff, and GitLab renders
+# `like this` as code — which is what separates the subject of the sentence from
+# the prose around it. comment_formatter.emphasize_symbols wraps what is left,
+# but deliberately only matches shapes that cannot be an English word (paths and
+# `Do()`-style calls); a bare type or field name is never guessed at, so those
+# only ever get backticks if the model writes them. Hence the prompt half.
+# Unlike the summary's rule this does NOT ban code fences: quoting the offending
+# lines in a ``` block is a legitimate and useful thing for a finding to do.
+SYMBOL_FORMATTING_RULE = (
+    "**Every path and symbol in `problem` goes in backticks.** Wrap file paths, "
+    "file names, directories, functions, methods, types, fields, columns, "
+    "endpoints and env vars in single backticks: `internal/app/order/order.go`, "
+    "`CalculateTax()`, `Order.TotalAmount`, `POST /api/orders`, `MAX_RETRIES`. "
+    "GitLab renders them as code, and that is what lets a reader's eye find the "
+    "subject of the sentence in a comment read beside the diff. A bare `order.go` "
+    "sitting in prose is a miss, not a style preference. Quoting the offending "
+    "lines in a ``` code fence is fine and often helpful — this rule is about the "
+    "symbols named in the surrounding sentences."
+)
+
+
 # Explains the line-number gutter that format_file_content_section prepends to
 # every line of the reviewed file.
 LINE_NUMBER_GUTTER_NOTE = (

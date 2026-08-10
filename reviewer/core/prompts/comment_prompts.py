@@ -174,7 +174,7 @@ Apply this purge FIRST and apply it to EVERY comment. A purged comment can never
 ## OUTPUT REQUIREMENTS:
 
 {_output_line(v)}
-  - `problem`: A clear summary of the issue found in the comments. Synthesize multiple related comments into a single, concise problem statement.
+  - `problem`: A clear summary of the issue found in the comments. Synthesize multiple related comments into a single, concise problem statement. **Keep every backtick from the input, and add them to any path or symbol you write yourself** — file paths, file names, functions, methods, types, fields, columns, endpoints and env vars all go in single backticks (`internal/app/order/order.go`, `CalculateTax()`, `Order.TotalAmount`). You are rewriting the text that gets posted, so markup you drop here is markup the reader never sees, and a comment read beside the diff depends on it to separate the symbol from the sentence.
   - `suggestion`: The replacement CODE ONLY, copied verbatim from the input comment's suggestion. This field is rendered as a GitLab suggestion block that a reviewer applies with one click, committing your text into the file as-is — so it must contain no prose, no lead-in like "Here's the fix:", no markdown fences or backticks, and no `NN|` line-number prefixes. Leave it EMPTY whenever the input comment has no concrete code. Never write a description here and never invent code that wasn't in the input.
   - `file_name`: The file where the issue was found that exist in the comment
   - `line`: The line number where the issue occurs that exist in the comment
