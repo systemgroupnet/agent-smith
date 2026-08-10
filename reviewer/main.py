@@ -50,6 +50,7 @@ from core.agents.summary_agent import SummaryContext, generate_review_summary
 from core.utils.comment_formatter import (
     format_single_issue,
     format_review_summary,
+    format_summary_description,
     extract_issues_for_review,
     get_severity,
     restore_issue_severities,
@@ -104,14 +105,19 @@ async def _post_review_summary(
     note in the first place. Ratings are unaffected — the ``:one:``..``:five:``
     reactions and ``summary_scores`` key on the note id, which a plain note has.
 
-    The same text is also mirrored into the **MR description**
+    A **shorter** rendering also goes into the MR description
     (``REVIEW_SUMMARY_IN_DESCRIPTION``), which is the closest thing GitLab has to
     pinning: there is no pinned flag on a note, so the description — the one
     region that always renders above every comment — is the only place a summary
-    is guaranteed to be seen without scrolling. The note remains canonical; the
-    description copy carries no reactions and is not reported to analytics.
-    Mirrored *first* and independently of the note, so a failed note post still
-    leaves the MR oriented, and a failed mirror still leaves a rateable comment.
+    is guaranteed to be seen without scrolling. It is *not* the same text: the
+    description states what the MR **is** (``format_summary_description``: the
+    overview prose plus an attribution line), while the reviewer-facing parts —
+    what changed, where to focus, the effort estimate — stay here in the comment,
+    which remains canonical, keeps the full text, and is the artifact people
+    rate. The description copy carries no reactions and is not reported to
+    analytics. Written *first* and independently of the note, so a failed note
+    post still leaves the MR described, and a failed write still leaves a
+    rateable comment.
 
     The body carries a hidden ``SUMMARY_MARKER_TOKEN`` comment; ``has_review_summary``
     looks for exactly that, so a re-run finds this note and never posts a second
@@ -122,22 +128,31 @@ async def _post_review_summary(
     """
     summary_text = format_review_summary(summary, effort=effort)
 
+    # The description gets a *different*, shorter rendering than the comment —
+    # the overview prose alone (see format_summary_description). The description
+    # says what the MR is; the comment says how to review it, and only the second
+    # is a briefing for someone else.
     mirror_enabled = os.getenv(
         "REVIEW_SUMMARY_IN_DESCRIPTION", "true"
     ).strip().lower() not in ("false", "0", "no", "off", "")
-    if mirror_enabled:
+    description_text = format_summary_description(summary) if mirror_enabled else ""
+    if description_text:
         mirror_error = await upsert_summary_in_description(
-            gitlab_url, project_path, mr_id, gitlab_token, summary_text
+            gitlab_url, project_path, mr_id, gitlab_token, description_text
         )
         if mirror_error is None:
-            print("  📌 Mirrored review summary into the MR description")
+            print("  📌 Added the MR description summary")
         else:
-            print(f"  ⚠️  Could not mirror the summary into the MR description (non-fatal): {mirror_error}")
+            print(f"  ⚠️  Could not add the summary to the MR description (non-fatal): {mirror_error}")
             record_warning(
                 metrics,
                 "review_summary_description",
-                f"failed to mirror the review summary into the MR description: {mirror_error}",
+                f"failed to add the summary to the MR description: {mirror_error}",
             )
+    elif mirror_enabled:
+        # No overview to state — writing an empty block with a signature under it
+        # is worse than writing nothing. The comment still gets posted below.
+        print("  ℹ️  Summary has no overview; leaving the MR description untouched")
 
     body = f"<!-- {SUMMARY_MARKER_TOKEN} -->\n{summary_text}"
     posted, error = await post_gitlab_note(

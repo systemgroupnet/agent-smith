@@ -573,6 +573,36 @@ def _summary_entries(items, max_items: int) -> list:
     return out
 
 
+SUMMARY_DESCRIPTION_ATTRIBUTION = "_Summarized by the review agent._"
+
+
+def format_summary_description(summary) -> str:
+    """Render a ``ReviewSummary`` as the block mirrored into the MR description.
+
+    Deliberately **not** ``format_review_summary``. The description answers "what
+    is this merge request?" and belongs to the author; the comment answers "how
+    should I review it?" and belongs to the reviewer. Putting the second in the
+    first turns the author's own statement of intent into a review briefing —
+    "Where to focus" is guidance *about* the MR, addressed to someone else, and
+    it reads as noise to everyone who opens the page for any other reason.
+
+    So this is the overview prose alone: no ``🤖 Review Summary`` heading (the
+    description is not a review), no "What changed" bullets, no "Where to focus",
+    no effort line — those stay in the comment, which keeps the full text and is
+    the artifact people rate.
+
+    The attribution line is not decoration. The block's delimiters are HTML
+    comments, so without it nothing on the rendered page separates the agent's
+    paragraph from the author's, in the one field a reviewer reads as the
+    author's own words. Returns ``""`` when there is no overview to state, so the
+    caller writes nothing rather than an empty block with a signature under it.
+    """
+    overview = _summary_prose(getattr(summary, "overview", "") or "", MAX_SUMMARY_OVERVIEW_CHARS)
+    if not overview:
+        return ""
+    return f"{overview}\n\n{SUMMARY_DESCRIPTION_ATTRIBUTION}"
+
+
 def format_review_summary(summary, effort: Optional[int] = None) -> str:
     """Render a ``ReviewSummary`` as the MR's orientation comment.
 
