@@ -658,271 +658,6 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Time"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 155
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Link"
-            },
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "targetBlank": true,
-                    "title": "Open MR",
-                    "url": "${__value.raw}"
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Verbosity"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 95
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "PostedHigh"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 105
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "PostedMedium"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 125
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
-      "id": 9,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": []
-      },
-      "pluginVersion": "11.6.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "ffrgyjxlmntogb"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT\n  'https://gitlab.example.com/' || r.project_path || '/-/merge_requests/' || r.mr_id AS \"Link\",\n  r.project_path AS \"Project\",\n  r.mr_id AS \"MergeRequest\",\n  r.review_type AS \"ReviewType\",\n  r.status AS \"Status\",\n  coalesce(\n    replace(nullif(r.raw_json ->> 'review_verbosity', ''), 'review::', ''),\n    '\u2014'\n  ) AS \"Verbosity\",\n  p.high AS \"PostedHigh\",\n  p.medium AS \"PostedMedium\",\n  r.comments_posted AS \"CommentsPosted\",\n  r.comments_failed AS \"CommentsFailed\",\n  round(r.duration_seconds / 60) AS \"DurationMinutes\",\n  r.timestamp :: timestamptz AS \"Time\"\nFROM\n  review_runs r\n  LEFT JOIN LATERAL (\n    SELECT\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'high'\n      ) AS high,\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'medium'\n      ) AS medium\n    FROM\n      review_comments\n    WHERE\n      review_run_id = r.id\n  ) p ON TRUE\nWHERE\n  r.project_path IN ($project)\n  AND $__timeFilter(r.timestamp :: timestamptz)\nORDER BY\n  r.timestamp :: timestamptz DESC\nLIMIT\n  100;",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
-        }
-      ],
-      "title": "Latest runs",
-      "type": "table",
-      "description": "PostedHigh / PostedMedium are comments actually posted on the MR (from review_comments), not issues found \u2014 the reviewers' raw counts pass through the in-diff gate, the compile-time purge and the verbosity cap before anything is posted, so they belong to 'Issues found over time', not here. Verbosity is the MR label in force: at the default level mediums are counted and then discarded, so PostedMedium 0 there is by design, not a loss. '\u2014' means the run predates the field. PostedHigh + PostedMedium below CommentsPosted means something else was posted (a low, or a comment with no severity)."
-    },
-    {
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "ffrgyjxlmntogb"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "fillOpacity": 80,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineWidth": 1,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 24
-      },
-      "id": 12,
-      "options": {
-        "barRadius": 0,
-        "barWidth": 0.97,
-        "fullHighlight": false,
-        "groupWidth": 0.7,
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "orientation": "auto",
-        "showValue": "auto",
-        "stacking": "none",
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        },
-        "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 0
-      },
-      "pluginVersion": "11.6.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "ffrgyjxlmntogb"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT\n  reviewer_version AS \"Version\",\n  count(*) AS \"Runs\"\nFROM\n  review_runs\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(timestamp :: timestamptz)\n  AND reviewer_version IS NOT NULL\nGROUP BY\n  reviewer_version\nORDER BY\n  CASE\n    WHEN reviewer_version ~ '^v?[0-9]+(\\.[0-9]+)*$' THEN string_to_array(regexp_replace(reviewer_version, '^v', ''), '.') :: int []\n  END NULLS LAST,\n  \"Version\";",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
-        }
-      ],
-      "title": "Review by versions",
-      "type": "barchart"
-    },
-    {
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "ffrgyjxlmntogb"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
             "mode": "palette-classic"
           },
           "custom": {
@@ -1012,7 +747,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 16
       },
       "id": 3,
       "options": {
@@ -1134,7 +869,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 24
       },
       "id": 4,
       "options": {
@@ -1183,6 +918,313 @@
       ],
       "title": "Comments posted",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Comments actually posted on the MR, by the severity shown in the comment body (\ud83d\udd34 high / \ud83d\udfe0 medium / \ud83d\udd35 low). Compare with 'Issues found over time': the gap is what the in-diff gate and the comment reviewer removed.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "HighSeverity"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MediumSeverity"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "LowSeverity"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 22,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "normal",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  $__timeGroup(occurred_at, '1d') AS time,\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'high'\n  ) AS \"HighSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'medium'\n  ) AS \"MediumSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'low'\n  ) AS \"LowSeverity\"\nFROM\n  (\n    SELECT\n      coalesce(r.timestamp, c.received_at) :: timestamptz AS occurred_at,\n      c.project_path,\n      c.severity\n    FROM\n      review_comments c\n      LEFT JOIN review_runs r ON r.id = c.review_run_id\n  ) posted\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(occurred_at)\nGROUP BY\n  1\nORDER BY\n  1;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Comments posted by severity",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Severity mix of everything posted in the selected range. 'Unlabelled' means a comment reached the collector with no usable severity \u2014 normally zero.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "HighSeverity"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MediumSeverity"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "LowSeverity"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unlabelled"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "text",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 23,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "values": [
+            "value"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'high'\n  ) AS \"HighSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'medium'\n  ) AS \"MediumSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'low'\n  ) AS \"LowSeverity\",\n  count(*) FILTER (\n    WHERE\n      severity IS NULL\n      OR lower(severity) NOT IN ('high', 'medium', 'low')\n  ) AS \"Unlabelled\"\nFROM\n  (\n    SELECT\n      coalesce(r.timestamp, c.received_at) :: timestamptz AS occurred_at,\n      c.project_path,\n      c.severity\n    FROM\n      review_comments c\n      LEFT JOIN review_runs r ON r.id = c.review_run_id\n  ) posted\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(occurred_at);",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Posted severity mix",
+      "type": "piechart"
     },
     {
       "datasource": {
@@ -1450,6 +1492,116 @@
         "x": 12,
         "y": 40
       },
+      "id": 12,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  reviewer_version AS \"Version\",\n  count(*) AS \"Runs\"\nFROM\n  review_runs\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(timestamp :: timestamptz)\n  AND reviewer_version IS NOT NULL\nGROUP BY\n  reviewer_version\nORDER BY\n  CASE\n    WHEN reviewer_version ~ '^v?[0-9]+(\\.[0-9]+)*$' THEN string_to_array(regexp_replace(reviewer_version, '^v', ''), '.') :: int []\n  END NULLS LAST,\n  \"Version\";",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Review by versions",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
       "id": 13,
       "options": {
         "barRadius": 0,
@@ -1483,7 +1635,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  coalesce(project_path, 'Unknown') AS \"Project\",\n  count(*) AS \"Count\"\nFROM\n  review_runs\nWHERE $__timeFilter(timestamp :: timestamptz)\nGROUP BY\n  project_path",
+          "rawSql": "SELECT\n  coalesce(project_path, 'Unknown') AS \"Project\",\n  count(*) AS \"Count\"\nFROM\n  review_runs\nWHERE $__timeFilter(timestamp :: timestamptz)\n  AND project_path IN ($project)\nGROUP BY\n  project_path",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1557,7 +1709,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 48
       },
       "id": 10,
@@ -1583,7 +1735,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  mr_id AS \"MergeRequest\",\n  count(*) AS \"Runs\",\n  max(timestamp :: timestamptz) AS \"LastRun\"\nFROM\n  review_runs\nWHERE\n  project_path IN ($project)\nGROUP BY\n  mr_id\nHAVING\n  count(*) > 1\nORDER BY\n  \"Runs\" DESC;",
+          "rawSql": "SELECT\n  mr_id AS \"MergeRequest\",\n  count(*) AS \"Runs\",\n  max(timestamp :: timestamptz) AS \"LastRun\"\nFROM\n  review_runs\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(timestamp :: timestamptz)\nGROUP BY\n  mr_id\nHAVING\n  count(*) > 1\nORDER BY\n  \"Runs\" DESC;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1779,32 +1931,17 @@
         "type": "grafana-postgresql-datasource",
         "uid": "ffrgyjxlmntogb"
       },
-      "description": "Comments actually posted on the MR, by the severity shown in the comment body (\ud83d\udd34 high / \ud83d\udfe0 medium / \ud83d\udd35 low). Compare with 'Issues found over time': the gap is what the in-diff gate and the comment reviewer removed.",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "fillOpacity": 80,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
             },
-            "lineWidth": 1,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "inspect": false
           },
           "mappings": [],
           "thresholds": {
@@ -1824,45 +1961,66 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "HighSeverity"
+              "options": "Time"
             },
             "properties": [
               {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
+                "id": "custom.width",
+                "value": 155
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "MediumSeverity"
+              "options": "Link"
             },
             "properties": [
               {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open MR",
+                    "url": "${__value.raw}"
+                  }
+                ]
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "LowSeverity"
+              "options": "Verbosity"
             },
             "properties": [
               {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
+                "id": "custom.width",
+                "value": 95
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PostedHigh"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 105
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PostedMedium"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 125
               }
             ]
           }
@@ -1870,182 +2028,23 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 60
       },
-      "id": 22,
+      "id": 9,
       "options": {
-        "barRadius": 0,
-        "barWidth": 0.97,
-        "fullHighlight": false,
-        "groupWidth": 0.7,
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "orientation": "auto",
-        "showValue": "auto",
-        "stacking": "normal",
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        },
-        "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 0
-      },
-      "pluginVersion": "11.6.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "ffrgyjxlmntogb"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT\n  $__timeGroup(occurred_at, '1d') AS time,\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'high'\n  ) AS \"HighSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'medium'\n  ) AS \"MediumSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'low'\n  ) AS \"LowSeverity\"\nFROM\n  (\n    SELECT\n      coalesce(r.timestamp, c.received_at) :: timestamptz AS occurred_at,\n      c.project_path,\n      c.severity\n    FROM\n      review_comments c\n      LEFT JOIN review_runs r ON r.id = c.review_run_id\n  ) posted\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(occurred_at)\nGROUP BY\n  1\nORDER BY\n  1;",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
-        }
-      ],
-      "title": "Comments posted by severity",
-      "type": "barchart"
-    },
-    {
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "ffrgyjxlmntogb"
-      },
-      "description": "Severity mix of everything posted in the selected range. 'Unlabelled' means a comment reached the collector with no usable severity \u2014 normally zero.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            }
-          },
-          "mappings": []
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "HighSeverity"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "MediumSeverity"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "LowSeverity"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Unlabelled"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "text",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 60
-      },
-      "id": 23,
-      "options": {
-        "displayLabels": [
-          "percent"
-        ],
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "values": [
-            "value"
-          ]
-        },
-        "pieType": "pie",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
           "fields": "",
-          "values": true
+          "reducer": [
+            "sum"
+          ],
+          "show": false
         },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
+        "showHeader": true,
+        "sortBy": []
       },
       "pluginVersion": "11.6.2",
       "targets": [
@@ -2057,7 +2056,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'high'\n  ) AS \"HighSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'medium'\n  ) AS \"MediumSeverity\",\n  count(*) FILTER (\n    WHERE\n      lower(severity) = 'low'\n  ) AS \"LowSeverity\",\n  count(*) FILTER (\n    WHERE\n      severity IS NULL\n      OR lower(severity) NOT IN ('high', 'medium', 'low')\n  ) AS \"Unlabelled\"\nFROM\n  (\n    SELECT\n      coalesce(r.timestamp, c.received_at) :: timestamptz AS occurred_at,\n      c.project_path,\n      c.severity\n    FROM\n      review_comments c\n      LEFT JOIN review_runs r ON r.id = c.review_run_id\n  ) posted\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(occurred_at);",
+          "rawSql": "SELECT\n  'https://gitlab.example.com/' || r.project_path || '/-/merge_requests/' || r.mr_id AS \"Link\",\n  r.project_path AS \"Project\",\n  r.mr_id AS \"MergeRequest\",\n  r.review_type AS \"ReviewType\",\n  r.status AS \"Status\",\n  coalesce(\n    replace(nullif(r.raw_json ->> 'review_verbosity', ''), 'review::', ''),\n    '\u2014'\n  ) AS \"Verbosity\",\n  p.high AS \"PostedHigh\",\n  p.medium AS \"PostedMedium\",\n  r.comments_posted AS \"CommentsPosted\",\n  r.comments_failed AS \"CommentsFailed\",\n  round(r.duration_seconds / 60) AS \"DurationMinutes\",\n  r.timestamp :: timestamptz AS \"Time\"\nFROM\n  review_runs r\n  LEFT JOIN LATERAL (\n    SELECT\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'high'\n      ) AS high,\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'medium'\n      ) AS medium\n    FROM\n      review_comments\n    WHERE\n      review_run_id = r.id\n  ) p ON TRUE\nWHERE\n  r.project_path IN ($project)\n  AND $__timeFilter(r.timestamp :: timestamptz)\nORDER BY\n  r.timestamp :: timestamptz DESC\nLIMIT\n  100;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2078,8 +2077,9 @@
           }
         }
       ],
-      "title": "Posted severity mix",
-      "type": "piechart"
+      "title": "Latest runs",
+      "type": "table",
+      "description": "PostedHigh / PostedMedium are comments actually posted on the MR (from review_comments), not issues found \u2014 the reviewers' raw counts pass through the in-diff gate, the compile-time purge and the verbosity cap before anything is posted, so they belong to 'Issues found over time', not here. Verbosity is the MR label in force: at the default level mediums are counted and then discarded, so PostedMedium 0 there is by design, not a loss. '\u2014' means the run predates the field. PostedHigh + PostedMedium below CommentsPosted means something else was posted (a low, or a comment with no severity)."
     }
   ],
   "preload": false,

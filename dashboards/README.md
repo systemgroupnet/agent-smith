@@ -54,6 +54,43 @@ model into the file here → run the snippet above → commit.
 
 ## Things that will bite you
 
+**Every panel filters on both `$project` and `$__timeFilter` — there are no
+exceptions, and a new panel without them is a bug.** A dashboard where some
+panels honour the Project picker and some quietly ignore it is worse than one
+that ignores it everywhere: the numbers still look plausible, so nobody notices
+that `Recent comments` was listing another team's ratings beside this team's
+run counts. Four panels had drifted (`Recent comments` and `Version stat` in
+rating-stats, `Reviews per project` and `Re-review churn per MR` in run-stats)
+and are fixed; the check is two lines, so run it after any edit:
+
+```bash
+python3 -c "
+import json,glob
+for f in glob.glob('*.json'):
+    for p in json.load(open(f))['panels']:
+        for t in p.get('targets',[]):
+            s=t.get('rawSql','') or ''
+            miss=[n for n,k in (('project','\$project'),('time','\$__timeFilter')) if k not in s]
+            if s.strip() and miss: print(f, p['id'], p['title'], 'missing', miss)"
+```
+
+Two consequences worth knowing:
+
+* **`project_path IN ($project)` drops rows where `project_path` is NULL.** The
+  variable's own query is `where project_path is not null`, and `NULL IN (…)` is
+  never true, so "All" does not mean *all rows*. Only pre-fix runs can have a NULL
+  project — identity is populated before anything that can fail now — but it is why
+  `Reviews per project` shows fewer runs than it used to: its `coalesce(project_path,
+  'Unknown')` bucket is unreachable through the filter. That bucket was legacy
+  early-failure runs, not live data.
+* **Filter on the column that anchors the panel's question, not the nearest one.**
+  `Version stat` is `review_comments LEFT JOIN comment_scores`; a `WHERE` on the
+  left-joined table would silently turn it into an inner join, and the panel counts
+  two different things (comments posted vs. ratings given) that cannot share one time
+  column. Both filters therefore sit on the already-joined `review_runs`
+  (`r.project_path`, `r.timestamp`), i.e. *versions that ran in the window, and every
+  rating of their comments*.
+
 **Timestamps are `TEXT`, not `timestamptz`.** Every time filter must cast:
 `$__timeFilter(received_at::timestamptz)`. Without the cast Postgres compares
 strings, which happens to work for ISO-8601 UTC and silently stops working the

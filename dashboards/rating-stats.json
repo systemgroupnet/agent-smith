@@ -227,14 +227,40 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
             },
-            "inspect": false
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
           "thresholds": {
@@ -258,18 +284,19 @@
         "x": 0,
         "y": 8
       },
-      "id": 13,
+      "id": 3,
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "showHeader": true
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "pluginVersion": "11.6.2",
       "targets": [
@@ -281,7 +308,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  r.reviewer_version AS \"Version\",\n  ROUND(AVG(s.score) :: numeric, 2) AS \"Average Rating\",\n  COUNT(*) AS \"Ratings\",\n  COUNT(DISTINCT s.note_id) AS \"Comments Rated\",\n  COUNT(DISTINCT c.id) AS \"Comments Posted\"\nFROM\n  review_comments c\n  JOIN review_runs r ON r.id = c.review_run_id\n  LEFT JOIN comment_scores s ON s.note_id = c.note_id\nGROUP BY\n  r.reviewer_version\nHAVING\n  COUNT(s.id) > 0\nORDER BY\n  lpad(\n    coalesce(\n      substring(\n        r.reviewer_version\n        from\n          '^v?(\\d+)'\n      ),\n      '0'\n    ),\n    5,\n    '0'\n  ) || lpad(\n    coalesce(\n      substring(\n        r.reviewer_version\n        from\n          '^v?\\d+\\.(\\d+)'\n      ),\n      '0'\n    ),\n    5,\n    '0'\n  ) || lpad(\n    coalesce(\n      substring(\n        r.reviewer_version\n        from\n          '^v?\\d+\\.\\d+\\.(\\d+)'\n      ),\n      '0'\n    ),\n    5,\n    '0'\n  ) DESC;",
+          "rawSql": "SELECT\n  $__timeGroup(received_at :: timestamptz, '1w') AS time,\n  AVG(score) :: numeric(4, 2) AS \"Avg Rating\",\n  COUNT(*) AS \"Ratings\"\nFROM\n  comment_scores\nWHERE\n  $__timeFilter(received_at :: timestamptz)\n  AND project_path IN ($project)\nGROUP BY\n  1\nORDER BY\n  1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -302,340 +329,8 @@
           }
         }
       ],
-      "title": "Version stat",
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "ffrgyjxlmntogb"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Link"
-            },
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "targetBlank": true,
-                    "title": "Open Comment",
-                    "url": "${__value.raw}"
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 695
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Score"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 64
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
-      },
-      "id": 8,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": []
-      },
-      "pluginVersion": "11.6.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "ffrgyjxlmntogb"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT\n  -- cs.project_path AS \"Project\",\n  'https://gitlab.example.com/' || cs.project_path || '/-/merge_requests/' || cs.mr_id || '#note_' || cs.note_id AS \"Link\",\n  cs.score AS \"Score\",\n  rr.reviewer_version AS \"Version\",\n  cs.user_name AS \"User\"\nFROM\n  comment_scores cs\n  INNER JOIN review_comments rc ON cs.note_id = rc.note_id\n  INNER JOIN review_runs rr ON rr.id = rc.review_run_id\nWHERE\n  $__timeFilter(cs.awarded_at::timestamptz)\nORDER BY\n  cs.awarded_at DESC",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
-        }
-      ],
-      "title": "Recent comments",
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "ffrgyjxlmntogb"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Link"
-            },
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "targetBlank": true,
-                    "title": "Show Comment",
-                    "url": "${__value.raw}"
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 16
-      },
-      "id": 12,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "pluginVersion": "11.6.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "ffrgyjxlmntogb"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "WITH replies AS (\n  SELECT cr.parent_note_id, cr.parent_kind, cr.author_username, cr.body,\n         COALESCE(NULLIF(cr.noted_at,'')::timestamptz, cr.received_at::timestamptz) AS reply_time\n  FROM comment_replies cr\n)\nSELECT\n  'https://gitlab.example.com/' || COALESCE(rc.project_path, rs.project_path)\n    || '/-/merge_requests/' || COALESCE(rc.mr_id, rs.mr_id)\n    || '#note_' || r.parent_note_id                    AS \"Link\",\n  INITCAP(COALESCE(r.parent_kind, 'finding'))          AS \"Kind\",\n  r.body                                               AS \"Reply\",\n  r.author_username                                    AS \"Replied by\"\nFROM replies r\nLEFT JOIN review_comments  rc ON rc.note_id = r.parent_note_id\nLEFT JOIN review_summaries rs ON rs.note_id = r.parent_note_id\nWHERE $__timeFilter(r.reply_time)\n  AND COALESCE(rc.project_path, rs.project_path) IN ($project)\nORDER BY r.reply_time DESC;",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
-        }
-      ],
-      "title": "Replies (findings & summaries)",
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "ffrgyjxlmntogb"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Link"
-            },
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "targetBlank": true,
-                    "title": "Open Comment",
-                    "url": "${__value.raw}"
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
-      "id": 10,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "pluginVersion": "11.6.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "ffrgyjxlmntogb"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "WITH per_user AS (\n  SELECT\n    note_id,\n    user_id,\n    AVG(score) AS user_score\n  FROM\n    comment_scores\n  WHERE\n    $__timeFilter(received_at :: timestamptz)\n    AND project_path IN ($project)\n  GROUP BY\n    note_id,\n    user_id\n)\nSELECT\n  rc.project_path AS \"Project\",\n  'https://gitlab.example.com/' || rc.project_path || '/-/merge_requests/' || rc.mr_id || '#note_' || rc.note_id AS \"Link\",\n  -- rc.mr_id AS \"MR\",\n  rc.file AS \"File\",\n  rc.line AS \"Line\",\n  INITCAP(rc.severity) AS \"Severity\",\n  COUNT(*) AS \"Raters\",\n  AVG(pu.user_score) :: numeric(4, 2) AS \"Avg Rating\"\nFROM\n  per_user pu\n  JOIN review_comments rc ON rc.note_id = pu.note_id\nGROUP BY\n  rc.note_id,\n  rc.project_path,\n  rc.mr_id,\n  rc.file,\n  rc.line,\n  rc.severity\nORDER BY\n  \"Avg Rating\" ASC,\n  \"Raters\" DESC\nLIMIT\n  20;",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
-        }
-      ],
-      "title": "Worst-rated comments",
-      "type": "table"
+      "title": "Avg rating over time",
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -706,8 +401,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 24
+        "x": 12,
+        "y": 8
       },
       "id": 11,
       "options": {
@@ -765,16 +460,44 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
             },
-            "inspect": false
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
+          "max": 100,
+          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -786,120 +509,30 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "percent"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 24
-      },
-      "id": 9,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": true,
-            "displayName": "Ratings Given"
-          }
-        ]
-      },
-      "pluginVersion": "11.6.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "ffrgyjxlmntogb"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT\n  user_name AS \"Rater\",\n  username AS \"Username\",\n  COUNT(*) AS \"Ratings Given\",\n  AVG(score) :: numeric(4, 2) AS \"Avg Given\"\nFROM\n  comment_scores\nWHERE\n  $__timeFilter(received_at :: timestamptz)\n  AND project_path IN ($project)\nGROUP BY\n  user_name,\n  username\nORDER BY\n  \"Ratings Given\" DESC;",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
-        }
-      ],
-      "title": "Rater leaderboard",
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "ffrgyjxlmntogb"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 12,
         "x": 0,
-        "y": 32
+        "y": 16
       },
-      "id": 5,
+      "id": 7,
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "showHeader": true
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "pluginVersion": "11.6.2",
       "targets": [
@@ -911,7 +544,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  INITCAP(rc.severity) AS \"Severity\",\n  COUNT(cs.id) AS \"Ratings\",\n  AVG(cs.score) :: numeric(4, 2) AS \"Avg Rating\"\nFROM\n  comment_scores cs\n  JOIN review_comments rc ON rc.note_id = cs.note_id\nWHERE\n  $__timeFilter(cs.received_at :: timestamptz)\n  AND cs.project_path IN ($project)\nGROUP BY\n  rc.severity\nORDER BY\n  \"Avg Rating\" DESC;",
+          "rawSql": "SELECT\n  $__timeGroup(rc.received_at::timestamptz, '1w') AS time,\n  -- COUNT(*)                                        AS \"Comments Posted\",\n  -- COUNT(DISTINCT cs.note_id)                      AS \"Comments Rated\",\n  ROUND(100.0 * COUNT(DISTINCT cs.note_id) / COUNT(*), 1) AS \"Coverage\"\nFROM review_comments rc\nLEFT JOIN comment_scores cs ON cs.note_id = rc.note_id\nWHERE $__timeFilter(rc.received_at::timestamptz)\n  AND rc.project_path IN ($project)\nGROUP BY 1\nORDER BY 1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -932,8 +565,8 @@
           }
         }
       ],
-      "title": "Rating by issue severity",
-      "type": "table"
+      "title": "Rating coverage",
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -986,7 +619,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 16
       },
       "id": 4,
       "options": {
@@ -1082,7 +715,93 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 24
+      },
+      "id": 5,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  INITCAP(rc.severity) AS \"Severity\",\n  COUNT(cs.id) AS \"Ratings\",\n  AVG(cs.score) :: numeric(4, 2) AS \"Avg Rating\"\nFROM\n  comment_scores cs\n  JOIN review_comments rc ON rc.note_id = cs.note_id\nWHERE\n  $__timeFilter(cs.received_at :: timestamptz)\n  AND cs.project_path IN ($project)\nGROUP BY\n  rc.severity\nORDER BY\n  \"Avg Rating\" DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Rating by issue severity",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 24
       },
       "id": 6,
       "options": {
@@ -1139,44 +858,16 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
             },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "inspect": false
           },
           "mappings": [],
-          "max": 100,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1188,8 +879,7 @@
                 "value": 80
               }
             ]
-          },
-          "unit": "percent"
+          }
         },
         "overrides": []
       },
@@ -1197,21 +887,20 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 28
       },
-      "id": 7,
+      "id": 13,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
         },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
+        "showHeader": true
       },
       "pluginVersion": "11.6.2",
       "targets": [
@@ -1223,7 +912,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  $__timeGroup(rc.received_at::timestamptz, '1w') AS time,\n  -- COUNT(*)                                        AS \"Comments Posted\",\n  -- COUNT(DISTINCT cs.note_id)                      AS \"Comments Rated\",\n  ROUND(100.0 * COUNT(DISTINCT cs.note_id) / COUNT(*), 1) AS \"Coverage\"\nFROM review_comments rc\nLEFT JOIN comment_scores cs ON cs.note_id = rc.note_id\nWHERE $__timeFilter(rc.received_at::timestamptz)\n  AND rc.project_path IN ($project)\nGROUP BY 1\nORDER BY 1;",
+          "rawSql": "SELECT\n  r.reviewer_version AS \"Version\",\n  ROUND(AVG(s.score) :: numeric, 2) AS \"Average Rating\",\n  COUNT(*) AS \"Ratings\",\n  COUNT(DISTINCT s.note_id) AS \"Comments Rated\",\n  COUNT(DISTINCT c.id) AS \"Comments Posted\"\nFROM\n  review_comments c\n  JOIN review_runs r ON r.id = c.review_run_id\n  LEFT JOIN comment_scores s ON s.note_id = c.note_id\nWHERE\n  r.project_path IN ($project)\n  AND $__timeFilter(r.timestamp :: timestamptz)\nGROUP BY\n  r.reviewer_version\nHAVING\n  COUNT(s.id) > 0\nORDER BY\n  lpad(\n    coalesce(\n      substring(\n        r.reviewer_version\n        from\n          '^v?(\\d+)'\n      ),\n      '0'\n    ),\n    5,\n    '0'\n  ) || lpad(\n    coalesce(\n      substring(\n        r.reviewer_version\n        from\n          '^v?\\d+\\.(\\d+)'\n      ),\n      '0'\n    ),\n    5,\n    '0'\n  ) || lpad(\n    coalesce(\n      substring(\n        r.reviewer_version\n        from\n          '^v?\\d+\\.\\d+\\.(\\d+)'\n      ),\n      '0'\n    ),\n    5,\n    '0'\n  ) DESC;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1244,8 +933,8 @@
           }
         }
       ],
-      "title": "Rating coverage",
-      "type": "timeseries"
+      "title": "Version stat",
+      "type": "table"
     },
     {
       "datasource": {
@@ -1255,40 +944,14 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
             },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "inspect": false
           },
           "mappings": [],
           "thresholds": {
@@ -1309,22 +972,27 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 48
+        "x": 12,
+        "y": 28
       },
-      "id": 3,
+      "id": 9,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
         },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Ratings Given"
+          }
+        ]
       },
       "pluginVersion": "11.6.2",
       "targets": [
@@ -1336,7 +1004,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  $__timeGroup(received_at :: timestamptz, '1w') AS time,\n  AVG(score) :: numeric(4, 2) AS \"Avg Rating\",\n  COUNT(*) AS \"Ratings\"\nFROM\n  comment_scores\nWHERE\n  $__timeFilter(received_at :: timestamptz)\n  AND project_path IN ($project)\nGROUP BY\n  1\nORDER BY\n  1;",
+          "rawSql": "SELECT\n  user_name AS \"Rater\",\n  username AS \"Username\",\n  COUNT(*) AS \"Ratings Given\",\n  AVG(score) :: numeric(4, 2) AS \"Avg Given\"\nFROM\n  comment_scores\nWHERE\n  $__timeFilter(received_at :: timestamptz)\n  AND project_path IN ($project)\nGROUP BY\n  user_name,\n  username\nORDER BY\n  \"Ratings Given\" DESC;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1357,8 +1025,340 @@
           }
         }
       ],
-      "title": "Avg rating over time",
-      "type": "timeseries"
+      "title": "Rater leaderboard",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Link"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open Comment",
+                    "url": "${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "id": 10,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH per_user AS (\n  SELECT\n    note_id,\n    user_id,\n    AVG(score) AS user_score\n  FROM\n    comment_scores\n  WHERE\n    $__timeFilter(received_at :: timestamptz)\n    AND project_path IN ($project)\n  GROUP BY\n    note_id,\n    user_id\n)\nSELECT\n  rc.project_path AS \"Project\",\n  'https://gitlab.example.com/' || rc.project_path || '/-/merge_requests/' || rc.mr_id || '#note_' || rc.note_id AS \"Link\",\n  -- rc.mr_id AS \"MR\",\n  rc.file AS \"File\",\n  rc.line AS \"Line\",\n  INITCAP(rc.severity) AS \"Severity\",\n  COUNT(*) AS \"Raters\",\n  AVG(pu.user_score) :: numeric(4, 2) AS \"Avg Rating\"\nFROM\n  per_user pu\n  JOIN review_comments rc ON rc.note_id = pu.note_id\nGROUP BY\n  rc.note_id,\n  rc.project_path,\n  rc.mr_id,\n  rc.file,\n  rc.line,\n  rc.severity\nORDER BY\n  \"Avg Rating\" ASC,\n  \"Raters\" DESC\nLIMIT\n  20;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Worst-rated comments",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Link"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Open Comment",
+                    "url": "${__value.raw}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 695
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Score"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 64
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  -- cs.project_path AS \"Project\",\n  'https://gitlab.example.com/' || cs.project_path || '/-/merge_requests/' || cs.mr_id || '#note_' || cs.note_id AS \"Link\",\n  cs.score AS \"Score\",\n  rr.reviewer_version AS \"Version\",\n  cs.user_name AS \"User\"\nFROM\n  comment_scores cs\n  INNER JOIN review_comments rc ON cs.note_id = rc.note_id\n  INNER JOIN review_runs rr ON rr.id = rc.review_run_id\nWHERE\n  $__timeFilter(cs.awarded_at::timestamptz)\n  AND cs.project_path IN ($project)\nORDER BY\n  cs.awarded_at DESC",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Recent comments",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Link"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": true,
+                    "title": "Show Comment",
+                    "url": "${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 12,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH replies AS (\n  SELECT cr.parent_note_id, cr.parent_kind, cr.author_username, cr.body,\n         COALESCE(NULLIF(cr.noted_at,'')::timestamptz, cr.received_at::timestamptz) AS reply_time\n  FROM comment_replies cr\n)\nSELECT\n  'https://gitlab.example.com/' || COALESCE(rc.project_path, rs.project_path)\n    || '/-/merge_requests/' || COALESCE(rc.mr_id, rs.mr_id)\n    || '#note_' || r.parent_note_id                    AS \"Link\",\n  INITCAP(COALESCE(r.parent_kind, 'finding'))          AS \"Kind\",\n  r.body                                               AS \"Reply\",\n  r.author_username                                    AS \"Replied by\"\nFROM replies r\nLEFT JOIN review_comments  rc ON rc.note_id = r.parent_note_id\nLEFT JOIN review_summaries rs ON rs.note_id = r.parent_note_id\nWHERE $__timeFilter(r.reply_time)\n  AND COALESCE(rc.project_path, rs.project_path) IN ($project)\nORDER BY r.reply_time DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Replies (findings & summaries)",
+      "type": "table"
     },
     {
       "datasource": {
@@ -1369,10 +1369,10 @@
       "type": "stat",
       "title": "Summary ratings (kept separate from findings)",
       "gridPos": {
-        "h": 4,
-        "w": 12,
+        "h": 8,
+        "w": 6,
         "x": 0,
-        "y": 56
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {
@@ -1497,9 +1497,9 @@
       "title": "Review summaries \u2014 rating, model, replies",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 56
+        "w": 18,
+        "x": 6,
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {
