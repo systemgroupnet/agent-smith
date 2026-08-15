@@ -118,6 +118,17 @@ _TRANSIENT_SIGNATURES = (
 _TIMEOUT_SIGNATURES = ("timeout", "timed out")
 _TIMEOUT_MAX_ATTEMPTS = 2
 
+# Statuses that *are* a timeout, whatever the body says. A gateway that gave up
+# waiting for the model reports it as a status and nothing else: the message is
+# "Error code: 524" — no "timeout", no "timed out", nothing any signature above
+# matches. Cloudflare 524 ("a timeout occurred") is what the reverse proxy in
+# front of the model endpoint returns when the origin stops answering, and 522
+# is its connect-side twin; 504 and 408 are the standard spellings. Classifying
+# them here rather than only as generic 5xx is what keeps the tighter attempt
+# cap: these failures are the expensive kind, paid for in whole request windows.
+# (It moves 504 from 3 attempts to 2 — correct for the same reason.)
+_TIMEOUT_STATUSES = frozenset({408, 504, 522, 524})
+
 # "Error code: 429", "status_code=429", "HTTP 503".
 _STATUS_RE = re.compile(r"(?:error code|status[ _]?code|status|http)\W{0,3}([45]\d\d)\b", re.I)
 # The provider's own code in a JSON body: {"error":{"code":"1302",...}}. Purely
@@ -258,8 +269,16 @@ def _status_code(err: BaseException, text: str) -> Optional[int]:
         ):
             if isinstance(candidate, int) and 100 <= candidate <= 599:
                 return candidate
+            # Same range check on the string form. It was the one extraction path
+            # without one (`_STATUS_RE` matches only [45]\d\d, `_envelope_status`
+            # goes through `_as_http_status`), which was inert while transience
+            # was a fixed tuple of statuses and stopped being inert the moment it
+            # became "any 5xx": a `status_code="1302"` on some wrapper would then
+            # read as a retryable server error.
             if isinstance(candidate, str) and candidate.strip().isdigit():
-                return int(candidate.strip())
+                value = int(candidate.strip())
+                if 100 <= value <= 599:
+                    return value
     match = _STATUS_RE.search(text)
     if match:
         return int(match.group(1))
@@ -313,7 +332,13 @@ class LLMErrorInfo:
         parts = [str(self.status_code)] if self.status_code else []
         if self.provider_code and str(self.provider_code) != str(self.status_code):
             parts.append(str(self.provider_code))
-        return "/".join(parts) if parts else "unclassified"
+        if parts:
+            return "/".join(parts)
+        # A client-side timeout has no status and no provider code, so it used to
+        # log as "unclassified" — which reads as "we don't know what this was"
+        # next to a retry line that in fact knew exactly what it was and had
+        # already cut the attempt budget for it.
+        return "timeout" if self.is_timeout else "unclassified"
 
 
 def parse_llm_error(err: BaseException) -> LLMErrorInfo:
@@ -345,6 +370,19 @@ def parse_llm_error(err: BaseException) -> LLMErrorInfo:
     one arrives as 402/403 with credit/quota wording, which still classifies hard;
     a *429* that means "out of quota" simply costs the retry budget and then fails
     over, which is the right response to it anyway.
+
+    **Transience is decided by range too: any 5xx is a server-side failure.** The
+    check used to enumerate ``(408, 502, 503, 504)``, which is the standard list
+    and not the list an endpoint behind a reverse proxy actually emits — a
+    Cloudflare **524** ("a timeout occurred", the edge giving up on the origin)
+    fell outside it, carried no text any signature matched, and so classified as
+    *not retryable*: one attempt, then the file review died. Observed killing two
+    files of a run on ``glm-5.2``, one of them after 1109s and the other after
+    2280s of work, and the run posted nothing. Enumerating 52x would only defer
+    the next gap; a 5xx is by definition the server's failure, never a request
+    this client can fix, and the two conditions that must never be retried —
+    a hard limit/quota denial and a provider config block — are decided from the
+    body text below and suppress the retry whatever the status was.
     """
     text = _error_text(err)
     status = _status_code(err, text)
@@ -353,11 +391,11 @@ def parse_llm_error(err: BaseException) -> LLMErrorInfo:
     is_rate_limit = status == 429 or any(sig in text for sig in _RATE_LIMIT_SIGNATURES)
     is_config_block = any(sig in text for sig in _CONFIG_BLOCK_SIGNATURES)
     is_hard_limit = not is_rate_limit and any(sig in text for sig in _HARD_LIMIT_SIGNATURES)
-    is_timeout = any(sig in text for sig in _TIMEOUT_SIGNATURES)
+    is_timeout = any(sig in text for sig in _TIMEOUT_SIGNATURES) or status in _TIMEOUT_STATUSES
 
     transient = (
         is_rate_limit
-        or (status is not None and status in (408, 502, 503, 504))
+        or (status is not None and (status >= 500 or status == 408))
         or any(sig in text for sig in _TRANSIENT_SIGNATURES)
     )
     is_retryable = transient and not is_hard_limit and not is_config_block
