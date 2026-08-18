@@ -263,6 +263,7 @@ __all__ = [
     'get_review_marker',
     'upsert_review_marker',
     'has_review_summary',
+    'get_mr_notes',
     'add_mr_label',
     'MARKER_TOKEN',
     'SUMMARY_MARKER_TOKEN',
@@ -1134,6 +1135,29 @@ async def has_review_summary(
     if notes is None:
         return True
     return any(SUMMARY_MARKER_TOKEN in (note.get("body", "") or "") for note in notes)
+
+
+async def get_mr_notes(
+    gitlab_url: str, project_path: str, mr_id: str, token: str
+) -> Optional[List[Dict]]:
+    """List every note currently on the MR, or None when they can't be fetched.
+
+    Used by the comment dedup stage, which needs the MR's *current* comments —
+    the agent's own from earlier runs and the humans' — to decide whether a
+    finding has already been said. Fetched fresh at dedup time rather than
+    reusing the marker lookup from the start of the run: a review takes minutes,
+    and a human commenting during it is exactly the case worth catching.
+
+    None (rather than []) distinguishes "the MR has no comments" from "the API
+    call failed", so the caller can degrade to an intra-run-only check and say so
+    instead of silently treating a failed fetch as an empty MR. Never raises.
+    """
+    try:
+        api_client = get_gitlab_api_client(gitlab_url, token)
+        return api_client.list_merge_request_notes(project_path, mr_id)
+    except Exception as e:
+        print(f"  ⚠️  [GitLab] Could not list MR notes: {e}")
+        return None
 
 
 async def upsert_review_marker(
