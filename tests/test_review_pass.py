@@ -75,15 +75,16 @@ class Attacker(Scripted):
         return AIMessage(content="done")
 
 
-def _reviewer(checkout, model, sink=None):
+def _reviewer(checkout, model, sink=None, record_tool=None, extra_tools=()):
     return build_reviewer(
         _SPECS_BY_NAME["service_reviewer"],
         clone_root=str(checkout),
         source_branch="feature/x",
         mr_context="MR: add order saving",
-        record_tool=make_record_findings_tool(sink or FindingsSink()),
+        record_tool=record_tool or make_record_findings_tool(sink or FindingsSink()),
         backend=FilesystemBackend(root_dir=str(checkout), virtual_mode=True),
         model=model,
+        extra_tools=extra_tools,
         provider_policy=False,
     )
 
@@ -124,6 +125,76 @@ def test_writes_are_refused_and_there_is_no_shell(checkout):
     assert "not available" in obs.get("execute", "").lower(), obs.get("execute")
     assert not (checkout / "pwned.txt").exists(), "a write reached the disk"
     assert "SHELL_RAN" not in obs.get("execute", ""), "a shell ran"
+
+
+def test_a_raising_tool_does_not_end_the_file_review(checkout):
+    """Only MCP tools were protected; every other tool could kill the whole file.
+
+    `ToolErrorMiddleware` now turns the exception into an error observation, so the
+    reviewer gets to try again or finish with what it has. Driven through
+    `record_findings` because that is the tool whose failure matters most — and the
+    message has to say the findings were *not* recorded, or the model carries on
+    believing the review reached the merge request.
+    """
+    from langchain_core.tools import StructuredTool
+
+    def boom(**_kwargs):
+        raise RuntimeError("sink exploded")
+
+    exploding = StructuredTool.from_function(
+        func=boom, name="record_findings", description="Record findings.")
+
+    agent = _reviewer(checkout, Scripted(), record_tool=exploding)
+    out = asyncio.run(agent.ainvoke(
+        {"messages": [{"role": "user", "content": "Review svc/order.go"}]}))
+
+    errors = [m for m in out["messages"]
+              if isinstance(m, ToolMessage) and m.name == "record_findings"]
+    assert errors, "the tool call produced no observation at all"
+    assert errors[0].status == "error", "a failure must not look like a success"
+    assert "not** recorded" in str(errors[0].content), str(errors[0].content)
+    assert "sink exploded" in str(errors[0].content), "the cause is named"
+
+
+def test_a_failing_helper_tool_tells_the_reviewer_to_route_around_it(checkout):
+    from langchain_core.tools import StructuredTool
+
+    def boom(**_kwargs):
+        raise ValueError("index is down")
+
+    class CallsHelper(Scripted):
+        def _step(self, messages):
+            done = [m.name for m in messages if isinstance(m, ToolMessage) and m.name]
+            if "search" not in done:
+                return AIMessage(content="", tool_calls=[
+                    {"name": "search", "id": "s", "args": {"query": "Save"}}])
+            return super()._step(messages)
+
+    helper = StructuredTool.from_function(
+        func=boom, name="search", description="Semantic code search.")
+    sink = FindingsSink()
+    agent = _reviewer(checkout, CallsHelper(), sink=sink, extra_tools=[helper])
+    out = asyncio.run(agent.ainvoke(
+        {"messages": [{"role": "user", "content": "Review svc/order.go"}]}))
+
+    obs = {m.name: m for m in out["messages"] if isinstance(m, ToolMessage)}
+    assert obs["search"].status == "error"
+    assert "another route" in str(obs["search"].content)
+    assert sink.as_all_comments(), "the review still produced its finding"
+
+
+def test_the_error_observation_never_propagates_an_exception():
+    """Returning None from the handler would end the run — nothing here is worth that."""
+    from core.agents.tool_errors import MAX_ERROR_CHARS, tool_error_observation
+
+    class Req:
+        tool_call = {"name": "grep"}
+        tool = None
+
+    assert tool_error_observation(RuntimeError("x"), Req()) is not None
+    assert tool_error_observation(KeyError("k"), Req()) is not None
+    long = tool_error_observation(ValueError("y" * 5000), Req())
+    assert len(long) < MAX_ERROR_CHARS + 200, "a huge error must not flood the context"
 
 
 def test_the_addendum_tells_the_reviewer_where_the_code_is():

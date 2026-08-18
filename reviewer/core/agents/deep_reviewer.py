@@ -72,6 +72,7 @@ from core.agents.review_contexts import ReviewPromptContext
 from core.MCP.toolkit_manager import get_mcp_toolkit_manager
 from core.config.langchain_config import build_chat_model
 from core.llm.gateway import LLMGateway
+from core.agents.tool_errors import tool_error_middleware
 from core.llm.gateway_middleware import ProviderPolicyMiddleware
 from core.prompts import (
     get_business_logic_reviewer_prompt,
@@ -409,6 +410,14 @@ def build_reviewer(
         # call ceiling below bounds that.
         TodoListMiddleware(),
         ModelCallLimitMiddleware(run_limit=call_limit, exit_behavior="end"),
+        # A tool that raises must not take the file with it. Only the MCP tools were
+        # protected before this (their coroutines are wrapped in `toolkit_manager`,
+        # because one dropped session would otherwise crash every concurrent
+        # review); an exception from `read_file`, `grep`, `glob`, `record_findings`
+        # or `task` propagated out of the loop and failed the whole file, findings
+        # already banked or not. See `core/agents/tool_errors.py` for why this is a
+        # net over those tools rather than a replacement for that wrapper.
+        tool_error_middleware(),
     ]
     if provider_policy:
         # Reviewers make every model call in the run, so this is where a throttle
