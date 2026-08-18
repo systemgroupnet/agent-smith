@@ -1,0 +1,7 @@
+# Test-only dependencies. Deliberately NOT in reviewer/requirements.txt: that file
+# is installed into the production image, and pytest has no business there.
+#
+# The suite also needs the reviewer's own dependencies (langchain, deepagents,
+# pydantic, …) because it imports the code under test. CI installs both:
+#   pip install -r reviewer/requirements.txt -r tests/requirements.txt
+pytest>=8.0,<10.0
