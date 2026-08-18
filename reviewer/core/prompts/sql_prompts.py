@@ -8,6 +8,7 @@ Reviews SQL migrations, CREATE TABLE, and ALTER TABLE statements.
 from typing import TYPE_CHECKING
 
 from core.prompts.common import (
+    SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
@@ -17,10 +18,10 @@ from core.prompts.common import (
 )
 
 if TYPE_CHECKING:
-    from core.agents.sql_agent import SqlContext
+    from core.agents.review_contexts import ReviewPromptContext
 
 
-def get_sql_reviewer_prompt(context: "SqlContext", additional_content: str = "") -> str:
+def get_sql_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get SQL reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -61,12 +62,7 @@ def get_sql_reviewer_prompt(context: "SqlContext", additional_content: str = "")
 ### 5. Table Normalization
 - Check for data redundancy and normalization violations (1NF, 2NF, 3NF)
 
-## Severity Levels
-- **high**: Bugs, errors, data corruption risk, foreign key between schemas, migration errors, wrong data types
-- **medium**: Performance concerns, minor normalization issues
-- **low**: Style issues, minor suggestions
-
-**CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
+{SEVERITY_RUBRIC}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}

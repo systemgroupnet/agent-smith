@@ -8,6 +8,7 @@ Reviews dataview registration and implementation files.
 from typing import TYPE_CHECKING
 
 from core.prompts.common import (
+    SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
@@ -17,10 +18,10 @@ from core.prompts.common import (
 )
 
 if TYPE_CHECKING:
-    from core.agents.dataview_agent import DataviewContext
+    from core.agents.review_contexts import ReviewPromptContext
 
 
-def get_dataview_reviewer_prompt(context: "DataviewContext", additional_content: str = "") -> str:
+def get_dataview_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get dataview reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -62,12 +63,7 @@ def get_dataview_reviewer_prompt(context: "DataviewContext", additional_content:
 - Proper access control
 - Correct data aggregation
 
-## Severity Levels
-- **high**: Incorrect data mapping, security issues, broken queries
-- **medium**: Suboptimal queries, missing validations
-- **low**: Style issues, naming improvements
-
-**CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
+{SEVERITY_RUBRIC}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}

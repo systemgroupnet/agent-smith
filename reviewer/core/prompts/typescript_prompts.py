@@ -8,6 +8,7 @@ Reviews TypeScript files in the application frontend.
 from typing import TYPE_CHECKING
 
 from core.prompts.common import (
+    SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
@@ -17,10 +18,10 @@ from core.prompts.common import (
 )
 
 if TYPE_CHECKING:
-    from core.agents.typescript_agent import TypescriptContext
+    from core.agents.review_contexts import ReviewPromptContext
 
 
-def get_typescript_reviewer_prompt(context: "TypescriptContext", additional_content: str = "") -> str:
+def get_typescript_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get TypeScript reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -58,12 +59,7 @@ def get_typescript_reviewer_prompt(context: "TypescriptContext", additional_cont
 - Correct service usage
 - Proper RxJS patterns
 
-## Severity Levels
-- **high**: Runtime bugs, security issues, unsafe typing that survives compilation (e.g. an `any` or a cast that hides a wrong shape at runtime)
-- **medium**: Code quality issues, suboptimal patterns
-- **low**: Style improvements, naming suggestions
-
-**CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
+{SEVERITY_RUBRIC}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}

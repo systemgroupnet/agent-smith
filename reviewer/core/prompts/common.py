@@ -119,6 +119,61 @@ NO_COMPILE_ERRORS_RULE = (
 # any prose, lead-in, fence or line-number gutter that leaks through is written
 # into their source. core/utils/comment_formatter.py sanitizes what it can, but
 # it can only salvage recognizable damage; the field has to arrive clean.
+#: The one severity ladder, shared by every reviewer.
+#:
+#: It replaced nine per-prompt ladders that had drifted apart — the same failure
+#: `NO_COMPILE_ERRORS_RULE` and `SUGGESTION_FIELD_RULE` were created to fix. The
+#: drift was not cosmetic: the service reviewer's list ended with "code
+#: duplication" as **high**, which makes a refactor suggestion outrank a missing
+#: rollback, and no ladder said what is *not* high, so nothing pushed back on
+#: inflation.
+#:
+#: Severity is load-bearing here in a way a reviewer cannot see. At the default
+#: verbosity `extract_issues_for_review` collects **only highs**, so a finding
+#: labelled medium is counted and then discarded — which creates a standing
+#: incentive to label everything high in order to be heard. Observed on a live run:
+#: four posted comments, all high, two of them "this file's error branches are
+#: untested". Real points, not high severity, and they occupied slots in a
+#: ten-comment budget.
+#:
+#: So the rubric names the exclusions explicitly and states the incentive out loud,
+#: because a model that understands why inflation is self-defeating calibrates
+#: better than one merely told a list of words.
+SEVERITY_RUBRIC = (
+    "## SEVERITY — assign it by consequence, not by how much you dislike the code\n\n"
+    "Use exactly one of `high`, `medium`, `low`. The test is simple: **would you "
+    "block the merge for this?**\n\n"
+    "**high** — it can hurt in production. Wrong results or wrong money; data loss "
+    "or corruption; a security hole (injection, authorization bypass, secret "
+    "exposure, unsafe deserialization); a crash, panic or nil dereference on a "
+    "reachable path; a race or deadlock; an unbounded loop, query or allocation; a "
+    "query per row in a request path; a write with no rollback on failure; a "
+    "silently swallowed error that loses data. If you cannot name the consequence "
+    "in one clause, it is not high.\n\n"
+    "**medium** — it should be fixed, but you would not block the merge for it. "
+    "Missing or thin test coverage, including untested error branches. An edge case "
+    "that is unhandled but unlikely. A validation gap with no security or "
+    "correctness consequence. Accessibility on a shipped UI — unless it makes a "
+    "primary action genuinely unusable with a keyboard or screen reader, which is "
+    "high. A performance concern outside a hot path. Missing error wrapping or "
+    "context.\n\n"
+    "**low** — naming, formatting, structure, duplication, documentation, "
+    "\"consider extracting this\", anything you would raise as a preference.\n\n"
+    "Three rules about this:\n"
+    "1. **Do not inflate.** Only high-severity findings are posted at the default "
+    "verbosity, so labelling a medium as high is how findings get seen — and it is "
+    "self-defeating: the comment budget is about ten, so every inflated finding "
+    "takes a slot from a genuine one, and a reader who finds two style notes among "
+    "your highs stops trusting the rest. A correctly-labelled medium that goes "
+    "unposted today is worth more than a fake high.\n"
+    "2. **Missing tests are medium.** However thorough your analysis of which "
+    "branches are uncovered, absent tests are not a production defect. The "
+    "exception is a test that asserts something false, which is high.\n"
+    "3. **Name the consequence in the `problem` text for every high.** Not "
+    "\"this is critical\" — what actually goes wrong, for whom, and when."
+)
+
+
 SUGGESTION_FIELD_RULE = (
     "**IMPORTANT**: the `suggestion` field is applied to the file *verbatim* — it "
     "is rendered as a GitLab suggestion block and a reviewer clicks a button to "

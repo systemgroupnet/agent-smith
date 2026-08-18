@@ -9,6 +9,7 @@ This module contains system prompts for the service review agents:
 from typing import TYPE_CHECKING
 
 from core.prompts.common import (
+    SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
@@ -18,10 +19,10 @@ from core.prompts.common import (
 )
 
 if TYPE_CHECKING:
-    from core.agents.service_agents import ServiceContext
+    from core.agents.review_contexts import ReviewPromptContext
 
 
-def get_semantic_reviewer_prompt(context: "ServiceContext", additional_content: str = "") -> str:
+def get_semantic_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get the system prompt for semantic reviewer with tool usage instructions."""
     
     # Build additional context information
@@ -48,13 +49,7 @@ CRITICAL AREAS TO REVIEW:
 6. Security: SQL injection, logging sensitive data, hardcoded secrets
 7. Go Idioms: Early returns, variable shadowing, resource cleanup
 
-SEVERITY LEVELS:
-You MUST assign a severity level to each issue:
-- **high**: Bugs, errors, data corruption, security flaws, panics, race conditions, missing error handling, transaction issues, N+1 queries, memory leaks, code duplication, performance issues that will cause real problems
-- **medium**: Performance issues that might cause problems, suboptimal queries, missing error wrapping
-- **low**: Style issues, naming improvements, refactoring opportunities
-
-**CRITICAL REQUIREMENT**: For EVERY issue marked as **high** severity, you MUST provide a clear explanation in your "problem" field explaining WHY this issue is critical.
+{SEVERITY_RUBRIC}
 
 SUGGESTION FIELD FORMAT:
 {SUGGESTION_FIELD_RULE}
@@ -99,7 +94,7 @@ RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (
 ```"""
 
 
-def get_business_logic_reviewer_prompt(context: "ServiceContext", additional_content: str = "") -> str:
+def get_business_logic_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get the system prompt for business logic reviewer with tool usage instructions."""
     
     # Build additional context information
@@ -129,11 +124,9 @@ CRITICAL AREAS TO REVIEW:
 7. Data Consistency: Related entities updated together, cascading operations, audit trail
 8. Integrations: External systems called correctly, notification triggers match specs
 
-SEVERITY LEVELS:
-You MUST assign a severity level to each issue:
-- **high**: Core functionality missing, wrong financial calculations, forbidden state transitions, required feature missing, important business rule not validated, workflow incorrect
-- **medium**: Edge case not handled, validation missing from spec, minor rule inconsistency
-- **low**: Style issues, uncommon edge cases, optional features
+{SEVERITY_RUBRIC}
+
+For this reviewer specifically: a requirement the code does not implement, a wrong financial calculation, or a forbidden state transition IS high — those are wrong results, not missing polish. A requirement implemented but under-validated is medium.
 
 **CRITICAL REQUIREMENT**: For EVERY issue marked as **high** severity, you MUST provide a clear explanation in your "problem" field explaining WHY this issue is critical.
 

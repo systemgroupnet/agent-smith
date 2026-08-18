@@ -8,6 +8,7 @@ Reviews error message definition files (pbook) in the application.
 from typing import TYPE_CHECKING
 
 from core.prompts.common import (
+    SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
@@ -17,10 +18,10 @@ from core.prompts.common import (
 )
 
 if TYPE_CHECKING:
-    from core.agents.pbook_agent import PbookContext
+    from core.agents.review_contexts import ReviewPromptContext
 
 
-def get_pbook_reviewer_prompt(context: "PbookContext", additional_content: str = "") -> str:
+def get_pbook_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get pbook reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -58,12 +59,7 @@ def get_pbook_reviewer_prompt(context: "PbookContext", additional_content: str =
 - Proper error context included
 - User-friendly messages
 
-## Severity Levels
-- **high**: Missing critical error messages, incorrect translations, duplicate error codes
-- **medium**: Unclear messages, inconsistent formatting
-- **low**: Minor wording improvements, style issues
-
-**CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
+{SEVERITY_RUBRIC}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}

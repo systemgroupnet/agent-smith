@@ -223,6 +223,14 @@ def severity_badge(issue: Any) -> str:
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1, "": 0}
 
 
+def _norm(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _rank(severity: str) -> int:
+    return _SEVERITY_RANK.get(severity, 0)
+
+
 def _issue_field(issue: Any, name: str) -> Any:
     return issue.get(name) if isinstance(issue, dict) else getattr(issue, name, None)
 
@@ -263,12 +271,6 @@ def restore_issue_severities(
     if not allowed or not selected:
         return selected, []
 
-    def _norm(value: Any) -> str:
-        return str(value or "").strip().lower()
-
-    def _rank(severity: str) -> int:
-        return _SEVERITY_RANK.get(severity, 0)
-
     # A merged comment ("if multiple comments relate to the same problem, synthesize
     # them into one") inherits the most severe of the group, so a position that
     # carried several findings resolves to the highest rather than the first seen.
@@ -303,6 +305,69 @@ def restore_issue_severities(
             changes.append((file_name, line, current or "<missing>", want))
             _set_severity(issue, want)
     return selected, changes
+
+
+def apply_severity_corrections(
+    selected: list, corrections, severities=("high",)
+) -> Tuple[list, list]:
+    """Honour the comment reviewer's explicit demotions, then re-filter by level.
+
+    Runs *after* :func:`restore_issue_severities`, which puts the reviewers' own
+    severity back over whatever the model returned. That restore is what makes a
+    correction meaningful: the model cannot change severity by editing the field
+    (the field is overwritten), only by naming the finding here — so a demotion is
+    always deliberate, never the result of an omission.
+
+    Two asymmetries, both deliberate:
+
+    * **Demotions only.** A correction that raises severity is ignored. The failure
+      this exists for is inflation, and letting the ranking stage promote would
+      reopen it.
+    * **A demotion out of scope is a drop, not a badge change.** At the default
+      verbosity only highs are posted, so "this is actually a medium" means "this
+      should not be posted" — which is the whole point of correcting it. At a raised
+      verbosity mediums are in scope and it is posted with a 🟠 badge instead.
+
+    Returns ``(kept, dropped)`` where each dropped entry is
+    ``(file_name, line, was, now, why)`` for the run's warnings.
+    """
+    allowed = {str(x).strip().lower() for x in (severities or ()) if str(x).strip()}
+    if not corrections or not selected:
+        return selected, []
+
+    wanted: dict = {}
+    for c in corrections:
+        target = _norm(_issue_field(c, "to_severity"))
+        if target not in ("high", "medium", "low"):
+            continue
+        name = str(_issue_field(c, "file_name") or "")
+        line = _issue_field(c, "line")
+        if not name:
+            continue
+        why = str(_issue_field(c, "why") or "")
+        for key in ((name, line), (name.rsplit("/", 1)[-1], line)):
+            wanted[key] = (target, why)
+
+    kept, dropped = [], []
+    for issue in selected:
+        current = _norm(get_severity(issue))
+        name = str(_issue_field(issue, "file_name") or "")
+        line = _issue_field(issue, "line")
+        hit = wanted.get((name, line)) or wanted.get((name.rsplit("/", 1)[-1], line))
+        if not hit:
+            kept.append(issue)
+            continue
+        target, why = hit
+        if _rank(target) >= _rank(current):
+            # Not a demotion — ignored, see the docstring.
+            kept.append(issue)
+            continue
+        _set_severity(issue, target)
+        if target in allowed:
+            kept.append(issue)
+        else:
+            dropped.append((name, line, current, target, why))
+    return kept, dropped
 
 
 def format_single_issue(issue: Any, applyable: bool = True) -> str:

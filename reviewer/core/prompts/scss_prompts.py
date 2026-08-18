@@ -8,6 +8,7 @@ Reviews SCSS/CSS files for the application frontend.
 from typing import TYPE_CHECKING
 
 from core.prompts.common import (
+    SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
@@ -17,10 +18,10 @@ from core.prompts.common import (
 )
 
 if TYPE_CHECKING:
-    from core.agents.scss_agent import ScssContext
+    from core.agents.review_contexts import ReviewPromptContext
 
 
-def get_scss_reviewer_prompt(context: "ScssContext", additional_content: str = "") -> str:
+def get_scss_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get SCSS reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -58,12 +59,7 @@ def get_scss_reviewer_prompt(context: "ScssContext", additional_content: str = "
 - Proper media queries
 - Flexible layouts
 
-## Severity Levels
-- **high**: Performance issues, broken layouts
-- **medium**: Maintainability concerns, code duplication
-- **low**: Style improvements, naming suggestions
-
-**CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
+{SEVERITY_RUBRIC}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}

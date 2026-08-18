@@ -8,6 +8,7 @@ Reviews Go test files with Gherkin BDD step implementations.
 from typing import TYPE_CHECKING
 
 from core.prompts.common import (
+    SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
@@ -17,10 +18,10 @@ from core.prompts.common import (
 )
 
 if TYPE_CHECKING:
-    from core.agents.test_agent import TestContext
+    from core.agents.review_contexts import ReviewPromptContext
 
 
-def get_test_reviewer_prompt(context: "TestContext", additional_content: str = "") -> str:
+def get_test_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get test reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -63,12 +64,7 @@ def get_test_reviewer_prompt(context: "TestContext", additional_content: str = "
 - Proper helper functions
 - Clean test organization
 
-## Severity Levels
-- **high**: Missing test coverage for critical features, incorrect assertions, broken test logic
-- **medium**: Suboptimal test structure, missing edge cases
-- **low**: Style issues, naming improvements
-
-**CRITICAL**: For high severity issues, explain the impact on test reliability.
+{SEVERITY_RUBRIC}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}

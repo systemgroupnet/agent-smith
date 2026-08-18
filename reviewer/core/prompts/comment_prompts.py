@@ -14,6 +14,7 @@ changes. Raising the level raises the budget, it does not open the gate.
 
 from typing import Optional
 
+from core.prompts.common import SEVERITY_RUBRIC
 from core.utils.review_verbosity import DEFAULT, Verbosity
 
 
@@ -102,6 +103,19 @@ DISCARD, unconditionally, every comment that says or implies any of the followin
 
 Apply this purge FIRST and apply it to EVERY comment. A purged comment can never be selected, regardless of its severity or how important the problem would be if it were real — it counts toward `filtered_count`. When a comment is ambiguous — part real runtime concern, part "and this won't compile" — keep it ONLY if the runtime concern stands on its own, and remove the compile-related claim from the `problem` text you write. If you cannot separate them, discard the comment.
 
+## STEP 0b - CHECK THE SEVERITY OF WHAT SURVIVES
+
+Every comment reaching you was labelled by the reviewer that found it, and reviewers over-label. They only get posted at all if they are marked high, which is a standing incentive to inflate, and the result is a reader finding style notes among the critical findings and trusting none of them.
+
+{SEVERITY_RUBRIC}
+
+You cannot fix a severity by editing the `severity` field — that field is restored from the reviewer's own value before anything reads it, precisely because a response that omits it would silently relabel everything. Use `severity_corrections` instead: name the finding by `file_name` and `line`, give the severity it *should* have, and say why in one clause.
+
+- Only **lowering** a severity has any effect. A correction that raises one is ignored.
+- A finding you demote below what this merge request posts is **not posted** — which is the point. If it is a real medium, it is better unposted than posted as a fake high.
+- Correct nothing when nothing is mislabelled. An empty list is the normal answer, and demoting a genuine high is worse than leaving an inflated one.
+- Judge by the rubric, not by how interesting the finding is. "Missing test coverage", however thorough the analysis, is a medium.
+
 ## FILTERING CRITERIA - Remove Comments That Are:
 
 1. **Compile-Time Issues (CRITICAL - ALWAYS FILTER THESE)**
@@ -174,12 +188,13 @@ Apply this purge FIRST and apply it to EVERY comment. A purged comment can never
 ## OUTPUT REQUIREMENTS:
 
 {_output_line(v)}
-  - `problem`: A clear summary of the issue found in the comments. Synthesize multiple related comments into a single, concise problem statement. **Keep every backtick from the input, and add them to any path or symbol you write yourself** — file paths, file names, functions, methods, types, fields, columns, endpoints and env vars all go in single backticks (`internal/app/order/order.go`, `CalculateTax()`, `Order.TotalAmount`). You are rewriting the text that gets posted, so markup you drop here is markup the reader never sees, and a comment read beside the diff depends on it to separate the symbol from the sentence.
+  - `problem`: A clear summary of the issue found in the comments. **Keep it to about three sentences.** These are read in a narrow column beside the diff, and a comment that enumerates a dozen sub-cases is skimmed and dismissed — state the defect, its consequence, and where it bites; drop the exhaustive inventory. Synthesize multiple related comments into a single, concise problem statement. **Keep every backtick from the input, and add them to any path or symbol you write yourself** — file paths, file names, functions, methods, types, fields, columns, endpoints and env vars all go in single backticks (`internal/app/order/order.go`, `CalculateTax()`, `Order.TotalAmount`). You are rewriting the text that gets posted, so markup you drop here is markup the reader never sees, and a comment read beside the diff depends on it to separate the symbol from the sentence.
   - `suggestion`: The replacement CODE ONLY, copied verbatim from the input comment's suggestion. This field is rendered as a GitLab suggestion block that a reviewer applies with one click, committing your text into the file as-is — so it must contain no prose, no lead-in like "Here's the fix:", no markdown fences or backticks, and no `NN|` line-number prefixes. Leave it EMPTY whenever the input comment has no concrete code. Never write a description here and never invent code that wasn't in the input.
   - `file_name`: The file where the issue was found that exist in the comment
   - `line`: The line number where the issue occurs that exist in the comment
 - `filtered_count`: Number of issues that were filtered out (total input - selected)
 - `reasoning`: A brief (2-4 sentences) explanation of what types of issues you kept and what you filtered out
+- `severity_corrections`: Findings whose severity the reviewer got wrong, per STEP 0b. Usually empty.
 
 ## IMPORTANT NOTES:
 

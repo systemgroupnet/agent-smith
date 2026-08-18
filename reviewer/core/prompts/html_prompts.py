@@ -8,6 +8,7 @@ Reviews HTML template files for the application frontend.
 from typing import TYPE_CHECKING
 
 from core.prompts.common import (
+    SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
     format_code_index_guidance,
@@ -17,10 +18,10 @@ from core.prompts.common import (
 )
 
 if TYPE_CHECKING:
-    from core.agents.html_agent import HtmlContext
+    from core.agents.review_contexts import ReviewPromptContext
 
 
-def get_html_reviewer_prompt(context: "HtmlContext", additional_content: str = "") -> str:
+def get_html_reviewer_prompt(context: "ReviewPromptContext", additional_content: str = "") -> str:
     """Get HTML reviewer system prompt with tool usage instructions."""
     
     # Build additional context information
@@ -58,12 +59,7 @@ def get_html_reviewer_prompt(context: "HtmlContext", additional_content: str = "
 - Proper data binding
 - Event handler patterns
 
-## Severity Levels
-- **high**: Accessibility violations, broken functionality
-- **medium**: Semantic issues, missing best practices
-- **low**: Style improvements, minor optimizations
-
-**CRITICAL**: For EVERY high severity issue, explain WHY it's critical and the potential impact.
+{SEVERITY_RUBRIC}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}
