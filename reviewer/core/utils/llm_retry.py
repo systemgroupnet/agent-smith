@@ -108,6 +108,18 @@ _TRANSIENT_SIGNATURES = (
     "remoteprotocolerror",
     "protocolerror",
     "incompleteread",
+    # A response body that could not be parsed. "eof while parsing" above covers
+    # the serde spelling; these are the stdlib/SDK ones. Observed on a live run:
+    # `JSONDecodeError: Expecting value: line 5 column 1 (char 22)` from the
+    # fallback endpoint — a **200** carrying something that was not JSON (a relay
+    # emitting SSE keep-alive lines into a non-streaming response is the usual
+    # cause). Matched by type name as well as message, since a bare
+    # `json.JSONDecodeError` re-raised without a response object has no status at
+    # all and would otherwise classify as unclassified.
+    "jsondecodeerror",
+    "expecting value",
+    "unterminated string",
+    "invalid json",
 )
 
 # Timeout-class failures get a lower attempt cap than other transient errors:

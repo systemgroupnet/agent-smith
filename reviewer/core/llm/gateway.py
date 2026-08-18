@@ -429,9 +429,27 @@ class LLMGateway:
                 on_fallback = self._built_provider is not None and self._built_provider.name == FALLBACK
 
                 if self.retries:
-                    # 1. The fallback itself is blocked. Deterministic, so no amount
-                    #    of retrying helps — but the primary was merely throttled.
-                    if on_fallback and not reverted and (info.is_config_block or info.is_hard_limit):
+                    # 1. The fallback itself cannot serve this call — either because
+                    #    the block is deterministic (no amount of retrying helps) or
+                    #    because it has now failed for its whole attempt budget on
+                    #    something that is *not* a throttle. Either way the primary
+                    #    was merely rate limited, and a throttle clears.
+                    #
+                    #    The exhaustion arm is what turns "this file is lost" into
+                    #    "this file runs on the throttled provider that still works".
+                    #    Observed on a production project MR 1180: the primary hit its
+                    #    concurrency limit (429/1302), the run switched, and the
+                    #    fallback answered **HTTP 200 with a body that was not JSON**
+                    #    (`JSONDecodeError: Expecting value`) — so all four files died
+                    #    on an endpoint the run had no way to leave, and nothing was
+                    #    posted. A rate limit on the fallback is deliberately excluded:
+                    #    if it is throttled the primary is too, so bouncing back is
+                    #    churn rather than recovery.
+                    if on_fallback and not reverted and (
+                        info.is_config_block
+                        or info.is_hard_limit
+                        or (exhausted and not info.is_rate_limit)
+                    ):
                         # How much of the fallback this condemns depends on what it
                         # was. A quota/credit denial is about the account, so the
                         # endpoint is gone. A data-policy/guardrail 404 on a
@@ -453,8 +471,13 @@ class LLMGateway:
                                     f"return to the primary provider; the agent loop keeps using it"
                                 )
                         elif LLMGateway.block_fallback(label=self.label, detail=detail):
+                            why = (
+                                f"failed every one of {attempt} attempt(s)"
+                                if not (info.is_config_block or info.is_hard_limit)
+                                else "is blocked"
+                            )
                             print(
-                                f"  ↩️  [llm-fallback] {self.label}: the fallback provider is blocked "
+                                f"  ↩️  [llm-fallback] {self.label}: the fallback provider {why} "
                                 f"({info.label}) — returning this run to the primary provider "
                                 f"and not switching to the fallback again"
                             )
