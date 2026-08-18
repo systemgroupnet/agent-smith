@@ -10,9 +10,14 @@ so they are asserted here.
 
 The gateway tests use a scripted runnable rather than a provider, because what is
 under test is the decision — retry here, switch there, give up — and not any
-model's behaviour.
+model's behaviour. They drive it with `asyncio.run` rather than
+`@pytest.mark.asyncio`, which is the convention across this suite: pytest-asyncio
+is not in `tests/requirements.txt`, so with `--strict-markers` the marker is a
+collection *error* in CI while passing locally for anyone whose environment
+happens to have the plugin. It did exactly that once.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -128,8 +133,7 @@ def _gateway(script, calls):
     return LLMGateway(build=build, label="review typescript_reviewer")
 
 
-@pytest.mark.asyncio
-async def test_a_broken_fallback_hands_the_run_back_to_the_primary(two_providers):
+def test_a_broken_fallback_hands_the_run_back_to_the_primary(two_providers):
     """The whole point of the fix: a lost file becomes a reviewed file.
 
     Primary throttles → switch → the fallback answers 200-with-garbage for its
@@ -146,7 +150,7 @@ async def test_a_broken_fallback_hands_the_run_back_to_the_primary(two_providers
             return "reviewed"
         return _with_response(_json_decode_error(), 200)
 
-    result = await _gateway(script, calls).ainvoke("go")
+    result = asyncio.run(_gateway(script, calls).ainvoke("go"))
 
     assert result == "reviewed"
     assert FALLBACK in calls, "should have tried the fallback"
@@ -157,8 +161,7 @@ async def test_a_broken_fallback_hands_the_run_back_to_the_primary(two_providers
     assert kinds == ["llm_fallback_activated", "llm_fallback_blocked"], kinds
 
 
-@pytest.mark.asyncio
-async def test_a_throttled_fallback_does_not_bounce_back(two_providers):
+def test_a_throttled_fallback_does_not_bounce_back(two_providers):
     """If the fallback is rate limited the primary is too — bouncing is churn.
 
     So this one is expected to *fail*, and to fail on the fallback rather than
@@ -169,7 +172,7 @@ async def test_a_throttled_fallback_does_not_bounce_back(two_providers):
         Exception("Error code: 429 - rate limit reached"), 429)
 
     with pytest.raises(Exception, match="429"):
-        await _gateway(throttle, calls).ainvoke("go")
+        asyncio.run(_gateway(throttle, calls).ainvoke("go"))
 
     assert calls[-1] == FALLBACK
     assert LLMGateway.fallback_active(), "a throttle must not block the fallback"
