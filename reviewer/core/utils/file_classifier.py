@@ -8,7 +8,6 @@ No LLM is used - classification is done purely based on file name matching.
 import os
 import re
 from typing import Optional
-from core.workflow.state import StarterResponse
 
 
 class StaticFileClassifier:
@@ -127,79 +126,18 @@ class StaticFileClassifier:
         # Service files (service.go, validation.go, or any other .go file)
         if ext_lower == '.go':
             return 'service'
-        
-        # Default to service for unknown types
-        return 'service'
-    
-    @staticmethod
-    def classify(input_text: str, file_path: str) -> StarterResponse:
-        """
-        Classify file using static rules based on file name.
-        
-        Args:
-            input_text: Input text containing file information
-            file_path: Path to the file being classified
-            
-        Returns:
-            StarterResponse with classification results
-        """
-        # Extract fields from input text
-        file_name = os.path.basename(file_path)
-        content = StaticFileClassifier.extract_multiline_field(input_text, 'content')
-        diff = StaticFileClassifier.extract_multiline_field(input_text, 'diff')
-        target_branch = StaticFileClassifier.extract_field_from_input(input_text, 'target_branch')
-        source_branch = StaticFileClassifier.extract_field_from_input(input_text, 'source_branch')
-        jira_task_number = StaticFileClassifier.extract_jira_task_number(input_text)
-        module_name = StaticFileClassifier.extract_module_name(file_path)
-        
-        # Classify file type
-        file_type = StaticFileClassifier.classify_file(file_path)
-        
-        # For most files, package is not applicable
-        # Only service and dataview files might have packages
-        package_name = "N/A"
-        
-        return StarterResponse(
-            file_name=file_name,
-            file_type=file_type,
-            package_name=package_name,
-            module_name=module_name,
-            content=content,
-            diff=diff,
-            target_branch=target_branch,
-            source_branch=source_branch,
-            jira_task_number=jira_task_number
-        )
 
-
-# Create a wrapper class that mimics the agent interface
-class StaticClassifierWrapper:
-    """Wrapper that provides an async interface for static file classification."""
-    
-    async def run(self, input_text: str, file_path: Optional[str] = None) -> StarterResponse:
-        """
-        Run classification using static rules.
-        
-        Args:
-            input_text: Input text containing file information
-            file_path: Optional file path (will be extracted from input_text if not provided)
-            
-        Returns:
-            StarterResponse with classification results
-        """
-        # Extract file_path from input_text if not provided
-        if not file_path:
-            file_path = StaticFileClassifier.extract_field_from_input(input_text, 'file_path')
-        
-        if not file_path:
-            raise ValueError("file_path is required for static classification")
-        
-        result = StaticFileClassifier.classify(input_text, file_path)
-        
-        print(f"  📁 Classified statically as: {result.file_type}")
-        
-        return result
-
-
-# Export the wrapper as static_classifier
-static_classifier = StaticClassifierWrapper()
+        # Anything else is not a file any reviewer here understands.
+        #
+        # This used to fall through to 'service' — the **Go** reviewer — so a
+        # Makefile, an .svg, a .json or a .proto was handed to two Go agents
+        # (semantic + business logic), burning two LLM calls to produce findings
+        # about a language the file isn't written in. The only thing standing
+        # between that and the merge request was REVIEW_EXCLUDE_PATTERNS, i.e. a
+        # denylist in someone's .env masking a broken default: whatever nobody had
+        # thought to list went to Go anyway.
+        #
+        # 'unknown' has no reviewer, so such a file is skipped and counted as
+        # skipped. Adding a genuinely new reviewable type is a deliberate change
+        # here plus a routing entry, which is the right amount of friction.
+        return 'unknown'

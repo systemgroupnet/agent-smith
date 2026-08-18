@@ -42,7 +42,7 @@ DEFAULT_COCOINDEX_URL = "http://internal.example.com/mcp"
 # and then simply stops answering hangs the call forever — and with it the agent
 # loop, the file review, and the whole run. Observed on a 55-file MR: the process
 # sat on one open socket for 40+ minutes having burned 12s of CPU, and
-# FILE_REVIEW_TIMEOUT_S could not rescue it (review_file_with_workflow awaits a
+# FILE_REVIEW_TIMEOUT_S could not rescue it (the per-file review awaited a
 # *shielded* task, and its CancelledError handler then awaits that same task, so
 # the watchdog's cancellation is absorbed rather than abandoning the work). A
 # hung optional-context lookup must cost one bounded wait, not the run.
@@ -270,9 +270,26 @@ class MCPToolkitManager:
     }
 
     # cocoindex MCP (code index for old/unchanged files).
-    # An empty set means "allow all tools" since the exact tool names exposed
-    # by the cocoindex server are not fixed/known ahead of time.
-    ALLOWED_COCOINDEX_TOOLS: set[str] = set()
+    #
+    # **Semantic search only — `ripgrep` is deliberately not exposed.** The index
+    # is now the *second* way to look at code: there is a real checkout of the
+    # source branch on disk (see core/utils/repo_clone.py), and exact text search
+    # belongs there. Local grep has none of this tool's failure modes: no `branch`
+    # argument to omit (which silently answered from the pre-MR base branch), no
+    # shared MCP session to drop mid-review, no 60s stalls, and no input schema to
+    # violate — one observed run lost the code index for a whole 35-file MR to
+    # `paths="procurement/service"` (a string where the schema wants a list) and
+    # `context_lines=100` (capped at 20).
+    #
+    # `search` stays because it does something grep cannot: find code by meaning
+    # rather than by substring. So the split is exact-match → local filesystem,
+    # semantic → cocoindex.
+    #
+    # An empty set would mean "allow all", which is what this was: the server's
+    # tool names aren't fixed, so naming them was avoided. Naming `search` is now
+    # the point — an allow-set of one is how `ripgrep` stays out even if the
+    # server keeps offering it.
+    ALLOWED_COCOINDEX_TOOLS: set[str] = {"search"}
 
     def __init__(self):
         """Initialize the toolkit manager."""
@@ -539,10 +556,26 @@ class MCPToolkitManager:
             # Don't raise - allow partial initialization
 
     def _filter_cocoindex_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
-        """Filter cocoindex tools. Empty allow-set means expose all tools."""
+        """Filter cocoindex tools. Empty allow-set means expose all tools.
+
+        The allow-set is now ``{"search"}``, so this is what keeps ``ripgrep`` out
+        of every agent's toolset — exact text search moved to the local checkout.
+        A dropped tool is logged rather than silently omitted, because "the model
+        never called ripgrep" and "ripgrep was never offered" look identical in a
+        trace otherwise.
+        """
         if not self.ALLOWED_COCOINDEX_TOOLS:
             return list(tools)
-        return [tool for tool in tools if tool.name in self.ALLOWED_COCOINDEX_TOOLS]
+        kept, dropped = [], []
+        for tool in tools:
+            (kept if tool.name in self.ALLOWED_COCOINDEX_TOOLS else dropped).append(tool)
+        if dropped:
+            print(
+                f"  🚫 [MCP] cocoindex tool(s) not exposed: "
+                f"{', '.join(sorted(t.name for t in dropped))} "
+                f"(exact search is served by the local checkout)"
+            )
+        return kept
 
     async def _initialize_toolkit_isolated(
         self,

@@ -90,6 +90,13 @@ class RunMetrics(BaseModel):
     # No collector column yet, so it rides in ``raw_json``; that is the documented
     # contract (unknown fields are preserved, never dropped).
     review_verbosity: Optional[str] = None
+    # Which control flow reviewed this MR. There is only one now — a specialist
+    # agent per changed file over a checkout, reported as "deep" — but the field
+    # stays so pre-existing rows keep their meaning: a row saying "graph" came from
+    # the LangGraph fan-out and a row saying "deep" from a run that still had an
+    # orchestrator, and neither is comparable to the current shape without knowing
+    # which it was. Rides in ``raw_json``.
+    review_mode: Optional[str] = None
     # The *configured* (primary) LLM model, e.g. "glm-5.2". Kept as-is even when
     # the run fails over, so "what was this deployment set to" stays answerable.
     model: Optional[str] = None
@@ -118,6 +125,14 @@ class RunMetrics(BaseModel):
     comments_selected: int = 0
     comments_posted: int = 0
     comments_failed: int = 0
+    # Comments the dedup stage removed because the same problem was already on the
+    # MR — from a previous (incremental) run of this agent or from a human — or was
+    # said twice within this batch. Counted separately from ``comments_selected``,
+    # which is what remained: without it a run that found the same 8 findings as
+    # last time and correctly posted none is indistinguishable from a run that
+    # found nothing. No collector column yet, so it rides in ``raw_json``; the
+    # per-drop detail is in the ``comment_dropped_duplicate`` warnings.
+    comments_deduplicated: int = 0
 
     # GitLab username of the MR author — the human whose code was reviewed and
     # who is most likely to score the review comments. Stored per run (not per

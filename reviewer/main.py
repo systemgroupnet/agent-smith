@@ -40,11 +40,22 @@ from core.utils.gitlab_helpers import (
     get_review_marker,
     upsert_review_marker,
     has_review_summary,
+    get_mr_notes,
     add_mr_label,
     SCORE_REACTION_EMOJIS,
     SUMMARY_MARKER_TOKEN,
 )
-from core.agents.file_reviewer import review_file_with_workflow, review_comments_with_agent
+from core.agents.file_reviewer import review_comments_with_agent
+from core.agents.dedup_agent import deduplicate_comments
+from core.agents.deep_reviewer import (
+    ReviewPassResult,
+    go_files,
+    review_changed_files,
+    route_file,
+)
+from core.agents.route_classifier import classify_sql_involvement
+from core.utils.comment_dedup import collect_existing_comments, describe_issue
+from core.utils.repo_clone import clone_source_branch
 from core.agents.effort_agent import estimate_review_effort
 from core.agents.summary_agent import SummaryContext, generate_review_summary
 from core.utils.comment_formatter import (
@@ -54,6 +65,7 @@ from core.utils.comment_formatter import (
     extract_issues_for_review,
     get_severity,
     restore_issue_severities,
+    apply_severity_corrections,
 )
 from core.utils.review_verbosity import (
     all_labels,
@@ -202,139 +214,239 @@ async def _post_review_summary(
             )
 
 
-async def process_single_file(
-    change: dict,
+#: Seconds of the overall budget held back from the deep pass for everything that
+#: has to happen after it: the in-diff gate, the comment reviewer, the dedup agent
+#: (which makes its own LLM call and a GitLab notes fetch) and posting each comment
+#: with its retry backoff. A deep pass that spends the whole window leaves findings
+#: nobody ever sees, which is strictly worse than reviewing fewer files.
+DEEP_REVIEW_POST_RESERVE_S = 240
+
+
+def _review_batch_size() -> int:
+    """Concurrent reviewer-file pairs. `FILE_BATCH_SIZE` governs the review pass
+    again: with no orchestrator, concurrency is ours rather than a property of
+    whether the model chose to emit parallel tool calls."""
+    return max(1, int_env("FILE_BATCH_SIZE", 5))
+
+
+async def _run_review_pass(
+    metrics: RunMetrics,
+    changes_to_review: list,
     exclusion_patterns: list,
     gitlab_url: str,
     project_path: str,
-    source_branch: str,
     gitlab_token: str,
-    mr_title: str,
+    source_branch: str,
     target_branch: str,
-    mr_context: str = "",
-    thread_id: str = None,
-    mr_id: str = None,
-    head_sha: str = None,
-    model_by_file: dict = None,
+    mr_id: str,
+    head_sha: str,
+    mr_context: str,
+    thread_id: str,
+    deadline: float = None,
 ) -> tuple:
+    """Review the merge request: check out the branch, then run the reviewers.
+
+    Returns ``(result, clone)`` — a :class:`ReviewPassResult` and the checkout for
+    the caller to clean up. ``(None, None)`` when there is no checkout: every
+    reviewer reads it, so there is nothing to review without one, and that is
+    fatal rather than degraded — a run that silently reviewed nothing would
+    report success and advance the marker.
     """
-    Process a single file for review.
+    clone = clone_source_branch(
+        gitlab_url=gitlab_url,
+        project_path=project_path,
+        token=gitlab_token,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        mr_iid=mr_id,
+        head_sha=head_sha,
+    )
+    if clone is None:
+        # There is no second review path any more, and every reviewer reads the
+        # checkout. Without one there is nothing to review, so this is fatal rather
+        # than degraded — a run that silently reviewed nothing would report success
+        # and advance the marker, which is the worst available outcome.
+        record_error(
+            metrics,
+            "review_clone",
+            "could not check out the merge request's source branch; the reviewers "
+            "read the checkout, so there is nothing to review without it",
+        )
+        return None, None
 
-    Args:
-        change: GitLab change object containing file information
-        exclusion_patterns: List of file patterns to exclude
-        gitlab_url: GitLab instance URL
-        project_path: Project path in GitLab
-        source_branch: Source branch name
-        gitlab_token: GitLab API token
-        mr_title: Merge request title
-        target_branch: Target branch name
-        thread_id: Tracing thread id grouping all runs of this MR review
-        mr_id: Merge request IID (for trace metadata)
-        head_sha: Current head commit SHA (for trace metadata)
+    if clone.head and head_sha and clone.head != head_sha:
+        # The reviewed commit was outside the shallow window, so the reviewers are
+        # reading a different tree from the one the diffs and position maps
+        # describe. Reviewable, but every line number is now approximate.
+        record_warning(
+            metrics,
+            "review_clone",
+            f"checkout is at {clone.head[:8]} but the review is of {head_sha[:8]}; "
+            f"line numbers may not match the merge request diff",
+        )
 
-    Returns:
-        Tuple of (file_path, issues) or None if file should be skipped
+    # Classify deterministically, with the same static classifier the graph mode
+    # routes on, and apply the same exclusions. The orchestrator is handed this
+    # assignment; it does not decide what to review.
+    classified: list = []
+    reviewable_changes: dict = {}
+    for change in changes_to_review:
+        path = change.get("new_path") or change.get("old_path")
+        if not path or change.get("deleted_file"):
+            continue
+        if should_exclude_file(path, exclusion_patterns):
+            continue
+        file_type = StaticFileClassifier.classify_file(path)
+        if not route_file(file_type):
+            continue
+        classified.append((path, file_type))
+        reviewable_changes[path] = change
+
+    if not classified:
+        print("ℹ️  No reviewable files after classification")
+        return ReviewPassResult(sink=None, summary="no reviewable files"), clone
+
+    # One judgement the extension cannot make: which of these Go files carry
+    # enough SQL that the database reviewer should see them too. Decided by its own
+    # classifier, before the orchestrator gets the plan, so the orchestrator stays a
+    # pure dispatcher and the decision is a logged artifact rather than dispatch
+    # behaviour. Fails closed — no extra reviews, static assignment stands.
+    route_config = build_run_config(
+        thread_id,
+        run_name="sql_routing",
+        extra_metadata={"mr_id": mr_id, "project_path": project_path, "commit": head_sha},
+        tags=["code-review", "sql-routing"],
+    )
+    sql_paths, route_error = await classify_sql_involvement(
+        go_files(classified), clone.path, config=route_config
+    )
+    if route_error:
+        record_warning(metrics, "sql_routing", route_error)
+    for path in sql_paths:
+        record_warning(
+            metrics,
+            "sql_routing_added",
+            f"{path} is a Go file with substantial SQL; also reviewed by sql_reviewer",
+            context=path,
+        )
+
+    review_config = build_run_config(
+        thread_id,
+        run_name="review_pass",
+        extra_metadata={"mr_id": mr_id, "project_path": project_path, "commit": head_sha},
+        tags=["code-review", "review-pass"],
+    )
+    # Everything left of the budget after the checkout, minus a reserve for comment
+    # filtering, dedup and posting — findings nobody posts are worth nothing.
+    review_deadline = None
+    if deadline is not None:
+        review_deadline = max(
+            time.monotonic() + 60.0, deadline - DEEP_REVIEW_POST_RESERVE_S
+        )
+
+    result = await review_changed_files(
+        classified=classified,
+        clone_root=clone.path,
+        source_branch=source_branch,
+        mr_context=mr_context,
+        sql_paths=sql_paths,
+        config=review_config,
+        batch_size=_review_batch_size(),
+        per_file_timeout_s=float(int_env("FILE_REVIEW_TIMEOUT_S", 1200)),
+        deadline=review_deadline,
+    )
+
+    for path in result.failed_files:
+        record_error(
+            metrics,
+            "file_review",
+            f"{path} could not be reviewed",
+            context=path,
+        )
+
+    return result, clone
+
+
+async def _drop_duplicate_comments(
+    metrics: RunMetrics,
+    candidates: list,
+    gitlab_url: str,
+    project_path: str,
+    mr_id: str,
+    gitlab_token: str,
+    config=None,
+) -> list:
+    """Remove the comments that have already been said, and return the rest.
+
+    The last judgement before posting, and the only stage that looks at the MR's
+    *existing* comments. Every filter before it judges a finding on its own
+    merits; none of them can see that the previous run already posted it (the
+    review is incremental and remembers nothing but a commit SHA) or that a human
+    reviewer raised it first.
+
+    Placed after the comment reviewer and **before** ``cap_comments`` on purpose:
+    a duplicate that survives to the cap occupies a slot a unique finding could
+    have used, so the level's budget would be spent on comments nobody reads.
+
+    Non-fatal at every step, and every failure degrades toward *posting*:
+    - notes unfetchable → intra-run dedup only, recorded as a warning;
+    - agent failure → only the exact-text matches are dropped, recorded as a
+      warning (not an error: the outcome is the pre-feature behaviour, a
+      duplicate on the MR, not a lost finding or a corrupted comment).
     """
-    file_path = None
-    try:
-        file_path = change.get("new_path") or change.get("old_path")
-        if not file_path:
-            return None
-        
-        # Skip deleted files
-        if change.get("deleted_file", False):
-            print(f"⏭️  Skipping deleted file: {file_path}")
-            return None
-        
-        # Skip excluded files based on patterns
-        if should_exclude_file(file_path, exclusion_patterns):
-            print(f"⏭️  Skipping excluded file: {file_path}")
-            return None
-        
-        file_start_time = time.time()
-        
-        print(f"\n{'=' * 60}")
-        print(f"📝 Processing: {file_path}")
-        print(f"{'=' * 60}")
-        
-        # Get file content
-        file_content = await get_file_content(gitlab_url, project_path, file_path, source_branch, gitlab_token)
-        if not file_content:
-            print(f"⚠️  Could not fetch content for {file_path}, skipping...")
-            return None
-        
-        # Get diff
-        diff = change.get("diff", "")
-        
-        # Build the per-file tracing run config so this file's trace (and all of its
-        # nested agent/LLM/tool runs) lands inside this MR's thread.
-        review_config = None
-        if thread_id:
-            review_config = build_run_config(
-                thread_id,
-                run_name=f"review:{file_path}",
-                extra_metadata={
-                    "file_path": file_path,
-                    "mr_id": mr_id,
-                    "project_path": project_path,
-                    "commit": head_sha,
-                },
-                tags=["code-review", "file-review"],
-            )
+    if not candidates:
+        return candidates
 
-        # Review file using LangGraph workflow. Bounded so one wedged call chain
-        # (LLM endpoint or MCP server gone silent) fails this file — counted as a
-        # file error, non-zero exit, marker not advanced — instead of stalling the
-        # entire run indefinitely.
-        print(f"🔍 Reviewing file...")
-        file_timeout_s = int_env("FILE_REVIEW_TIMEOUT_S", 1200)
-        try:
-            issues = await asyncio.wait_for(
-                review_file_with_workflow(
-                    file_path=file_path,
-                    content=file_content,
-                    diff=diff,
-                    merge_request_title=mr_title,
-                    target_branch=target_branch,
-                    source_branch=source_branch,
-                    gitlab_token=gitlab_token,
-                    gitlab_url=gitlab_url,
-                    project_path=project_path,
-                    mr_context=mr_context,
-                    config=review_config,
-                ),
-                timeout=file_timeout_s,
-            )
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                f"review timed out after {file_timeout_s}s (FILE_REVIEW_TIMEOUT_S)"
-            )
+    # Note the falsy set deliberately excludes "": `.env.example` ships every
+    # flag with an empty value, and an empty assignment must mean "take the
+    # default" for a flag documented as default-on. The sibling flags
+    # (COMMENT_REACTIONS_ENABLED, REVIEW_SUMMARY_ENABLED, EFFORT_ESTIMATE_ENABLED,
+    # REVIEW_SUMMARY_IN_DESCRIPTION) do count "" as off, which means copying the
+    # template silently disables them — a divergence on purpose, not an oversight.
+    if os.getenv("COMMENT_DEDUP_ENABLED", "true").strip().lower() in (
+        "false", "0", "no", "off"
+    ):
+        print("\n⏭️  Comment dedup disabled (COMMENT_DEDUP_ENABLED)")
+        return candidates
 
-        if issues is None:
-            print(f"⚠️  Could not review {file_path}, skipping...")
-            return None
+    print(f"\n🧹 Checking {len(candidates)} comment(s) against what's already on the MR...")
 
-        # Which model actually produced these issues. Read *after* the review, so
-        # a file whose review completed on the fallback (because every primary
-        # attempt was rate limited) is attributed to the fallback. Recorded per
-        # file rather than per run because the failover latch flips mid-run.
-        if model_by_file is not None:
-            model_by_file[file_path] = LLMGateway.effective_model()
+    notes = await get_mr_notes(gitlab_url, project_path, mr_id, gitlab_token)
+    if notes is None:
+        # Distinguishable from "the MR has no comments": the check still runs, it
+        # just can't see across runs, and the run says so rather than reporting a
+        # clean dedup pass it did not perform.
+        record_warning(
+            metrics,
+            "comment_dedup_notes",
+            "could not list the MR's existing comments; deduplicated within this run only",
+        )
+        existing = []
+    else:
+        existing = collect_existing_comments(notes)
+        print(f"  📖 {len(existing)} existing comment(s) on the MR to compare against")
 
+    kept, dropped, dedup_error = await deduplicate_comments(
+        candidates, existing, config=config
+    )
 
-        file_elapsed_time = time.time() - file_start_time
-        print(f"✅ Found {len(issues)} issue(s) (⏱️  Total file processing: {file_elapsed_time:.2f}s)")
-        
-        return (file_path, issues)
-    
-    except Exception as e:
-        file_info = file_path if file_path else "unknown file"
-        print(f"❌ Error processing file {file_info}: {describe_error(e)}")
-        # Propagate so process_mr records this file as failed and the run exits
-        # non-zero. Best-effort: sibling files in the batch are reviewed
-        # independently (asyncio.gather with return_exceptions=True).
-        raise
+    if dedup_error is not None:
+        record_warning(metrics, "comment_dedup", dedup_error)
+
+    for record in dropped:
+        location = describe_issue(record["issue"])
+        print(f"  🔁 Dropping {location} — duplicate of {record['duplicate_of']}")
+        record_warning(
+            metrics,
+            "comment_dropped_duplicate",
+            f"{location} duplicates {record['duplicate_of']}: {record['reason']}",
+            context=location,
+        )
+
+    metrics.comments_deduplicated = len(dropped)
+    if dropped:
+        print(f"  🧹 Removed {len(dropped)} duplicate comment(s); {len(kept)} remain")
+    return kept
 
 
 async def _probe_fallback_endpoint(timeout_s: int) -> str:
@@ -761,101 +873,61 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                 )
             )
 
-    # Process files concurrently in batches of 5
-    all_comments = []
-    # file path -> model that reviewed it, so each posted comment can be
-    # attributed to the model that actually produced it (see model_by_file in
-    # process_single_file). A run that fails over mid-way has both.
-    model_by_file: dict = {}
-    file_error_count = 0  # files whose review raised — drives the non-zero exit code
-    batch_size = max(1, int_env("FILE_BATCH_SIZE", 5))
-    total_batches = (len(changes_to_review) + batch_size - 1) // batch_size
-
-    # Overall runtime budget: once exceeded, stop reviewing remaining files and
-    # jump straight to comment filtering/posting with whatever was gathered, so a
-    # slow/large MR still posts findings within the CI window instead of running
-    # until the job is killed. The marker is NOT advanced when we truncate (see
-    # below), so a re-run picks up the files we skipped.
+    # ---- the review pass -------------------------------------------------
+    # One path: an orchestrator delegates every classified file to its specialist
+    # reviewer subagent over a real checkout, and any file it fails to dispatch is
+    # reviewed directly by the same specialist. There is no second review
+    # architecture to fall back to — the reviewers read the checkout, so a run
+    # without one has nothing to review and says so.
+    #
+    # The budget starts **before** the clone, not after: measured on
+    # acme-shop, checking out the source branch took 403s of a 1500s budget
+    # (download-bound — ~190s of it the server sending 40MiB, 3s writing 28k
+    # files). A deadline computed afterwards would hand the coverage pass a fresh
+    # full budget on top. One clock for the whole review.
     overall_timeout_s = int_env("OVERALL_TIMEOUT_S", 1500)  # 25 min
     overall_deadline = time.monotonic() + overall_timeout_s
-    timed_out = False
-    # Set when a file fails with an account-level provider block (data-policy /
-    # guardrail / quota): every other file would fail identically, so we stop.
-    provider_blocked = False
+    print(f"⏳ Overall review budget: {overall_timeout_s}s\n")
+
+    metrics.review_mode = "deep"
+    review_result, src_clone = await _run_review_pass(
+        metrics=metrics,
+        changes_to_review=changes_to_review,
+        exclusion_patterns=exclusion_patterns,
+        gitlab_url=gitlab_url,
+        project_path=project_path,
+        gitlab_token=gitlab_token,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        mr_id=mr_id,
+        head_sha=head_sha,
+        mr_context=mr_context,
+        thread_id=thread_id,
+        deadline=overall_deadline,
+    )
+
+    all_comments = review_result.all_comments if review_result else []
+    file_error_count = len(review_result.failed_files) if review_result else 0
+    # No checkout means no review at all: surfaced as a config error so the run
+    # exits non-zero with the marker held, rather than reporting an empty success.
+    provider_blocked = src_clone is None
+    timed_out = bool(review_result and review_result.truncated)
     # Set when the comment reviewer could not run, so the comments being posted came
     # from the deterministic fallback rather than the model's ranking + purge.
     comment_review_failed = False
+    # file path -> the model that reviewed it. The deep path resolves one model per
+    # run rather than per file, so every comment is attributed to whatever the
+    # gateway had active; a mid-run failover still shows up in the run-level flags.
+    model_by_file: dict = {}
 
-    print(f"🔄 Processing {len(changes_to_review)} file(s) in {total_batches} batch(es) of up to {batch_size} files concurrently")
-    print(f"⏳ Overall review budget: {overall_timeout_s}s\n")
+    # The checkout has done its job — every reviewer has run. Removed here rather
+    # than in a finally: the review pass is the only consumer, and everything after
+    # this point (gate, comment filtering, dedup, posting) works from the API's
+    # diffs. A crash before this line leaks a temp directory in a container that is
+    # about to exit, which is the cheapest failure mode available.
+    if src_clone is not None:
+        src_clone.cleanup()
 
-    for batch_num in range(total_batches):
-        if time.monotonic() >= overall_deadline:
-            reviewed_so_far = batch_num * batch_size
-            remaining = len(changes_to_review) - reviewed_so_far
-            timed_out = True
-            print(
-                f"\n⏳ Overall timeout ({overall_timeout_s}s) reached after {batch_num}/{total_batches} "
-                f"batch(es); skipping ~{remaining} remaining file(s) and proceeding to comment filtering/posting."
-            )
-            break
-
-        start_idx = batch_num * batch_size
-        end_idx = min(start_idx + batch_size, len(changes_to_review))
-        batch = changes_to_review[start_idx:end_idx]
-
-        print(f"\n{'=' * 60}")
-        print(f"📦 Processing batch {batch_num + 1}/{total_batches} ({len(batch)} file(s))")
-        print(f"{'=' * 60}")
-
-        # Create tasks for concurrent processing
-        tasks = [
-            process_single_file(
-                change=change,
-                exclusion_patterns=exclusion_patterns,
-                gitlab_url=gitlab_url,
-                project_path=project_path,
-                source_branch=source_branch,
-                gitlab_token=gitlab_token,
-                mr_title=mr_title,
-                target_branch=target_branch,
-                mr_context=mr_context,
-                thread_id=thread_id,
-                mr_id=mr_id,
-                head_sha=head_sha,
-                model_by_file=model_by_file,
-            )
-            for change in batch
-        ]
-        
-        # Process batch concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Aggregate results
-        for result in results:
-            if isinstance(result, Exception):
-                print(f"❌ Exception during file processing: {result}")
-                file_error_count += 1
-                record_error(metrics, "file_review", describe_error(result), exc=result)
-                if is_provider_hard_block(result):
-                    provider_blocked = True
-                continue
-            if result is not None:
-                all_comments.append(result)
-
-        print(f"\n✅ Batch {batch_num + 1}/{total_batches} completed")
-
-        if provider_blocked:
-            # Account-level block (data-policy/guardrail or quota) — every remaining
-            # file would fail the same way. Stop and surface it clearly instead of
-            # emitting the same error for the whole MR.
-            print(
-                "\n🛑 Aborting remaining files — the LLM provider is refusing all requests "
-                "(OpenRouter data-policy/guardrail or quota). Fix the account/model config "
-                "(openrouter.ai/settings/privacy, DEFAULT_LLM_MODEL, OPENROUTER_PROVIDER) and re-run."
-            )
-            break
-    
     print(f"\n{'=' * 60}")
     print(f"✅ Review pass done: {len(all_comments)} file(s) reviewed successfully")
     if file_error_count:
@@ -1050,7 +1122,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             },
             tags=["code-review", "comment-review"],
         )
-        filtered_issues, comment_review_error = await review_comments_with_agent(
+        filtered_issues, severity_corrections, comment_review_error = await review_comments_with_agent(
             issues_for_review, config=comment_config, verbosity=verbosity
         )
         # Deterministic backstop for the *severity*, before anything reads it. The
@@ -1075,10 +1147,58 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                     f"'{was}'; restored to '{now}' from the reviewers' finding",
                     context=f"{file_name}:{line}",
                 )
+        # Duplicate suppression, against the MR's existing comments and within
+        # this batch. Runs *before* the cap so a repeat never occupies a slot a
+        # unique finding could have taken.
+        dedup_config = build_run_config(
+            thread_id,
+            run_name="comment_dedup",
+            extra_metadata={
+                "mr_id": mr_id,
+                "project_path": project_path,
+                "commit": head_sha,
+            },
+            tags=["code-review", "comment-dedup"],
+        )
+        filtered_issues = await _drop_duplicate_comments(
+            metrics,
+            filtered_issues,
+            gitlab_url,
+            project_path,
+            mr_id,
+            gitlab_token,
+            config=dedup_config,
+        )
+
         # Deterministic backstop for the level's budget. The prompt states the cap,
         # but the prompt is a request and this is the last writer before posting —
         # same belt-and-braces as the suggestion field and the summary length. A
         # model that returns 40 comments at -vvv must not post 40.
+        # Honour the comment reviewer's explicit demotions. This runs *after* the
+        # restore above, which is what makes a demotion meaningful: the model cannot
+        # change severity by editing the field (it is overwritten), only by naming
+        # the finding, so a correction is always deliberate. A finding demoted below
+        # the level's scope is dropped rather than re-badged — at the default
+        # verbosity "this is actually a medium" means "this should not be posted",
+        # which is the entire point of correcting it.
+        filtered_issues, demoted = apply_severity_corrections(
+            filtered_issues, severity_corrections, verbosity.severities
+        )
+        if demoted:
+            print(
+                f"  ⚖️  {len(demoted)} comment(s) demoted out of scope by the comment "
+                f"reviewer — not posted"
+            )
+            for file_name, line, was, now, why in demoted:
+                record_warning(
+                    metrics,
+                    "comment_severity_demoted",
+                    f"{file_name}:{line} was labelled '{was}' by the reviewer but the "
+                    f"comment reviewer judged it '{now}' ({why or 'no reason given'}); "
+                    f"out of scope for verbosity {verbosity.name}, not posted",
+                    context=f"{file_name}:{line}",
+                )
+
         filtered_issues, over_cap = cap_comments(filtered_issues, verbosity)
         if over_cap:
             print(

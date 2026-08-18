@@ -18,11 +18,9 @@ Exports:
         - get_pbook_reviewer_prompt
         - get_dataview_reviewer_prompt
     
-    Classification Prompts:
-        - get_starter_agent_prompt
-    
     Comment Review Prompts:
         - get_comment_reviewer_prompt
+        - get_comment_dedup_prompt
 
     Whole-MR Prompts:
         - get_review_summary_prompt
@@ -39,8 +37,9 @@ from .scss_prompts import get_scss_reviewer_prompt
 from .html_prompts import get_html_reviewer_prompt
 from .pbook_prompts import get_pbook_reviewer_prompt
 from .dataview_prompts import get_dataview_reviewer_prompt
-from .starter_prompts import get_starter_agent_prompt
 from .comment_prompts import get_comment_reviewer_prompt
+from .dedup_prompts import get_comment_dedup_prompt
+from .route_prompts import get_sql_router_prompt
 from .summary_prompts import get_review_summary_prompt
 from .effort_prompts import get_effort_estimator_prompt
 
@@ -57,10 +56,10 @@ __all__ = [
     "get_html_reviewer_prompt",
     "get_pbook_reviewer_prompt",
     "get_dataview_reviewer_prompt",
-    # Classification prompts
-    "get_starter_agent_prompt",
     # Comment review prompts
     "get_comment_reviewer_prompt",
+    "get_comment_dedup_prompt",
+    "get_sql_router_prompt",
     # Effort estimation prompts
     "get_effort_estimator_prompt",
 ]
