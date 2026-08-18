@@ -14,6 +14,7 @@ langchain-core>=1.4.7,<2.0
 langchain-openai>=1.3,<2.0
 langchain-classic>=1.0,<2.0          # legacy AgentExecutor / create_openai_tools_agent live here in v1
 langchain-mcp-adapters>=0.3,<0.4      # official MCP<->LangChain tools (replaces langchain-mcp)
+deepagents>=0.7,<0.8                  # orchestrator + subagent harness (REVIEW_MODE=deep)
 langgraph>=1.2,<2.0
 langfuse>=4.0,<5.0  # observability: captures the full prompt/context of every LLM call
 
