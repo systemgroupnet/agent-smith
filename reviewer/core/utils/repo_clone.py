@@ -29,6 +29,28 @@ inside the window (verified: ``git diff <marker> HEAD`` and ``git log
 <marker>..HEAD`` both resolve inside such a clone). ``--depth=1`` is the
 fallback for a server that won't serve ``deepen-not``; it costs about the same
 on the wire, since the blobs at HEAD dominate either way.
+
+**Who the clone authenticates as** is a separate question, and the answer is
+``GITLAB_TOKEN`` — the same token the run uses for the REST API, embedded in the
+URL below. The reviewed project's job runs with ``GIT_STRATEGY: none`` (there is
+no workspace checkout for this git to inherit a credential from, and letting the
+runner clone the same monorepo the reviewer is about to clone would double the
+slowest step in the pipeline), so this is the only git in the job and it carries
+its own credential. That token is sufficient by construction: posting a comment
+needs an ``api``-scoped token, and ``api`` already covers Git-over-HTTPS
+repository read.
+
+A pipeline-scoped ``~/.netrc`` written by the job — the house pattern for git in
+this organisation's CI — was considered and rejected: it buys only hygiene (a
+short-lived scoped credential, and one that stays out of argv) at the cost of a
+second way for the clone to fail, on the one path where failing takes the whole
+review with it. Recording the non-obvious part in case anyone revisits it: git
+reads ``~/.netrc`` through libcurl's ``CURLOPT_NETRC`` in *optional* mode, which
+is consulted **only when the URL carries no userinfo**. Verified against a local
+smart-HTTP git server — a valid netrc plus a wrong ``oauth2:…@`` credential fails
+outright. So a token in the URL does not merely outrank a netrc, it makes the
+netrc unreachable, and using one would mean deliberately building a
+credential-free URL rather than just writing the file.
 """
 
 from __future__ import annotations
