@@ -73,6 +73,7 @@ from core.agents.review_contexts import ReviewPromptContext
 from core.config.langchain_config import build_chat_model
 from core.llm.gateway import LLMGateway
 from core.agents.tool_errors import tool_error_middleware
+from core.agents.tool_trace import tool_trace_middleware
 from core.llm.gateway_middleware import ProviderPolicyMiddleware
 from core.prompts import (
     get_business_logic_reviewer_prompt,
@@ -353,6 +354,7 @@ def build_reviewer(
     record_tool: BaseTool,
     backend: FilesystemBackend,
     model,
+    file_path: Optional[str] = None,
     call_limit: int = DEFAULT_REVIEWER_CALL_LIMIT,
     provider_policy: bool = True,
 ):
@@ -401,6 +403,13 @@ def build_reviewer(
         # net over those tools rather than a replacement for that wrapper.
         tool_error_middleware(),
     ]
+    # One line per tool call, so a run's log shows whether a reviewer actually read
+    # the file and grepped for the caller — or answered from the diff alone. Labelled
+    # per reviewer-and-file because FILE_BATCH_SIZE of these run at once.
+    trace = tool_trace_middleware(
+        f"{spec.name} {os.path.basename(file_path)}" if file_path else spec.name)
+    if trace is not None:
+        middleware.append(trace)
     if provider_policy:
         # Reviewers make every model call in the run, so this is where a throttle
         # lands. Without it there is no retry and no failover on the only calls
@@ -532,6 +541,7 @@ async def review_changed_files(
             record_tool=record_tool,
             backend=backend,
             model=resolved,
+            file_path=path,
             provider_policy=provider_policy,
         )
         call = agent.ainvoke(

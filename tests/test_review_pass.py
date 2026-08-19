@@ -84,6 +84,7 @@ def _reviewer(checkout, model, sink=None, record_tool=None):
         record_tool=record_tool or make_record_findings_tool(sink or FindingsSink()),
         backend=FilesystemBackend(root_dir=str(checkout), virtual_mode=True),
         model=model,
+        file_path="svc/order.go",
         provider_policy=False,
     )
 
@@ -153,6 +154,32 @@ def test_a_raising_tool_does_not_end_the_file_review(checkout):
     assert errors[0].status == "error", "a failure must not look like a success"
     assert "not** recorded" in str(errors[0].content), str(errors[0].content)
     assert "sink exploded" in str(errors[0].content), "the cause is named"
+
+
+def test_the_tool_trace_shows_what_the_reviewer_looked_at(checkout, capsys):
+    """A run's log should answer "did it actually read the file?".
+
+    Every line carries the reviewer and its file because FILE_BATCH_SIZE of these
+    run concurrently, and an unlabelled interleaving of five investigations is noise.
+    """
+    agent = _reviewer(checkout, Scripted())
+    asyncio.run(agent.ainvoke(
+        {"messages": [{"role": "user", "content": "Review svc/order.go"}]}))
+    trace = [ln for ln in capsys.readouterr().out.splitlines() if "\U0001f527" in ln]
+
+    assert trace, "no tool trace at all"
+    assert any("read_file svc/order.go" in ln for ln in trace), trace
+    assert any("record_findings" in ln for ln in trace), trace
+    for line in trace:
+        assert "[service_reviewer order.go]" in line, line
+
+
+def test_the_trace_can_be_switched_off(checkout, capsys, monkeypatch):
+    monkeypatch.setenv("LOG_TOOL_TRACE", "false")
+    agent = _reviewer(checkout, Scripted())
+    asyncio.run(agent.ainvoke(
+        {"messages": [{"role": "user", "content": "Review svc/order.go"}]}))
+    assert not [ln for ln in capsys.readouterr().out.splitlines() if "\U0001f527" in ln]
 
 
 def test_the_error_observation_never_propagates_an_exception():

@@ -1,8 +1,8 @@
 """``LLMGateway`` — the single path from any agent to any LLM provider.
 
 Every LLM call the reviewer makes goes through this class: the file reviewers, the
-comment reviewer, the summary and effort agents, the tool agent's salvage call, and
-the startup pre-flight. Nothing else builds a chat model, retries a request, or
+comment reviewer, the summary, effort, routing and dedup agents, and the startup
+pre-flight. Nothing else builds a chat model, retries a request, or
 decides which provider to talk to.
 
 Why it is one class
@@ -86,7 +86,7 @@ from core.config.langchain_config import (
     get_fallback_model,
     primary_api_key,
     primary_base_url,
-    structured_reasoning_for,
+    reasoning_config_for,
 )
 from core.utils.llm_retry import (
     LLMErrorInfo,
@@ -389,10 +389,11 @@ class LLMGateway:
                 temperature=self.temperature,
                 streaming=self.streaming,
                 max_tokens=self.max_tokens,
-                # function_calling sends a forced tool_choice; decide the reasoning
-                # override against the model actually going out, which after a
-                # switch is not the one the agent asked for.
-                reasoning=structured_reasoning_for(provider.model) if self.structured else None,
+                # Decide the reasoning field against the model actually going out,
+                # which after a switch is not the one the agent asked for: a forced
+                # tool_choice (function_calling) has to run with reasoning off on a
+                # DeepSeek V4 model, and that override outranks the configured effort.
+                reasoning=reasoning_config_for(provider.model, structured=self.structured),
             )
             self._runnable = self._build(model)
             self._built_epoch = LLMGateway._epoch

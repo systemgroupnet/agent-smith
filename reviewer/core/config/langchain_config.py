@@ -246,3 +246,65 @@ def structured_reasoning_for(model: str) -> Optional[dict]:
     if any(model.startswith(p) for p in prefixes):
         return {"effort": "none"}
     return None
+
+
+#: How hard the model should think, sent as ``reasoning.effort``. Default **high**:
+#: this is a code reviewer, where one missed nil-check costs more than the reasoning
+#: tokens, and nothing else in the run is cheap either (a 400 s clone, ~2 model calls
+#: per file minimum). Nothing was sent before, which meant "whatever the provider
+#: defaults to" — usually medium, and unknowable from the request.
+#:
+#: ``high`` is the ceiling: OpenRouter's scale is ``minimal|low|medium|high`` and
+#: there is no ``max``, so ``max``/``maximum`` are accepted here and mapped to it
+#: rather than sent as an invalid value.
+#:
+#: **Empty means the default, not "off."** ``.env.example`` ships every setting
+#: blank, and four sibling flags read ``""`` as *disabled* — so an empty value here
+#: reading as "send no reasoning field" would silently give the provider's default
+#: to anyone who copied the template, while the documentation said ``high``. To hand
+#: the decision back to the provider, say so: ``provider``, ``default`` or ``off``.
+#: (``none`` is different again — a real effort level meaning *do not think*, which
+#: is what a DeepSeek structured call needs.)
+REASONING_EFFORT_ENV = "LLM_REASONING_EFFORT"
+DEFAULT_REASONING_EFFORT = "high"
+_EFFORT_ALIASES = {"max": "high", "maximum": "high", "highest": "high", "full": "high"}
+_VALID_EFFORTS = {"minimal", "low", "medium", "high", "none"}
+_PROVIDER_DEFAULT_WORDS = {"default", "provider", "off", "unset"}
+
+
+def requested_reasoning_effort() -> Optional[str]:
+    """The configured effort level, or None to send no ``reasoning`` field."""
+    value = (os.getenv(REASONING_EFFORT_ENV) or "").strip().lower()
+    if not value:
+        value = DEFAULT_REASONING_EFFORT
+    if value in _PROVIDER_DEFAULT_WORDS:
+        return None
+    value = _EFFORT_ALIASES.get(value, value)
+    if value not in _VALID_EFFORTS:
+        print(f"  ⚠️  [llm] ignoring {REASONING_EFFORT_ENV}={value!r} (expected one of "
+              f"{', '.join(sorted(_VALID_EFFORTS))}, max, or provider)")
+        return None
+    return value
+
+
+def reasoning_config_for(model: str, *, structured: bool) -> Optional[dict]:
+    """The ``reasoning`` request field for one call, or None to omit it.
+
+    Two rules, and the order between them is the point. A DeepSeek V4-class model
+    **must** run with reasoning off on a structured call or the request is rejected
+    outright (see :func:`structured_reasoning_for`), so that override wins over any
+    configured effort — asking for `high` there would turn a working call into a
+    400. Everywhere else the configured effort applies, to the agent loop and
+    structured calls alike.
+
+    Endpoints that do not know the field ignore it, which is the same passthrough
+    contract ``provider`` rides on. Worth knowing for the currently configured
+    primary: a GLM ``/v4`` endpoint answers a request carrying ``reasoning``
+    normally, but its own thinking switch is the native ``thinking`` field and is
+    binary rather than graded, so an effort level there is at best a no-op.
+    """
+    forced_off = structured_reasoning_for(model) if structured else None
+    if forced_off is not None:
+        return forced_off
+    effort = requested_reasoning_effort()
+    return {"effort": effort} if effort else None
