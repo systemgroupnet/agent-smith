@@ -21,7 +21,7 @@ endpoint — which omits ``system_fingerprint`` — failed every single call wit
 ``ResponseValidationError``, on requests that were perfectly valid. The two
 OpenRouter-specific request fields it existed to provide, ``reasoning`` and
 ``provider`` routing, are plain JSON and ride along in ``extra_body``; a vendor
-endpoint that doesn't know them ignores them (verified against GLM 5.2).
+endpoint that doesn't know them ignores them (verified against GLM 5.3).
 
 A side benefit: ``ChatOpenAI`` implements ``_astream``, which ``ChatOpenRouter``
 did not. LangChain's ``astream`` — what the agent loop calls — no longer degrades
@@ -61,7 +61,7 @@ def int_env(name: str, default: int) -> int:
 
 def get_default_model() -> str:
     """The primary model id, as the configured endpoint names it — ``provider/model``
-    on OpenRouter, native (``glm-5.2``) on a vendor API."""
+    on OpenRouter, native (``glm-5.3``) on a vendor API."""
     return os.getenv("DEFAULT_LLM_MODEL", "deepseek/deepseek-v4-pro")
 
 
@@ -175,8 +175,8 @@ def build_chat_model(
     # "provider/model" is *OpenRouter's* id convention, so only assume a missing
     # provider means OpenAI when we are talking to OpenRouter directly. A custom
     # base_url may be a vendor's own API, where ids are native and unprefixed —
-    # pointing at an internal GLM endpoint with DEFAULT_LLM_MODEL=glm-5.2 used to
-    # send "openai/glm-5.2" and get back "BadRequestResponseError: Unknown Model,
+    # pointing at an internal GLM endpoint with DEFAULT_LLM_MODEL=glm-5.3 used to
+    # send "openai/glm-5.3" and get back "BadRequestResponseError: Unknown Model,
     # please check the model code". Existing OpenRouter-behind-a-proxy setups are
     # unaffected: their ids already carry a provider (deepseek/deepseek-v4-pro).
     if "/" not in model and not base_url:
@@ -254,9 +254,19 @@ def structured_reasoning_for(model: str) -> Optional[dict]:
 #: per file minimum). Nothing was sent before, which meant "whatever the provider
 #: defaults to" — usually medium, and unknowable from the request.
 #:
-#: ``high`` is the ceiling: OpenRouter's scale is ``minimal|low|medium|high`` and
-#: there is no ``max``, so ``max``/``maximum`` are accepted here and mapped to it
-#: rather than sent as an invalid value.
+#: The ladder is ``none < minimal < low < medium < high < xhigh < max`` — checked
+#: against OpenRouter's own documentation, which lists all seven verbatim. An
+#: earlier version of this comment claimed ``high`` was the ceiling and mapped
+#: ``max`` down onto it, which quietly discarded the top two rungs; ``xhigh`` is the
+#: default because it is one deliberate step below the most expensive setting there
+#: is. Only the *spellings* are aliased now (``maximum``, ``highest``, ``full`` →
+#: ``max``), never the levels.
+#:
+#: Not every provider honours the field. OpenRouter documents ``effort`` for the
+#: OpenAI reasoning, Grok and Gemini families, while Anthropic and Gemini-thinking
+#: models take ``reasoning.max_tokens`` instead — and for those OpenRouter maps an
+#: effort level onto a token budget (95% of it for ``max``/``xhigh``, 80% for
+#: ``high``), so sending a level is still meaningful there.
 #:
 #: **Empty means the default, not "off."** ``.env.example`` ships every setting
 #: blank, and four sibling flags read ``""`` as *disabled* — so an empty value here
@@ -266,9 +276,9 @@ def structured_reasoning_for(model: str) -> Optional[dict]:
 #: (``none`` is different again — a real effort level meaning *do not think*, which
 #: is what a DeepSeek structured call needs.)
 REASONING_EFFORT_ENV = "LLM_REASONING_EFFORT"
-DEFAULT_REASONING_EFFORT = "high"
-_EFFORT_ALIASES = {"max": "high", "maximum": "high", "highest": "high", "full": "high"}
-_VALID_EFFORTS = {"minimal", "low", "medium", "high", "none"}
+DEFAULT_REASONING_EFFORT = "xhigh"
+_EFFORT_ALIASES = {"maximum": "max", "highest": "max", "full": "max"}
+_VALID_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 _PROVIDER_DEFAULT_WORDS = {"default", "provider", "off", "unset"}
 
 
@@ -298,10 +308,14 @@ def reasoning_config_for(model: str, *, structured: bool) -> Optional[dict]:
     structured calls alike.
 
     Endpoints that do not know the field ignore it, which is the same passthrough
-    contract ``provider`` rides on. Worth knowing for the currently configured
-    primary: a GLM ``/v4`` endpoint answers a request carrying ``reasoning``
-    normally, but its own thinking switch is the native ``thinking`` field and is
-    binary rather than graded, so an effort level there is at best a no-op.
+    contract ``provider`` rides on — and "ignore" is measured, not assumed, for the
+    endpoint this project is pointed at. On ``glm-5.3`` at ``…/llm-proxy/v4`` the
+    reasoning tokens the endpoint reports do not move with the level: ``high`` 379,
+    ``low`` 374, ``minimal`` 279/356, **no field** 515/400, and its own native
+    ``thinking={"type":"disabled"}`` produced *more* thinking (788) than ``enabled``
+    (352). GLM is simply always thinking, so it is already at its maximum and there
+    is nothing here to raise. The setting stays because it is correct where it is
+    honoured (OpenRouter-routed models) and free where it is not.
     """
     forced_off = structured_reasoning_for(model) if structured else None
     if forced_off is not None:
