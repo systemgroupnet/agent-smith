@@ -38,6 +38,16 @@ from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 
+#: Where a request goes when no endpoint is configured. ``ChatOpenAI`` defaults to
+#: ``api.openai.com``, which is emphatically not what this project means by "unset":
+#: the id-prefixing rule below assumes a bare model id means OpenRouter's
+#: ``provider/model`` convention, and both this module's docstring and CLAUDE.md have
+#: always said unset meant OpenRouter. It didn't. Sending an OpenRouter key to OpenAI
+#: earns ``401 Incorrect API key provided: sk-or-v1***`` — an error that names the
+#: right key and the wrong service, which is a confusing place to start debugging.
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
 def int_env(name: str, default: int) -> int:
     """Read an int env var, falling back to ``default`` on a missing/malformed value.
 
@@ -71,7 +81,9 @@ def primary_api_key() -> str:
 
 
 def primary_base_url() -> str:
-    """Primary endpoint, or "" for api.openrouter.ai."""
+    """Primary endpoint, or "" to mean OpenRouter — see DEFAULT_OPENROUTER_BASE_URL,
+    applied in :func:`build_chat_model` rather than here, so the "was an endpoint
+    configured?" question the id-prefixing rule asks still has an answer."""
     return os.getenv("OPENROUTER_BASE_URL", "").strip()
 
 
@@ -156,7 +168,7 @@ def build_chat_model(
     Args:
         model: Model id as the endpoint names it.
         api_key: Key for that endpoint.
-        base_url: Endpoint, or "" for api.openrouter.ai.
+        base_url: Endpoint, or "" for OpenRouter (api.openrouter.ai).
         temperature: Sampling temperature (0.0 = deterministic).
         streaming: Enable streaming for ``invoke``. (``astream`` streams anyway.)
         max_tokens: Maximum tokens for the response (optional).
@@ -196,8 +208,8 @@ def build_chat_model(
     }
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
-    if base_url:
-        kwargs["base_url"] = base_url
+    # Never leave this to the client's own default, which is api.openai.com.
+    kwargs["base_url"] = base_url or DEFAULT_OPENROUTER_BASE_URL
 
     # OpenRouter's two non-OpenAI request fields are plain JSON, so they ride in
     # extra_body rather than needing a bespoke client. An endpoint that doesn't

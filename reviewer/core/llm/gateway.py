@@ -99,6 +99,26 @@ from core.utils.llm_retry import (
 PRIMARY = "primary"
 FALLBACK = "fallback"
 
+#: A 400 that names the reasoning field. Deliberately narrow: it must not catch a
+#: 400 about the *prompt*, the tools or the schema, all of which are real failures
+#: this client cannot fix by dropping a request field.
+_REASONING_REJECTION_SIGNS = (
+    "reasoning",
+    "effort",
+    "thinking",
+)
+
+
+def _reasoning_was_rejected(info: LLMErrorInfo) -> bool:
+    """Whether a 400 was about the reasoning field rather than the request's content.
+
+    Scoped to 400/422 so a throttle or a server error can never route here — those
+    have their own paths and retrying them *with* the field is correct.
+    """
+    if info.status_code not in (400, 422):
+        return False
+    return any(sign in info.text for sign in _REASONING_REJECTION_SIGNS)
+
 
 @dataclass(frozen=True)
 class Provider:
@@ -218,6 +238,11 @@ class LLMGateway:
         self._runnable: Optional[Runnable] = None
         self._built_epoch: int = -1
         self._built_provider: Optional[Provider] = None
+        # Set when an endpoint rejects the `reasoning` field itself (see the
+        # `_REASONING_REJECTED` handling in `ainvoke`). Per instance rather than
+        # per class: the rejection is about one endpoint's opinion of one call
+        # shape, and a provider switch rebuilds anyway.
+        self._drop_reasoning: bool = False
 
     # ── provider resolution ─────────────────────────────────────────────────
 
@@ -393,7 +418,10 @@ class LLMGateway:
                 # which after a switch is not the one the agent asked for: a forced
                 # tool_choice (function_calling) has to run with reasoning off on a
                 # DeepSeek V4 model, and that override outranks the configured effort.
-                reasoning=reasoning_config_for(provider.model, structured=self.structured),
+                reasoning=(
+                    None if self._drop_reasoning
+                    else reasoning_config_for(provider.model, structured=self.structured)
+                ),
             )
             self._runnable = self._build(model)
             self._built_epoch = LLMGateway._epoch
@@ -516,6 +544,32 @@ class LLMGateway:
                         attempt = 0
                         await asyncio.sleep(retry_wait_seconds())
                         continue
+
+                # 3. The endpoint rejected the `reasoning` field itself. This is a
+                #    deterministic 400, so it is not retryable and would otherwise end
+                #    the call — but it is also the one 400 we can *fix*, by asking for
+                #    the completion without an effort level. That matters because the
+                #    level is configuration (LLM_REASONING_EFFORT, default `xhigh`)
+                #    and its acceptance could not be verified against every endpoint:
+                #    OpenRouter documents the value, a vendor endpoint may not know it,
+                #    and the failure mode without this is every call in the run dying
+                #    on a config value rather than degrading to the provider's default.
+                if (
+                    not self._drop_reasoning
+                    and reasoning_config_for(
+                        self._built_provider.model if self._built_provider else "",
+                        structured=self.structured,
+                    ) is not None
+                    and _reasoning_was_rejected(info)
+                ):
+                    print(
+                        f"  🧠 [llm] {self.label}: {self._where()} rejected the reasoning "
+                        f"field ({info.label}) — retrying without an effort level"
+                    )
+                    self._drop_reasoning = True
+                    self._runnable = None  # rebuild without it
+                    attempt = 0
+                    continue
 
                 if exhausted or not info.is_retryable or not self.retries:
                     if self.retries:

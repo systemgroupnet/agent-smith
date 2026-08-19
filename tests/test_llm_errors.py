@@ -94,6 +94,59 @@ def test_a_gateway_timeout_status_keeps_its_tighter_budget():
 # --- where the run goes next -------------------------------------------------
 
 
+def test_a_rejected_reasoning_field_retries_without_it(monkeypatch):
+    """`LLM_REASONING_EFFORT` is configuration, and its acceptance could not be
+    verified against every endpoint — OpenRouter documents `xhigh`, a vendor API may
+    not know it. A 400 is not retryable, so without this one call shape being
+    repairable, a config value nobody could test would kill every call in the run."""
+    monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "xhigh")
+    monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
+    LLMGateway.reset()
+
+    seen = []
+
+    def build(model):
+        sent = (getattr(model, "extra_body", None) or {}).get("reasoning")
+        seen.append(sent)
+
+        class Runnable:
+            async def ainvoke(self, payload, config=None):
+                if sent is not None:
+                    raise _with_response(
+                        Exception("Error code: 400 - unsupported value for "
+                                  "'reasoning.effort': 'xhigh'"), 400)
+                return "answered"
+
+        return Runnable()
+
+    result = asyncio.run(LLMGateway(build=build, label="review sql_reviewer").ainvoke("go"))
+
+    assert result == "answered"
+    assert seen == [{"effort": "xhigh"}, None], seen
+
+
+def test_a_400_about_the_prompt_is_not_blamed_on_reasoning(monkeypatch):
+    """The sniff must not turn an ordinary bad request into a silent retry."""
+    monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
+    LLMGateway.reset()
+    calls = []
+
+    def build(model):
+        class Runnable:
+            async def ainvoke(self, payload, config=None):
+                calls.append(1)
+                raise _with_response(Exception("Error code: 400 - messages: too long"), 400)
+        return Runnable()
+
+    with pytest.raises(Exception, match="too long"):
+        asyncio.run(LLMGateway(build=build, label="review sql_reviewer").ainvoke("go"))
+    assert len(calls) == 1, "a content 400 must not be retried at all"
+
+
 @pytest.fixture
 def two_providers(monkeypatch):
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "primary/model")
