@@ -12,7 +12,6 @@ from core.prompts.common import (
     SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
-    format_code_index_guidance,
     NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
@@ -57,14 +56,7 @@ SUGGESTION FIELD FORMAT:
 {SYMBOL_FORMATTING_RULE}
 
 TOOLS AVAILABLE:
-You have access to MCP tools for GitLab and the cocoindex code index that can help you:
-- Fetch file contents from the repository to understand context
-- Look up related files or dependencies
-- View merge request information
-
-{format_code_index_guidance(context.source_branch)}
-
-Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
+You review from a real checkout of this merge request's source branch: `read_file` reads any file, `grep` and `glob` search the whole repository, `ls` looks around. Use them to resolve what the diff references but does not show — a definition, a caller, a sibling implementation — instead of assuming. There are no repository, Jira or Confluence tools; the merge request details and its Jira ticket, when it has one, are already in the Merge Request Context section below.
 
 CONSTRAINTS:
 - Be specific: exact line numbers and WHY it's wrong
@@ -136,18 +128,7 @@ SUGGESTION FIELD FORMAT:
 {SYMBOL_FORMATTING_RULE}
 
 TOOLS AVAILABLE:
-You have access to MCP tools for Jira and Confluence that can help you:
-- Fetch Jira issue details to understand requirements
-- Retrieve Confluence documentation and specifications
-- Look up related tasks and documents
-
-You also have GitLab tools and the cocoindex code index to:
-- Fetch related files from the repository
-- View merge request context
-
-{format_code_index_guidance(context.source_branch)}
-
-Use these tools to gather the information you need to properly review business logic against requirements. You SHOULD use Jira/Confluence tools if a Jira task number is provided to understand the requirements.
+You have no Jira or Confluence tools: the ticket text, when this merge request has one, is already included in the Merge Request Context section below. Use `grep` and `read_file` over the checkout of the source branch to confirm what the code actually does before judging it against those requirements.
 
 CONSTRAINTS:
 - ALWAYS reference specific requirement or task description section

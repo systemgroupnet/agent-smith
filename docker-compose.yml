@@ -49,9 +49,6 @@ services:
       - MCP_GITLAB_ENABLED=true
       - MCP_GITLAB_URL=${MCP_GITLAB_URL:-http://mcp-gitlab:3002}
       - MCP_GITLAB_TRANSPORT=${MCP_GITLAB_TRANSPORT:-streamable-http}
-      # cocoindex code index — one setting, its base URI. Set it empty to turn
-      # the code index off; the transport is always streamable-http.
-      - MCP_COCOINDEX_URL=${MCP_COCOINDEX_URL:-http://internal.example.com/mcp}
       - GITLAB_URL=${GITLAB_URL}
       - GITLAB_TOKEN=${GITLAB_TOKEN}
       # Run analytics — opt-in. Off by default so a reviewer run never depends on

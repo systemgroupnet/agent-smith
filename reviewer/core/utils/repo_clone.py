@@ -1,7 +1,7 @@
 """A shallow working copy of the MR's source branch.
 
 Until now the reviewer had no checkout: file content came from the GitLab REST
-API and code search came from the cocoindex MCP index. Both work, and both have
+API and code search came from a semantic code-index MCP. Both worked, and both had
 the same structural weakness — they answer about a *ref you have to name*, and
 naming it wrong is silent. The index in particular answers from the server's
 base branch when the `branch` argument is missing, so a symbol the MR added

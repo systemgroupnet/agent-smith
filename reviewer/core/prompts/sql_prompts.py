@@ -11,7 +11,6 @@ from core.prompts.common import (
     SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
-    format_code_index_guidance,
     NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
@@ -70,15 +69,7 @@ def get_sql_reviewer_prompt(context: "ReviewPromptContext", additional_content: 
 {SYMBOL_FORMATTING_RULE}
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, Confluence, and the cocoindex code index that can help you:
-- Fetch related migration files from the repository
-- Look up Jira issues for context about the database changes
-- View Confluence documentation about database schema
-- Understand the broader context of the migration
-
-{format_code_index_guidance(context.source_branch)}
-
-Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
+You review from a real checkout of this merge request's source branch: `read_file` reads any file, `grep` and `glob` search the whole repository, `ls` looks around. Use them to resolve what the diff references but does not show — a definition, a caller, a sibling implementation — instead of assuming. There are no repository, Jira or Confluence tools; the merge request details and its Jira ticket, when it has one, are already in the Merge Request Context section below.
 
 ## Constraints
 - EVERY issue MUST have a valid integer line number

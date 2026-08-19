@@ -5,72 +5,6 @@ Shared prompt helpers used across all reviewer prompts.
 from typing import Optional
 
 
-def format_code_index_guidance(source_branch: Optional[str] = None) -> str:
-    """Guidance shared across all reviewer prompts: which MCP to use for what.
-
-    Two things to get across:
-
-    1. Which server to ask. Files *changed* in this MR must come from the GitLab
-       MCP (that reads the merge request's own blobs, i.e. the new version).
-       Old/unchanged files and the rest of the codebase come from the cocoindex
-       code-index MCP (semantic ``search`` plus exact ``ripgrep``).
-
-    2. Which branch to ask about. Both cocoindex tools take an optional
-       ``branch`` argument and **default to the server's checked-out base
-       branch** when it is omitted. For a review that default is wrong: it
-       returns the pre-merge-request state of the code, so a symbol the MR added
-       looks missing and a signature the MR changed looks unchanged — exactly the
-       false positives the MR context block exists to prevent. Passing the MR
-       source branch makes the index overlay that branch's changes, so lookups
-       reflect the code as it will be after merge.
-
-    3. How to shape the arguments. Two constraints get violated on essentially
-       every run: ``paths``/``languages``/``globs`` are JSON **arrays**, and
-       ``context_lines`` is capped at 20. A violation is a server-side pydantic
-       error, so the call returns nothing useful — in one observed run *every*
-       cocoindex call in the whole MR failed on those two mistakes alone.
-       ``toolkit_manager._repair_tool_args`` now fixes both before the call goes
-       out, but saying it here saves the round trip.
-
-    The branch is interpolated as a literal so the model can copy it verbatim
-    rather than infer it. cocoindex's ``search`` requires the ref to already
-    exist in the server's clone (``ripgrep`` fetches on demand), hence the
-    retry-without-branch instruction — a branch the index has never seen should
-    degrade to a base-branch lookup, not to no lookup at all.
-    """
-    lines = [
-        "For files that have changes in this merge request, use the GitLab MCP "
-        "tools (so you read the new version of the file). For old/unchanged files "
-        "and existing code in the rest of the codebase, use the cocoindex code "
-        "index MCP (`search` for semantic lookups, `ripgrep` for exact text) to "
-        "look them up for context.",
-    ]
-    if source_branch:
-        lines.append(
-            f'ALWAYS pass `branch="{source_branch}"` to every cocoindex tool call. '
-            "That is this merge request's source branch. Without it the index "
-            "answers from the default branch, which does not contain this merge "
-            "request's changes, and you will draw the wrong conclusion about code "
-            "the merge request touched. If a call reports that the branch or ref "
-            "is unknown, retry the same call once without `branch` and treat the "
-            "result as the pre-merge-request state of the code."
-        )
-    else:
-        lines.append(
-            "The cocoindex tools take an optional `branch` argument and otherwise "
-            "answer from the default branch, which does not contain this merge "
-            "request's changes. Pass the merge request's source branch whenever "
-            "you know it."
-        )
-    lines.append(
-        "Respect the cocoindex argument types or the call is rejected and you get "
-        'nothing back: `paths`, `languages` and `globs` are arrays — `paths=["a/b"]`, '
-        'never `paths="a/b"` — and `context_lines` must be between 0 and 20 (ask for '
-        "20 if you want maximum context, not 50 or 100)."
-    )
-    return " ".join(lines)
-
-
 # Shared across every reviewer prompt: the build already passed before the MR was
 # opened, so nothing a compiler, type checker or parser would reject can actually
 # be present in this code. Each reviewer sees exactly one file (plus the MR
@@ -105,8 +39,8 @@ NO_COMPILE_ERRORS_RULE = (
     "Merge Request Context section) exist — do NOT report them as undefined or "
     "missing. You are shown one file at a time, so you can never conclude from "
     "what is in front of you that something is undefined, unused or "
-    "unimplemented. If you are tempted to, look it up with the code index tools "
-    "instead, and drop the finding when in doubt.\n"
+    "unimplemented. If you are tempted to, look it up in the checkout — `grep` for "
+    "where it is defined — and drop the finding when in doubt.\n"
     "Report ONLY problems that survive a successful build: runtime failures, "
     "logic errors, security flaws, data-integrity and performance problems, and "
     "design issues."

@@ -30,14 +30,6 @@ from contextlib import AsyncExitStack
 # Transport types
 TransportType = Literal["sse", "streamable-http"]
 
-# cocoindex is configured by a single variable — its base URI. Transport is
-# always streamable-http (that is what the server speaks), and "enabled" is
-# derived from the URI: a non-empty value means use it, an empty one means skip
-# the server entirely. One knob instead of three, because the other two never
-# had a reason to differ per deployment.
-COCOINDEX_URL_ENV = "MCP_COCOINDEX_URL"
-DEFAULT_COCOINDEX_URL = "http://internal.example.com/mcp"
-
 # Every MCP tool call is bounded. Without this a server that accepts the request
 # and then simply stops answering hangs the call forever — and with it the agent
 # loop, the file review, and the whole run. Observed on a 55-file MR: the process
@@ -101,12 +93,14 @@ def _schema_facts(spec: dict) -> tuple[set, Optional[float], Optional[float]]:
 def _repair_tool_args(properties: Dict[str, dict], arguments: dict) -> tuple[dict, List[str]]:
     """Fix the two argument mistakes models reliably make on these tools.
 
-    Observed against the cocoindex index, where *every* call in a run failed:
-    ``search(paths="procurement/service")`` — a bare string where the schema wants
-    ``list[str]`` — and ``ripgrep(context_lines=100)`` where the schema caps it at
-    20. Both are server-side pydantic validation errors, so the tool call returns
-    an error and the reviewer loses the code index for that file even though the
-    server is perfectly healthy.
+    Observed against the semantic code index that used to be wired in here, where
+    *every* call in one run failed: ``search(paths="procurement/service")`` — a bare
+    string where the schema wants ``list[str]`` — and ``ripgrep(context_lines=100)``
+    where the schema caps it at 20. Both are server-side pydantic validation errors,
+    so the call returns an error and the reviewer loses that tool for the file even
+    though the server is perfectly healthy. That index is gone (the reviewers read a
+    checkout), but the mistakes are the model's rather than any one server's, and
+    the remaining servers declare the same kinds of constraint.
 
     These two repairs are unambiguous (a single path *is* a one-element list; a
     model asking for 100 lines of context wants as much as it can get), so doing
@@ -269,33 +263,10 @@ class MCPToolkitManager:
         "jira_search",
     }
 
-    # cocoindex MCP (code index for old/unchanged files).
-    #
-    # **Semantic search only — `ripgrep` is deliberately not exposed.** The index
-    # is now the *second* way to look at code: there is a real checkout of the
-    # source branch on disk (see core/utils/repo_clone.py), and exact text search
-    # belongs there. Local grep has none of this tool's failure modes: no `branch`
-    # argument to omit (which silently answered from the pre-MR base branch), no
-    # shared MCP session to drop mid-review, no 60s stalls, and no input schema to
-    # violate — one observed run lost the code index for a whole 35-file MR to
-    # `paths="procurement/service"` (a string where the schema wants a list) and
-    # `context_lines=100` (capped at 20).
-    #
-    # `search` stays because it does something grep cannot: find code by meaning
-    # rather than by substring. So the split is exact-match → local filesystem,
-    # semantic → cocoindex.
-    #
-    # An empty set would mean "allow all", which is what this was: the server's
-    # tool names aren't fixed, so naming them was avoided. Naming `search` is now
-    # the point — an allow-set of one is how `ripgrep` stays out even if the
-    # server keeps offering it.
-    ALLOWED_COCOINDEX_TOOLS: set[str] = {"search"}
-
     def __init__(self):
         """Initialize the toolkit manager."""
         self._gitlab_tools: Optional[List[BaseTool]] = None
         self._atlassian_tools: Optional[List[BaseTool]] = None
-        self._cocoindex_tools: Optional[List[BaseTool]] = None
         self._exit_stack: Optional[AsyncExitStack] = None
         self._initialized = False
     
@@ -311,14 +282,6 @@ class MCPToolkitManager:
     def is_atlassian_enabled(self) -> bool:
         """Check if Atlassian MCP integration is enabled."""
         return os.getenv("MCP_ATLASSIAN_ENABLED", "false").lower() == "true"
-
-    def is_cocoindex_enabled(self) -> bool:
-        """Check if cocoindex MCP integration is enabled.
-
-        There is no separate enable flag: the base URI is the only setting, so an
-        empty ``MCP_COCOINDEX_URL`` is how you turn the code index off.
-        """
-        return bool(self._get_cocoindex_url())
 
     def _get_gitlab_transport(self) -> TransportType:
         """Get GitLab MCP transport type from environment."""
@@ -342,20 +305,12 @@ class MCPToolkitManager:
         """Get Atlassian MCP server URL (no endpoint appended)."""
         return os.getenv("MCP_ATLASSIAN_URL", "http://mcp-atlassian:9000").rstrip('/')
 
-    def _get_cocoindex_url(self) -> str:
-        """Get cocoindex MCP base URI (code index for old/unchanged files).
-
-        Empty (explicitly set to "") disables the server — see
-        :meth:`is_cocoindex_enabled`.
-        """
-        return os.getenv(COCOINDEX_URL_ENV, DEFAULT_COCOINDEX_URL).strip().rstrip('/')
-    
     async def initialize(self) -> None:
         """
         Initialize all enabled MCP toolkits.
         
         This method opens a session to each enabled MCP server (GitLab,
-        Atlassian, cocoindex) and loads its tools via langchain-mcp-adapters.
+        Atlassian) and loads its tools via langchain-mcp-adapters.
         
         Raises:
             Exception: If toolkit initialization fails
@@ -389,15 +344,6 @@ class MCPToolkitManager:
             )
         else:
             print("  ⏭️  [Atlassian MCP] Disabled, skipping...")
-
-        # Initialize cocoindex toolkit (isolated to prevent cancel scope leakage)
-        if self.is_cocoindex_enabled():
-            await self._initialize_toolkit_isolated(
-                self._initialize_cocoindex_tools,
-                "cocoindex MCP"
-            )
-        else:
-            print("  ⏭️  [cocoindex MCP] Disabled, skipping...")
 
         self._initialized = True
         print("\n✅ MCP Toolkit Manager initialized\n")
@@ -510,114 +456,6 @@ class MCPToolkitManager:
             self._atlassian_tools = None
             # Don't raise - allow partial initialization
 
-    async def _initialize_cocoindex_tools(self) -> None:
-        """Initialize cocoindex MCP toolkit (code index for old/unchanged files)."""
-        try:
-            url = self._get_cocoindex_url()
-
-            print(f"  🔌 [cocoindex MCP] Connecting to: {url}")
-            print("     - Transport: Streamable HTTP")
-
-            read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
-                streamablehttp_client(url)
-            )
-
-            # Create ClientSession with the streams
-            session = ClientSession(read_stream, write_stream)
-
-            # Enter + initialize the session (kept open via the exit stack), then
-            # load its tools (langchain-mcp-adapters).
-            await self._exit_stack.enter_async_context(session)
-            await session.initialize()
-
-            print(f"  🔄 [cocoindex MCP] Loading tools...")
-            self._cocoindex_tools = _wrap_tools_resilient(await load_mcp_tools(session))
-
-            all_tools = self._cocoindex_tools
-            filtered_tools = self._filter_cocoindex_tools(all_tools)
-            print(f"  ✅ [cocoindex MCP] Initialized with {len(filtered_tools)}/{len(all_tools)} tool(s)")
-
-            # Print available tools (filtered)
-            for tool in filtered_tools:
-                print(f"     - {tool.name}: {tool.description[:80]}...")
-
-        except asyncio.CancelledError as e:
-            task = asyncio.current_task()
-            if task is not None:
-                task.uncancel()
-            print(f"  ❌ [cocoindex MCP] Initialization cancelled: {e}")
-            self._cocoindex_tools = None
-            # Don't raise - allow partial initialization
-        except Exception as e:
-            print(f"  ❌ [cocoindex MCP] Failed to initialize: {e}")
-            import traceback
-            print(f"     Traceback: {traceback.format_exc()}")
-            self._cocoindex_tools = None
-            # Don't raise - allow partial initialization
-
-    def _filter_cocoindex_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
-        """Filter cocoindex tools. Empty allow-set means expose all tools.
-
-        The allow-set is now ``{"search"}``, so this is what keeps ``ripgrep`` out
-        of every agent's toolset — exact text search moved to the local checkout.
-        A dropped tool is logged rather than silently omitted, because "the model
-        never called ripgrep" and "ripgrep was never offered" look identical in a
-        trace otherwise.
-        """
-        if not self.ALLOWED_COCOINDEX_TOOLS:
-            return list(tools)
-        kept, dropped = [], []
-        for tool in tools:
-            (kept if tool.name in self.ALLOWED_COCOINDEX_TOOLS else dropped).append(tool)
-        if dropped:
-            print(
-                f"  🚫 [MCP] cocoindex tool(s) not exposed: "
-                f"{', '.join(sorted(t.name for t in dropped))} "
-                f"(exact search is served by the local checkout)"
-            )
-        return kept
-
-    async def _initialize_toolkit_isolated(
-        self,
-        initializer: Callable[[], Awaitable[None]],
-        toolkit_label: str,
-        timeout: float = 30.0
-    ) -> None:
-        """Run toolkit initialization in a child task to avoid cancel leakage.
-        
-        Uses asyncio.shield() and timeout to fully isolate MCP cancel scopes
-        from propagating to the main workflow.
-        """
-        async def _run_with_shield():
-            """Inner wrapper to fully isolate the initializer."""
-            try:
-                await asyncio.wait_for(initializer(), timeout=timeout)
-            except asyncio.TimeoutError:
-                print(f"  ❌ [{toolkit_label}] Initialization timed out after {timeout}s")
-            except asyncio.CancelledError as e:
-                # Suppress cancellation - don't let it propagate
-                print(f"  ❌ [{toolkit_label}] Initialization cancelled: {e}")
-            except Exception as e:
-                print(f"  ❌ [{toolkit_label}] Initialization failed: {e}")
-        
-        task = asyncio.create_task(_run_with_shield())
-        try:
-            # Shield prevents external cancellation from reaching the task
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # If we get cancelled while shielding, wait for task to finish anyway
-            # but don't propagate the cancellation
-            try:
-                await task
-            except Exception:
-                pass
-            # Clear any pending cancellation on current task
-            current_task = asyncio.current_task()
-            if current_task is not None:
-                current_task.uncancel()
-        except Exception as e:
-            print(f"  ❌ [{toolkit_label}] Unexpected error: {e}")
-    
     def get_gitlab_tools(self) -> List[BaseTool]:
         """
         Get GitLab MCP tools (filtered to allowed tools only).
@@ -662,23 +500,6 @@ class MCPToolkitManager:
             print(f"  ⚠️  [Atlassian MCP] Error getting tools: {e}")
             return []
 
-    def get_cocoindex_tools(self) -> List[BaseTool]:
-        """
-        Get cocoindex MCP tools (code index for old/unchanged files).
-
-        Returns:
-            List of cocoindex MCP tools or empty list if not initialized
-        """
-        if self._cocoindex_tools is None:
-            return []
-
-        try:
-            all_tools = self._cocoindex_tools
-            return self._filter_cocoindex_tools(all_tools)
-        except Exception as e:
-            print(f"  ⚠️  [cocoindex MCP] Error getting tools: {e}")
-            return []
-
     def get_all_tools(self) -> List[BaseTool]:
         """
         Get all available MCP tools from all toolkits.
@@ -689,12 +510,11 @@ class MCPToolkitManager:
         all_tools = []
         all_tools.extend(self.get_gitlab_tools())
         all_tools.extend(self.get_atlassian_tools())
-        all_tools.extend(self.get_cocoindex_tools())
         return all_tools
 
     def get_tools_by_category(self) -> Dict[str, List[BaseTool]]:
         """
-        Get tools organized by category (gitlab, atlassian, cocoindex).
+        Get tools organized by category (gitlab, atlassian).
 
         Returns:
             Dictionary mapping category names to tool lists
@@ -702,7 +522,6 @@ class MCPToolkitManager:
         return {
             "gitlab": self.get_gitlab_tools(),
             "atlassian": self.get_atlassian_tools(),
-            "cocoindex": self.get_cocoindex_tools(),
         }
     
     async def close(self) -> None:
@@ -721,10 +540,6 @@ class MCPToolkitManager:
         if self._atlassian_tools is not None:
             print("  ✅ [Atlassian MCP] Toolkit closed")
             self._atlassian_tools = None
-
-        if self._cocoindex_tools is not None:
-            print("  ✅ [cocoindex MCP] Toolkit closed")
-            self._cocoindex_tools = None
 
         # Close all async context managers (SSE/HTTP clients)
         if self._exit_stack is not None:

@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # git: the reviewer clones the MR's source branch so agents read and grep a real
-# checkout instead of naming a ref against an API or a code index (see
+# checkout instead of naming a ref against a remote API (see
 # core/utils/repo_clone.py). ripgrep: what the filesystem grep tool shells out to;
 # without it the tool falls back to a slow pure-regex walk over a monorepo.
 # python:*-slim ships neither.

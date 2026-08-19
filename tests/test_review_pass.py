@@ -75,7 +75,7 @@ class Attacker(Scripted):
         return AIMessage(content="done")
 
 
-def _reviewer(checkout, model, sink=None, record_tool=None, extra_tools=()):
+def _reviewer(checkout, model, sink=None, record_tool=None):
     return build_reviewer(
         _SPECS_BY_NAME["service_reviewer"],
         clone_root=str(checkout),
@@ -84,7 +84,6 @@ def _reviewer(checkout, model, sink=None, record_tool=None, extra_tools=()):
         record_tool=record_tool or make_record_findings_tool(sink or FindingsSink()),
         backend=FilesystemBackend(root_dir=str(checkout), virtual_mode=True),
         model=model,
-        extra_tools=extra_tools,
         provider_policy=False,
     )
 
@@ -154,33 +153,6 @@ def test_a_raising_tool_does_not_end_the_file_review(checkout):
     assert errors[0].status == "error", "a failure must not look like a success"
     assert "not** recorded" in str(errors[0].content), str(errors[0].content)
     assert "sink exploded" in str(errors[0].content), "the cause is named"
-
-
-def test_a_failing_helper_tool_tells_the_reviewer_to_route_around_it(checkout):
-    from langchain_core.tools import StructuredTool
-
-    def boom(**_kwargs):
-        raise ValueError("index is down")
-
-    class CallsHelper(Scripted):
-        def _step(self, messages):
-            done = [m.name for m in messages if isinstance(m, ToolMessage) and m.name]
-            if "search" not in done:
-                return AIMessage(content="", tool_calls=[
-                    {"name": "search", "id": "s", "args": {"query": "Save"}}])
-            return super()._step(messages)
-
-    helper = StructuredTool.from_function(
-        func=boom, name="search", description="Semantic code search.")
-    sink = FindingsSink()
-    agent = _reviewer(checkout, CallsHelper(), sink=sink, extra_tools=[helper])
-    out = asyncio.run(agent.ainvoke(
-        {"messages": [{"role": "user", "content": "Review svc/order.go"}]}))
-
-    obs = {m.name: m for m in out["messages"] if isinstance(m, ToolMessage)}
-    assert obs["search"].status == "error"
-    assert "another route" in str(obs["search"].content)
-    assert sink.as_all_comments(), "the review still produced its finding"
 
 
 def test_the_error_observation_never_propagates_an_exception():

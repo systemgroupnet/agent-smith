@@ -62,8 +62,6 @@ repository is on disk and you have read-only tools over it:
 - `grep(pattern, path)` — exact text/regex search across the checkout. Use it to find
   where a symbol is defined, who calls a function, whether a pattern is used elsewhere.
 - `glob(pattern)` / `ls(path)` — find files by name or list a directory.
-- `search(...)` — the semantic code index, for finding code by *meaning* when you do
-  not know what to grep for.
 - `write_todos(...)` — your own plan, when reviewing this file takes several steps.
 
 You will also see `write_file`, `edit_file`, `delete` and `execute` in your tools.

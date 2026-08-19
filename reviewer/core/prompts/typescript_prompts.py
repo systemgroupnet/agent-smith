@@ -11,7 +11,6 @@ from core.prompts.common import (
     SEVERITY_RUBRIC,
     format_file_content_section,
     format_mr_context_section,
-    format_code_index_guidance,
     NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
@@ -67,15 +66,7 @@ def get_typescript_reviewer_prompt(context: "ReviewPromptContext", additional_co
 {SYMBOL_FORMATTING_RULE}
 
 ## TOOLS AVAILABLE
-You have access to MCP tools for GitLab, Jira, Confluence, and the cocoindex code index that can help you:
-- Fetch related TypeScript files from the repository (components, services, models)
-- Look up Jira issues to understand feature requirements
-- View Confluence documentation about frontend architecture and standards
-- Understand the broader context of the component/service
-
-{format_code_index_guidance(context.source_branch)}
-
-Use these tools if you need additional context to perform your review, but avoid unnecessary tool calls.
+You review from a real checkout of this merge request's source branch: `read_file` reads any file, `grep` and `glob` search the whole repository, `ls` looks around. Use them to resolve what the diff references but does not show — a definition, a caller, a sibling implementation — instead of assuming. There are no repository, Jira or Confluence tools; the merge request details and its Jira ticket, when it has one, are already in the Merge Request Context section below.
 
 === Additional Instructions ===
 {additional_content if additional_content else "No additional instructions defined for this agent."}

@@ -6,11 +6,12 @@ and their prompts are unchanged from the LangGraph era; what changed is where th
 get the code — a checkout on disk rather than inlined text — and that the fan-out
 is a loop.
 
-**Why every reviewer reads a checkout.** The two previous sources of code both
-answer about *a ref you have to name*, and naming it wrong is silent: the
-cocoindex index in particular answers from its base branch when `branch` is
-omitted, so a symbol the merge request added looks undefined. A checkout has no
-ref to get wrong, which finally makes "is this symbol defined anywhere?"
+**Why every reviewer reads a checkout.** The two previous sources of code — the
+GitLab REST API and a semantic code-index MCP — both answered about *a ref you have
+to name*, and naming it wrong was silent: the index in particular answered from its
+own base branch whenever `branch` was omitted, so a symbol the merge request added
+looked undefined. A checkout has no ref to get wrong, which finally makes "is this
+symbol defined anywhere?"
 answerable — the question behind this reviewer's most common false positive, and
 one a per-file reviewer structurally could not answer.
 
@@ -69,7 +70,6 @@ from langchain_core.tools import BaseTool
 
 from core.agents.findings_sink import FindingsSink, make_record_findings_tool
 from core.agents.review_contexts import ReviewPromptContext
-from core.MCP.toolkit_manager import get_mcp_toolkit_manager
 from core.config.langchain_config import build_chat_model
 from core.llm.gateway import LLMGateway
 from core.agents.tool_errors import tool_error_middleware
@@ -313,23 +313,6 @@ def resolve_model(temperature: float = 0.3):
     )
 
 
-def _semantic_tools() -> List[BaseTool]:
-    """The cocoindex semantic-search tool, when the index is configured.
-
-    Exact text search is the local checkout's job (`ripgrep` is not exposed — see
-    `MCPToolkitManager.ALLOWED_COCOINDEX_TOOLS`); this is here for the thing grep
-    cannot do, finding code by meaning.
-    """
-    try:
-        manager = get_mcp_toolkit_manager()
-        if not manager.is_initialized:
-            return []
-        return list(manager.get_tools_by_category().get("cocoindex", []) or [])
-    except Exception as e:
-        print(f"  ⚠️  [review] semantic index unavailable: {describe_error(e)}")
-        return []
-
-
 #: The harness adds a `general-purpose` subagent to every deep agent unless a spec
 #: already claims that name, and builds it with the *default* filesystem
 #: middleware — all eight tools, `execute` included. For a code reviewer that is
@@ -370,7 +353,6 @@ def build_reviewer(
     record_tool: BaseTool,
     backend: FilesystemBackend,
     model,
-    extra_tools: Sequence[BaseTool] = (),
     call_limit: int = DEFAULT_REVIEWER_CALL_LIMIT,
     provider_policy: bool = True,
 ):
@@ -433,7 +415,7 @@ def build_reviewer(
             agent_type=spec.agent_type,
             source_branch=source_branch,
         ),
-        tools=[record_tool, *extra_tools],
+        tools=[record_tool],
         backend=backend,
         # Covers anything the harness builds for itself; the middleware above
         # covers the reviewer's own filesystem tools.
@@ -528,7 +510,6 @@ async def review_changed_files(
 
     backend = FilesystemBackend(root_dir=clone_root, virtual_mode=True)
     resolved = model if model is not None else resolve_model()
-    semantic = _semantic_tools()
     record_tool = make_record_findings_tool(sink)
     size = max(1, batch_size)
     total_batches = (len(jobs) + size - 1) // size
@@ -551,7 +532,6 @@ async def review_changed_files(
             record_tool=record_tool,
             backend=backend,
             model=resolved,
-            extra_tools=semantic,
             provider_policy=provider_policy,
         )
         call = agent.ainvoke(
