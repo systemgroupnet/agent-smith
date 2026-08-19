@@ -435,6 +435,26 @@ def build_reviewer(
     )
 
 
+def _describe_finish(state: object, call_limit: int) -> str:
+    """How a reviewer ended, in one line: model calls spent and its closing words.
+
+    This is the answer to "why did nothing get recorded?", and it comes from the
+    reviewer itself rather than from an inference. Counting assistant messages is a
+    proxy for model calls, which is enough to recognise the one structural cause —
+    ``ModelCallLimitMiddleware(exit_behavior="end")`` stopping a reviewer *cleanly*
+    at its ceiling, which is indistinguishable from a normal finish otherwise.
+    """
+    messages = (state or {}).get("messages", []) if isinstance(state, dict) else []
+    calls = sum(1 for m in messages if getattr(m, "type", None) == "ai")
+    last = next((str(getattr(m, "content", "") or "") for m in reversed(messages)
+                 if getattr(m, "type", None) == "ai" and str(getattr(m, "content", "") or "").strip()), "")
+    said = " ".join(last.split())
+    ended = f"{calls} model call(s)"
+    if call_limit and calls >= call_limit:
+        ended += f" — hit the {call_limit}-call ceiling"
+    return f"{ended}; ended with: {said[:200]!r}" if said else f"{ended}; said nothing"
+
+
 @dataclass
 class ReviewPassResult:
     """Outcome of the review pass."""
@@ -446,6 +466,13 @@ class ReviewPassResult:
     #: Files no reviewer could review at all. These are run errors: the marker is
     #: held and the run exits non-zero, so a re-run retries them.
     failed_files: List[str] = field(default_factory=list)
+    #: Why each failed file failed, keyed by path. A failure has two very different
+    #: causes — a reviewer that *raised*, and a reviewer that returned perfectly
+    #: normally without ever calling ``record_findings`` — and only the first used to
+    #: print anything, so a run could report "3 file(s) failed" with nothing anywhere
+    #: saying why. This is what makes the second case legible, in the log and in the
+    #: analytics error it becomes.
+    failure_reasons: Dict[str, str] = field(default_factory=dict)
     #: True when the run's budget ran out before every file was reviewed.
     truncated: bool = False
     sink: Optional[FindingsSink] = None
@@ -530,6 +557,7 @@ async def review_changed_files(
 
     failed: List[str] = []
     truncated = False
+    reasons: Dict[Tuple[str, str], str] = {}
 
     async def _one(path: str, spec: ReviewerSpec) -> Optional[str]:
         """Run one reviewer on one file. Returns the path on failure."""
@@ -550,15 +578,22 @@ async def review_changed_files(
         )
         try:
             if per_file_timeout_s and per_file_timeout_s > 0:
-                await asyncio.wait_for(call, timeout=per_file_timeout_s)
+                state = await asyncio.wait_for(call, timeout=per_file_timeout_s)
             else:
-                await call
+                state = await call
         except asyncio.TimeoutError:
+            reasons[(path, spec.name)] = f"timed out after {per_file_timeout_s:.0f}s"
             print(f"  ⏳ {spec.name} timed out on {path}")
             return path
         except Exception as e:
+            reasons[(path, spec.name)] = describe_error(e)
             print(f"  ❌ {spec.name} failed on {path}: {describe_error(e)}")
             return path
+        # It returned. That is not the same as having reported: `record_findings` is
+        # the only channel out, and a reviewer can finish without using it — by
+        # answering in prose, or by spending its ModelCallLimitMiddleware budget. Keep
+        # what it said, so the diagnosis below can quote it rather than guess.
+        reasons[(path, spec.name)] = _describe_finish(state, DEFAULT_REVIEWER_CALL_LIMIT)
         return None
 
     for index in range(total_batches):
@@ -593,11 +628,26 @@ async def review_changed_files(
         attempted = sink.reviewed_files | {p for p in failed}
     unreported = sorted(attempted - sink.reviewed_files)
 
+    # Say why, per file. "3 file(s) failed" with nothing explaining it is the least
+    # useful thing this pass can print: the two causes need opposite responses — a
+    # reviewer that raised is a provider or code problem, a reviewer that returned
+    # without recording is a *prompt* problem, and they used to look identical.
+    failure_reasons: Dict[str, str] = {}
+    for path in unreported:
+        per_reviewer = [f"{name}: {why}" for (p, name), why in reasons.items() if p == path]
+        failure_reasons[path] = "; ".join(per_reviewer) or "no reviewer ran"
+        print(f"  ⚠️  nothing recorded for {path}")
+        for line in per_reviewer:
+            print(f"       {line}")
+        if not per_reviewer:
+            print("       no reviewer ran on it")
+
     print(f"  ✅ Review pass: {sink.describe()}")
     return ReviewPassResult(
         all_comments=sink.as_all_comments(),
         reviewed_files=sink.reviewed_files,
         failed_files=unreported,
+        failure_reasons=failure_reasons,
         truncated=truncated,
         sink=sink,
         summary=sink.describe(),

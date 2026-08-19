@@ -357,10 +357,14 @@ async def _run_review_pass(
     )
 
     for path in result.failed_files:
+        # Carry the reason into analytics too. "could not be reviewed" was true of
+        # both a reviewer that raised and a reviewer that returned without recording,
+        # which are different problems with different fixes.
+        reason = result.failure_reasons.get(path, "")
         record_error(
             metrics,
             "file_review",
-            f"{path} could not be reviewed",
+            f"{path} could not be reviewed" + (f" ({reason})" if reason else ""),
             context=path,
         )
 

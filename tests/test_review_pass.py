@@ -196,6 +196,27 @@ def test_the_error_observation_never_propagates_an_exception():
     assert len(long) < MAX_ERROR_CHARS + 200, "a huge error must not flood the context"
 
 
+def test_a_silent_reviewer_says_why_nothing_was_recorded(checkout, capsys):
+    """"3 file(s) failed" with nothing explaining it is the least useful line this
+    pass can print. A reviewer that *raised* and one that returned normally without
+    calling `record_findings` are different problems — a provider or code fault
+    versus a prompt fault — and they used to look identical in the log and in the
+    analytics error."""
+    result = asyncio.run(review_changed_files(
+        classified=[("svc/order.go", "service")], clone_root=str(checkout),
+        source_branch="feature/x", mr_context="", model=Silent(),
+        provider_policy=False))
+
+    assert result.failed_files == ["svc/order.go"]
+    reason = result.failure_reasons["svc/order.go"]
+    assert "service_reviewer" in reason, reason
+    assert "model call(s)" in reason, reason
+    assert "seems fine" in reason, "the reviewer's own closing words are the diagnosis"
+
+    out = capsys.readouterr().out
+    assert "nothing recorded for svc/order.go" in out
+
+
 def test_the_addendum_tells_the_reviewer_where_the_code_is():
     addendum = format_checkout_addendum(clone_root="/x", agent_type="service",
                                         source_branch="feature/x")
