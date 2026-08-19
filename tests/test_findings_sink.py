@@ -95,3 +95,27 @@ def test_an_empty_file_path_is_refused_with_guidance():
     sink = FindingsSink()
     msg = sink.record("", [RecordedFinding(problem=LONG, line=1)])
     assert "Rejected" in msg and sink.reviewed_files == set()
+
+
+def test_a_checkout_rooted_path_is_the_same_file_as_the_plans_path():
+    """The reviewers read from a filesystem rooted at the checkout, so a model that
+    reports the path it read reports `/svc/pay.go` where the dispatch plan says
+    `svc/pay.go`. Coverage is exact set membership, so before normalising, one live
+    run reported `reviewed: {'/svc/pay.go'} | failed: ['svc/pay.go']` — the same file
+    counted as both, which means a non-zero exit and a held marker for a file that
+    was actually reviewed."""
+    sink = FindingsSink()
+    sink.record("/svc/pay.go", [RecordedFinding(problem="eligible is hardcoded", line=5,
+                                                severity="high")])
+
+    assert sink.reviewed_files == {"svc/pay.go"}
+    assert [path for path, _issues in sink.as_all_comments()] == ["svc/pay.go"]
+
+
+def test_the_other_spellings_of_the_same_path_also_collapse():
+    sink = FindingsSink()
+    for spelling in ("svc/pay.go", "./svc/pay.go", "/svc/pay.go"):
+        sink.record(spelling, [RecordedFinding(problem="x", line=1, severity="low")])
+
+    assert sink.reviewed_files == {"svc/pay.go"}, "one file, however it was spelled"
+    assert len(sink.as_all_comments()) == 1

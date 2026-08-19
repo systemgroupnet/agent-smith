@@ -99,6 +99,28 @@ from core.utils.llm_retry import (
 PRIMARY = "primary"
 FALLBACK = "fallback"
 
+class EmptyModelResponse(RuntimeError):
+    """A model call came back with no content and no tool calls.
+
+    In an agent loop that is indistinguishable from "I am finished": the graph sees
+    no tool calls, treats the message as the final answer, and ends. A reviewer that
+    ends this way has read nothing and recorded nothing, and it does so without an
+    error — which is how a run reported ``3 file(s) failed to review`` with no
+    failure anywhere in the log (a production project MR 1162: the whole conversation was one
+    human turn and one empty assistant message with ``finish_reason: stop``).
+
+    Measured on ``deepseek/deepseek-v4-flash-0731`` through the reverse proxy, with
+    tools bound and a prompt that asks for a tool call: empty at ``effort: medium``,
+    empty with no reasoning field, and a proper ``read_file`` call on the retry at
+    ``xhigh``. So it is **intermittent and not a function of the effort level** — the
+    model or the relay simply drops the completion sometimes, which is exactly the
+    shape a retry fixes and a "final answer" does not.
+
+    Raised inside the gateway's retry loop by ``ProviderPolicyMiddleware`` (so the
+    attempt budget applies), and classified transient by its type name.
+    """
+
+
 class StructuredOutputMissing(RuntimeError):
     """A structured call came back with no structured output at all.
 

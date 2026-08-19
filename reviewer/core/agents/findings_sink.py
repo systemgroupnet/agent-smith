@@ -145,9 +145,26 @@ class FindingsSink:
     def reviewed_files(self) -> set:
         return set(self.reviewed)
 
+    #: Paths the reviewers use to *read* are rooted at the checkout, so a model that
+    #: reports the path it read reports ``/svc/pay.go`` where the dispatch plan says
+    #: ``svc/pay.go``. Both name the same file; the leading slash is the virtual
+    #: filesystem's root, not part of the repository path. Observed live: a reviewer
+    #: recorded a correct finding under ``/svc/pay.go`` and the pass then reported
+    #: ``reviewed: {'/svc/pay.go'} | failed: ['svc/pay.go']`` — the same file counted
+    #: as both, because coverage is exact set membership against the plan. That means
+    #: a non-zero exit and a held marker for a file that was in fact reviewed, and
+    #: downstream it makes the in-diff gate match by basename rather than by path.
+    @staticmethod
+    def _normalise(path: str) -> str:
+        """Repository-relative form of whatever path the model reported."""
+        cleaned = (path or "").strip().replace("\\", "/")
+        while cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        return cleaned.lstrip("/")
+
     def record(self, file_path: str, findings: List[RecordedFinding]) -> str:
         """Store one subagent's report and return the line the model sees back."""
-        path = (file_path or "").strip()
+        path = self._normalise(file_path)
         if not path:
             self.rejected += len(findings or [])
             return (

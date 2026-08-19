@@ -125,6 +125,11 @@ _TRANSIENT_SIGNATURES = (
     # as intermittent (1 in 3 on deepseek-v4-flash at effort=xhigh), which is the
     # definition of worth retrying; matched by type name, since the message is ours.
     "structuredoutputmissing",
+    # A model call with no content and no tool calls. In an agent loop that reads as
+    # "finished", so the reviewer ends having read and recorded nothing — silently.
+    # Measured intermittent on deepseek-v4-flash at every effort level, including
+    # none, so it is the model or the relay dropping a completion, not a setting.
+    "emptymodelresponse",
 )
 
 # Timeout-class failures get a lower attempt cap than other transient errors:

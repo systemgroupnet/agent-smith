@@ -44,7 +44,31 @@ from typing import Any, Callable, Optional
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableLambda
 
-from core.llm.gateway import LLMGateway
+from core.llm.gateway import EmptyModelResponse, LLMGateway
+
+
+def _carries_nothing(response: Any) -> bool:
+    """Whether a model response has neither content nor a tool call.
+
+    Checked because the agent graph cannot tell that apart from a finished answer: no
+    tool calls means "done", so an empty completion ends the reviewer with nothing
+    read and nothing recorded, and no error to show for it. A structured response
+    counts as content — that path has its own guard in the gateway.
+    """
+    if getattr(response, "structured_response", None) is not None:
+        return False
+    messages = getattr(response, "result", None)
+    if messages is None:
+        messages = [response]
+    for message in messages or []:
+        if getattr(message, "tool_calls", None):
+            return False
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content.strip():
+            return False
+        if isinstance(content, (list, tuple)) and len(content) > 0:
+            return False
+    return True
 
 
 class ProviderPolicyMiddleware(AgentMiddleware):
@@ -84,7 +108,15 @@ class ProviderPolicyMiddleware(AgentMiddleware):
         """
 
         async def _acall(_ignored: Any = None):
-            return await handler(request.override(model=_acall.model))
+            response = await handler(request.override(model=_acall.model))
+            # Raised *here*, inside the gateway's retry loop, so an empty completion
+            # gets the attempt budget rather than being handed to the graph as a
+            # final answer. See EmptyModelResponse for what that costs when it isn't.
+            if _carries_nothing(response):
+                raise EmptyModelResponse(
+                    f"{self.label}: the model returned no content and no tool calls"
+                )
+            return response
 
         def _call(_ignored: Any = None):
             return handler(request.override(model=_call.model))

@@ -294,3 +294,60 @@ def test_a_throttled_fallback_does_not_bounce_back(two_providers):
     assert calls[-1] == FALLBACK
     assert LLMGateway.fallback_active(), "a throttle must not block the fallback"
     assert [t.kind for t in LLMGateway.transitions()] == ["llm_fallback_activated"]
+
+
+# --- an empty completion is not an answer -------------------------------------
+
+
+class _StubRequest:
+    """Enough of a ModelRequest for the middleware: it only calls `override`."""
+
+    def override(self, **_kwargs):
+        return self
+
+
+def test_an_empty_model_response_is_retried_not_returned(monkeypatch):
+    """The failure behind "3 file(s) failed to review" with nothing in the log.
+
+    A completion with no content and no tool calls is indistinguishable from a
+    finished answer to the agent graph: it ends, having read and recorded nothing.
+    Measured intermittent on deepseek-v4-flash at every effort level, so the right
+    response is the attempt budget, not a shrug.
+    """
+    from langchain_core.messages import AIMessage
+
+    from core.llm.gateway_middleware import ProviderPolicyMiddleware
+
+    monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("LLM_RETRY_WAIT_MIN_S", "0")
+    monkeypatch.setenv("LLM_RETRY_WAIT_MAX_S", "0")
+    monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
+    LLMGateway.reset()
+
+    calls = []
+
+    async def handler(_request):
+        calls.append(1)
+        if len(calls) == 1:
+            return AIMessage(content="")          # what the relay actually sent
+        return AIMessage(content="", tool_calls=[
+            {"name": "read_file", "id": "1", "args": {"file_path": "svc/pay.go"}}])
+
+    mw = ProviderPolicyMiddleware(label="review service_reviewer")
+    result = asyncio.run(mw.awrap_model_call(_StubRequest(), handler))
+
+    assert len(calls) == 2, "the empty completion should have been retried"
+    assert result.tool_calls, "the retry's tool call must survive"
+
+
+def test_a_message_with_content_or_a_tool_call_is_left_alone():
+    """Never invent a failure: content alone, or a tool call alone, is a real answer."""
+    from langchain_core.messages import AIMessage
+
+    from core.llm.gateway_middleware import _carries_nothing
+
+    assert _carries_nothing(AIMessage(content="")) is True
+    assert _carries_nothing(AIMessage(content="I found a problem")) is False
+    assert _carries_nothing(AIMessage(content="", tool_calls=[
+        {"name": "grep", "id": "1", "args": {"pattern": "x"}}])) is False
