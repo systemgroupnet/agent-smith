@@ -22,7 +22,7 @@ import json
 
 import pytest
 
-from core.llm.gateway import FALLBACK, PRIMARY, LLMGateway
+from core.llm.gateway import FALLBACK, PRIMARY, LLMGateway, StructuredOutputMissing
 from core.utils.llm_retry import parse_llm_error
 
 
@@ -145,6 +145,70 @@ def test_a_400_about_the_prompt_is_not_blamed_on_reasoning(monkeypatch):
     with pytest.raises(Exception, match="too long"):
         asyncio.run(LLMGateway(build=build, label="review sql_reviewer").ainvoke("go"))
     assert len(calls) == 1, "a content 400 must not be retried at all"
+
+
+def test_a_structured_call_with_no_tool_call_is_retried(monkeypatch):
+    """`with_structured_output` returns **None** when the model answers without
+    calling the schema tool — a failed call arriving as a successful invocation,
+    which is how the dedup stage crashed in production. Measured as intermittent
+    (1 in 3 on deepseek-v4-flash at effort=xhigh), so a retry is the right answer."""
+    monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("LLM_RETRY_WAIT_MIN_S", "0")
+    monkeypatch.setenv("LLM_RETRY_WAIT_MAX_S", "0")
+    monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
+    LLMGateway.reset()
+    attempts = []
+
+    def build(model):
+        class Runnable:
+            async def ainvoke(self, payload, config=None):
+                attempts.append(1)
+                return None if len(attempts) == 1 else "structured!"
+        return Runnable()
+
+    gw = LLMGateway(build=build, label="comment reviewer", structured=True)
+    assert asyncio.run(gw.ainvoke("go")) == "structured!"
+    assert len(attempts) == 2, "the None should have been retried, not returned"
+
+
+def test_a_none_from_a_plain_call_is_left_alone(monkeypatch):
+    """Only *structured* calls promise an object; a loop call may legitimately
+    return something falsy, and inventing a failure there would be worse."""
+    monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
+    LLMGateway.reset()
+
+    def build(model):
+        class Runnable:
+            async def ainvoke(self, payload, config=None):
+                return None
+        return Runnable()
+
+    assert asyncio.run(LLMGateway(build=build, label="loop").ainvoke("go")) is None
+
+
+def test_a_persistently_missing_structured_output_reaches_the_caller(monkeypatch):
+    """After the budget, it must arrive as an exception the caller can handle —
+    every structured agent already degrades on one, and none recognises a None."""
+    monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("LLM_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("LLM_RETRY_WAIT_MIN_S", "0")
+    monkeypatch.setenv("LLM_RETRY_WAIT_MAX_S", "0")
+    monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
+    LLMGateway.reset()
+
+    def build(model):
+        class Runnable:
+            async def ainvoke(self, payload, config=None):
+                return None
+        return Runnable()
+
+    gw = LLMGateway(build=build, label="comment reviewer", structured=True)
+    with pytest.raises(StructuredOutputMissing):
+        asyncio.run(gw.ainvoke("go"))
 
 
 @pytest.fixture

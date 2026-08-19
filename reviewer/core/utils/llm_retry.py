@@ -120,6 +120,11 @@ _TRANSIENT_SIGNATURES = (
     "expecting value",
     "unterminated string",
     "invalid json",
+    # A structured call that came back with no tool call at all — the gateway raises
+    # `StructuredOutputMissing` for it, and this is what gives that a retry. Measured
+    # as intermittent (1 in 3 on deepseek-v4-flash at effort=xhigh), which is the
+    # definition of worth retrying; matched by type name, since the message is ours.
+    "structuredoutputmissing",
 )
 
 # Timeout-class failures get a lower attempt cap than other transient errors:

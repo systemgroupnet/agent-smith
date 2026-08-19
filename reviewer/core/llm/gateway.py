@@ -99,6 +99,28 @@ from core.utils.llm_retry import (
 PRIMARY = "primary"
 FALLBACK = "fallback"
 
+class StructuredOutputMissing(RuntimeError):
+    """A structured call came back with no structured output at all.
+
+    ``with_structured_output(method="function_calling")`` sends a forced
+    ``tool_choice`` and parses the tool call out of the answer. When the model
+    answers *without* calling the schema tool, LangChain has nothing to parse and
+    returns **None** from a call that raised nothing — so the failure arrives as a
+    successful invocation, and every caller then either crashes on an attribute or
+    treats "no answer" as an empty one. That is not hypothetical: it crashed the
+    dedup stage in production, at the last step before posting.
+
+    Measured on ``deepseek/deepseek-v4-flash-0731``: a forced ``tool_choice``
+    carrying ``effort: "xhigh"`` returned None on **1 of 3** attempts, where
+    ``effort: "none"`` was clean 3 of 3. So it is intermittent, which is exactly
+    what makes it worth raising rather than returning: the class name carries a
+    transient signature (see ``llm_retry._TRANSIENT_SIGNATURES``), so the gateway's
+    own retry budget gets a second attempt at it, and only a call that fails every
+    attempt reaches the caller — as an exception it can handle, rather than a None
+    it cannot recognise.
+    """
+
+
 #: A 400 that names the reasoning field. Deliberately narrow: it must not catch a
 #: 400 about the *prompt*, the tools or the schema, all of which are real failures
 #: this client cannot fix by dropping a request field.
@@ -450,7 +472,12 @@ class LLMGateway:
         while True:
             attempt += 1
             try:
-                return await self.runnable.ainvoke(payload, config=config)
+                result = await self.runnable.ainvoke(payload, config=config)
+                if self.structured and result is None:
+                    raise StructuredOutputMissing(
+                        f"{self._where()} answered without calling the schema tool"
+                    )
+                return result
             except Exception as e:  # noqa: BLE001 — classify, then retry or re-raise
                 info = parse_llm_error(e)
                 budget = retry_attempt_budget(info) if self.retries else 1
