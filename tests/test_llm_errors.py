@@ -351,3 +351,23 @@ def test_a_message_with_content_or_a_tool_call_is_left_alone():
     assert _carries_nothing(AIMessage(content="I found a problem")) is False
     assert _carries_nothing(AIMessage(content="", tool_calls=[
         {"name": "grep", "id": "1", "args": {"pattern": "x"}}])) is False
+
+
+def test_the_attempt_budget_follows_the_cost_of_an_attempt():
+    """Two caps in opposite directions, both set by what one attempt costs.
+
+    A timeout burns a full request window, so three of them would starve the run. An
+    empty completion burns no output tokens and returns in seconds, and giving up on
+    it loses the file — luna produced three in a row on one reviewer and that file
+    failed with the default budget of 3.
+    """
+    from core.llm.gateway import EmptyModelResponse
+    from core.utils.llm_retry import retry_attempt_budget
+
+    timeout = parse_llm_error(_with_response(Exception("Error code: 524"), 524))
+    empty = parse_llm_error(EmptyModelResponse("no content and no tool calls"))
+    plain = parse_llm_error(_with_response(Exception("Error code: 503"), 503))
+
+    assert retry_attempt_budget(timeout) == 2
+    assert retry_attempt_budget(plain) == 3
+    assert retry_attempt_budget(empty) == 6, "the cheapest failure deserves the most tries"

@@ -140,6 +140,17 @@ _TRANSIENT_SIGNATURES = (
 _TIMEOUT_SIGNATURES = ("timeout", "timed out")
 _TIMEOUT_MAX_ATTEMPTS = 2
 
+# The opposite case: a failure so cheap that the usual budget is *too small*. An
+# empty completion (see gateway.EmptyModelResponse) burns no output tokens and comes
+# back in a second or two, and retrying it is the only thing that turns it into a
+# review — while giving up loses the whole file. Observed on a live run:
+# openai/gpt-5.6-luna produced three empties in a row for one reviewer, exhausted the
+# default budget of 3, and that file failed; the same run recovered on the first or
+# second retry everywhere else. So this class gets its own, larger cap, for the same
+# reason timeouts get a smaller one — the cost per attempt is what should set it.
+_EMPTY_RESPONSE_SIGNATURE = "emptymodelresponse"
+_EMPTY_RESPONSE_MAX_ATTEMPTS = 6
+
 # Statuses that *are* a timeout, whatever the body says. A gateway that gave up
 # waiting for the model reports it as a status and nothing else: the message is
 # "Error code: 524" — no "timeout", no "timed out", nothing any signature above
@@ -537,14 +548,22 @@ def retry_wait_seconds() -> float:
 def retry_attempt_budget(info: LLMErrorInfo) -> int:
     """How many attempts a failure of this class deserves.
 
-    LLM_RETRY_ATTEMPTS (default 3) for most transient failures, but timeout-class
-    ones are capped at ``_TIMEOUT_MAX_ATTEMPTS``: each of their attempts costs a
-    *full* OPENROUTER_TIMEOUT_MS window rather than failing fast, so three of them
-    would spend ~15 min on one file and starve the run's OVERALL_TIMEOUT_S budget.
+    LLM_RETRY_ATTEMPTS (default 3) for most transient failures, with a cap either
+    way where the *cost per attempt* argues for one. Timeout-class failures are
+    capped at ``_TIMEOUT_MAX_ATTEMPTS``, because each attempt costs a full
+    OPENROUTER_TIMEOUT_MS window and three would spend ~15 min on one file. An empty
+    completion gets a *larger* budget (``_EMPTY_RESPONSE_MAX_ATTEMPTS``) for the
+    mirror-image reason: it costs no output tokens and returns in seconds, and giving
+    up on it loses the file.
 
     The budget is per *provider* — :class:`core.llm.gateway.LLMGateway` resets the
     attempt count on a provider switch, so the new endpoint gets a full set of its
     own.
     """
     attempts = max(1, _int_env("LLM_RETRY_ATTEMPTS", 3))
-    return min(attempts, _TIMEOUT_MAX_ATTEMPTS) if info.is_timeout else attempts
+    if info.is_timeout:
+        return min(attempts, _TIMEOUT_MAX_ATTEMPTS)
+    if _EMPTY_RESPONSE_SIGNATURE in info.text:
+        # Cheap to retry and fatal to the file if we don't — see the constant above.
+        return max(attempts, _EMPTY_RESPONSE_MAX_ATTEMPTS)
+    return attempts
