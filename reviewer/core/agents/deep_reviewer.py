@@ -73,7 +73,7 @@ from core.agents.review_contexts import ReviewPromptContext
 from core.config.langchain_config import build_chat_model
 from core.llm.gateway import LLMGateway
 from core.agents.tool_errors import tool_error_middleware
-from core.agents.tool_trace import tool_trace_middleware
+from core.agents.tool_trace import TRACE_ENV, tool_trace_middleware, trace_enabled
 from core.llm.gateway_middleware import ProviderPolicyMiddleware
 from core.prompts import (
     get_business_logic_reviewer_prompt,
@@ -632,10 +632,19 @@ async def review_changed_files(
     size = max(1, batch_size)
     total_batches = (len(jobs) + size - 1) // size
 
+    limit = reviewer_call_limit()
     print(
         f"\n🧠 Review pass: {len(jobs)} reviewer-file pair(s) over {len({p for p, _ in jobs})} "
-        f"file(s), in {total_batches} batch(es) of up to {size}"
+        f"file(s), in {total_batches} batch(es) of up to {size}, "
+        f"{limit} model call(s) each"
     )
+    # Say when the trace is off, because its *absence* is the confusing case: a run
+    # with no 🔧 lines looks like a run whose reviewers never read anything, and the
+    # variable predates this middleware — an old `LOG_TOOL_TRACE=false` set to quieten
+    # the graph era's end-of-run tally silently disables it here too.
+    if not trace_enabled():
+        print(f"  🔇 [review] per-tool-call trace is off ({TRACE_ENV}="
+              f"{os.getenv(TRACE_ENV)!r}); unset it to see what each reviewer reads")
 
     failed: List[str] = []
     truncated = False
@@ -658,7 +667,6 @@ async def review_changed_files(
                 provider_policy=provider_policy,
             )
 
-        limit = reviewer_call_limit()
         agent = build_agent(limit)
         call = agent.ainvoke(
             {"messages": [{"role": "user", "content": f"Review {path}"}]},
