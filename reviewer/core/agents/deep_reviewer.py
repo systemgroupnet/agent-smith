@@ -116,10 +116,35 @@ READ_ONLY_PERMISSIONS = [
 ]
 
 
-#: Ceiling on one reviewer's model calls — read a file, grep a few times, report.
-#: `exit_behavior="end"` stops that reviewer's loop and leaves whatever it already
-#: recorded through `record_findings` standing, rather than losing the file.
-DEFAULT_REVIEWER_CALL_LIMIT = 25
+#: Ceiling on one reviewer's model calls. `exit_behavior="end"` stops that reviewer's
+#: loop and leaves whatever it already recorded through `record_findings` standing.
+#:
+#: It was 25, which was budgeted for "read a file, grep a few times, report" and turns
+#: out to be well under what a real investigation costs: **every** tool round trip is a
+#: model call, and a reviewer spends two or three before it even reaches the file
+#: (looking for `.aid` instructions at the root, then the module, then a glob) plus one
+#: per grep. Observed on a a production project run — ten files, every reviewer ending
+#: `26 model call(s) — hit the 25-call ceiling; ended with: 'Model call limits
+#: exceeded: run limit (25/25)'`, nothing recorded for any of them, the whole run
+#: wasted. 50 is chosen to leave room for that pattern rather than to be generous; the
+#: ceiling still exists to stop a genuine loop, and the salvage pass below means
+#: reaching it no longer costs the file's findings.
+REVIEWER_CALL_LIMIT_ENV = "REVIEWER_CALL_LIMIT"
+DEFAULT_REVIEWER_CALL_LIMIT = 50
+
+#: A reviewer that hit the ceiling is asked, once, to report what it already has. It
+#: needs one call to do that and one for a tool result, so three is generous.
+REPORT_PASS_CALL_LIMIT = 3
+
+
+def reviewer_call_limit() -> int:
+    """The per-reviewer model-call ceiling, overridable for a slow or chatty model."""
+    raw = (os.getenv(REVIEWER_CALL_LIMIT_ENV) or "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REVIEWER_CALL_LIMIT
+    return value if value > 0 else DEFAULT_REVIEWER_CALL_LIMIT
 
 
 @dataclass(frozen=True)
@@ -435,6 +460,25 @@ def build_reviewer(
     )
 
 
+def _ai_messages(state: object) -> list:
+    messages = (state or {}).get("messages", []) if isinstance(state, dict) else []
+    return [m for m in messages if getattr(m, "type", None) == "ai"]
+
+
+def _hit_call_ceiling(state: object, call_limit: int) -> bool:
+    """Whether a reviewer stopped because it ran out of model calls.
+
+    Two signals, because either alone can be wrong: the count reaching the limit, and
+    the middleware's own closing message. `exit_behavior="end"` makes this a *clean*
+    finish, indistinguishable from a real one without looking.
+    """
+    ai = _ai_messages(state)
+    if call_limit and len(ai) >= call_limit:
+        return True
+    last = " ".join(str(getattr(m, "content", "") or "") for m in ai[-1:]).lower()
+    return "model call limit" in last
+
+
 def _describe_finish(state: object, call_limit: int) -> str:
     """How a reviewer ended, in one line: model calls spent and its closing words.
 
@@ -444,15 +488,53 @@ def _describe_finish(state: object, call_limit: int) -> str:
     ``ModelCallLimitMiddleware(exit_behavior="end")`` stopping a reviewer *cleanly*
     at its ceiling, which is indistinguishable from a normal finish otherwise.
     """
-    messages = (state or {}).get("messages", []) if isinstance(state, dict) else []
-    calls = sum(1 for m in messages if getattr(m, "type", None) == "ai")
-    last = next((str(getattr(m, "content", "") or "") for m in reversed(messages)
-                 if getattr(m, "type", None) == "ai" and str(getattr(m, "content", "") or "").strip()), "")
+    ai = _ai_messages(state)
+    calls = len(ai)
+    last = next((str(getattr(m, "content", "") or "") for m in reversed(ai)
+                 if str(getattr(m, "content", "") or "").strip()), "")
     said = " ".join(last.split())
     ended = f"{calls} model call(s)"
     if call_limit and calls >= call_limit:
         ended += f" — hit the {call_limit}-call ceiling"
     return f"{ended}; ended with: {said[:200]!r}" if said else f"{ended}; said nothing"
+
+
+#: What a reviewer that ran out of calls is told. It has already read the file and
+#: done its greps; what it has *not* done is report, and `record_findings` is the only
+#: channel out — so the investigation is worth nothing until this happens.
+REPORT_NOW_INSTRUCTION = (
+    "You have used your entire tool budget for this file, so stop investigating now.\n\n"
+    "Do not call any tool except `record_findings`. Call it exactly once, with the "
+    "findings you have already established from what you read above. If you genuinely "
+    "found nothing worth reporting, call it with an empty findings list — that is how "
+    "a clean review is recorded, and saying so in prose instead records nothing at all."
+)
+
+
+async def _report_pass(build_agent, state: dict, path: str, spec_name: str) -> Optional[dict]:
+    """Ask a reviewer that hit the ceiling to report what it already found.
+
+    The investigation is the expensive part and it is already paid for: the file has
+    been read, the greps have run, and all of it is in the message history. Ending
+    there throws it away — observed on a a production project run where ten files were
+    investigated to the last call and *none* produced a finding, because
+    ``record_findings`` is the only channel out and nobody reached it.
+
+    So the same history is handed back with one instruction: report now, no more tools.
+    A fresh agent because ``ModelCallLimitMiddleware`` counts per invocation, with a
+    ceiling of three so this can never become a second investigation.
+    """
+    print(f"  🧷 [review] {spec_name} ran out of calls on {path} — "
+          f"asking it to report what it already found")
+    try:
+        agent = build_agent(REPORT_PASS_CALL_LIMIT)
+        messages = list(state.get("messages", [])) + [
+            {"role": "user", "content": REPORT_NOW_INSTRUCTION}
+        ]
+        return await agent.ainvoke({"messages": messages})
+    except Exception as e:  # noqa: BLE001 — a failed salvage must not mask the original
+        print(f"  ⚠️  [review] {spec_name}: report pass failed on {path}: {describe_error(e)}")
+        return None
 
 
 @dataclass
@@ -561,17 +643,23 @@ async def review_changed_files(
 
     async def _one(path: str, spec: ReviewerSpec) -> Optional[str]:
         """Run one reviewer on one file. Returns the path on failure."""
-        agent = build_reviewer(
-            spec,
-            clone_root=clone_root,
-            source_branch=source_branch,
-            mr_context=mr_context,
-            record_tool=record_tool,
-            backend=backend,
-            model=resolved,
-            file_path=path,
-            provider_policy=provider_policy,
-        )
+
+        def build_agent(limit: int):
+            return build_reviewer(
+                spec,
+                clone_root=clone_root,
+                source_branch=source_branch,
+                mr_context=mr_context,
+                record_tool=record_tool,
+                backend=backend,
+                model=resolved,
+                file_path=path,
+                call_limit=limit,
+                provider_policy=provider_policy,
+            )
+
+        limit = reviewer_call_limit()
+        agent = build_agent(limit)
         call = agent.ainvoke(
             {"messages": [{"role": "user", "content": f"Review {path}"}]},
             config=config,
@@ -591,9 +679,14 @@ async def review_changed_files(
             return path
         # It returned. That is not the same as having reported: `record_findings` is
         # the only channel out, and a reviewer can finish without using it — by
-        # answering in prose, or by spending its ModelCallLimitMiddleware budget. Keep
-        # what it said, so the diagnosis below can quote it rather than guess.
-        reasons[(path, spec.name)] = _describe_finish(state, DEFAULT_REVIEWER_CALL_LIMIT)
+        # answering in prose, or by spending its ModelCallLimitMiddleware budget.
+        if path not in sink.reviewed_files and _hit_call_ceiling(state, limit):
+            # Everything it learned is in the history and cost real calls; ending here
+            # would discard all of it. One bounded pass to get it recorded.
+            salvaged = await _report_pass(build_agent, state, path, spec.name)
+            if salvaged is not None:
+                state = salvaged
+        reasons[(path, spec.name)] = _describe_finish(state, limit)
         return None
 
     for index in range(total_batches):

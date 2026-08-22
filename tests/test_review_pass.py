@@ -272,3 +272,57 @@ def test_nothing_to_review_is_not_an_error(checkout):
         classified=[("README.md", "unknown")], clone_root=str(checkout),
         source_branch=None, mr_context="", model=Scripted(), provider_policy=False))
     assert result.all_comments == [] and result.failed_files == []
+
+
+class Thrasher(Scripted):
+    """Investigates until its call budget is gone, then records when told to.
+
+    The production shape: every tool round trip is a model call, so a reviewer that
+    keeps grepping reaches the ceiling with nothing recorded — `record_findings` is
+    the only channel out and it never got there.
+    """
+
+    def _step(self, messages):
+        told_to_report = any(
+            "used your entire tool budget" in str(getattr(m, "content", "") or "")
+            for m in messages
+        )
+        if told_to_report:
+            return AIMessage(content="", tool_calls=[
+                {"name": "record_findings", "id": "r", "args": {
+                    "file_path": "svc/order.go",
+                    "findings": [{"problem": "Save() error dropped", "line": 4,
+                                  "severity": "high"}]}}])
+        n = sum(1 for m in messages if isinstance(m, ToolMessage))
+        return AIMessage(content="", tool_calls=[
+            {"name": "grep", "id": f"g{n}", "args": {"pattern": f"probe{n}", "path": "svc"}}])
+
+
+def test_running_out_of_calls_no_longer_discards_the_investigation(checkout, monkeypatch, capsys):
+    """Observed on a a production project run: ten files investigated to the last call,
+    every reviewer ending 'Model call limits exceeded: run limit (25/25)', and not one
+    finding recorded. The reading and grepping is the expensive part and it is already
+    paid for, so the ceiling now buys one bounded pass to get it reported."""
+    monkeypatch.setenv("REVIEWER_CALL_LIMIT", "4")
+
+    result = asyncio.run(review_changed_files(
+        classified=[("svc/order.go", "service")], clone_root=str(checkout),
+        source_branch="feature/x", mr_context="", model=Thrasher(),
+        provider_policy=False))
+
+    assert result.failed_files == [], "the file should have been salvaged, not failed"
+    assert "svc/order.go" in result.reviewed_files
+    assert sum(len(issues) for _p, issues in result.all_comments) >= 1
+    assert "ran out of calls" in capsys.readouterr().out
+
+
+def test_the_call_ceiling_is_configurable():
+    from core.agents.deep_reviewer import DEFAULT_REVIEWER_CALL_LIMIT, reviewer_call_limit
+    import os
+
+    assert DEFAULT_REVIEWER_CALL_LIMIT == 50, "25 was under what one investigation costs"
+    os.environ["REVIEWER_CALL_LIMIT"] = "0"
+    try:
+        assert reviewer_call_limit() == DEFAULT_REVIEWER_CALL_LIMIT, "0 is not a ceiling"
+    finally:
+        del os.environ["REVIEWER_CALL_LIMIT"]
