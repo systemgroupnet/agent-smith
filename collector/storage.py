@@ -57,6 +57,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+import engagement
+
 # Typed columns pulled out of each payload for querying. Everything (including
 # these) is also preserved verbatim in raw_json.
 _TYPED_INT_FIELDS = (
@@ -283,6 +285,97 @@ comment_replies = Table(
     Index("idx_comment_replies_discussion_id", "discussion_id"),
     Index("idx_comment_replies_parent_note_id", "parent_note_id"),
     Index("idx_comment_replies_run_id", "run_id"),
+)
+
+# Durable badge unlocks — the one piece of the engagement layer that is stored
+# rather than derived. Everything else (points, coverage, streaks, weekly awards)
+# is computed from a time window over the views in migration 0011, which is right
+# for a live balance and wrong for a milestone: "your first 100 ratings" must not
+# disappear when the window rolls past it, and un-clicking a reaction a month
+# later does not un-earn the threshold it crossed at the time. So a row here is
+# written once and never revoked.
+#
+# Scoped per (username, achievement_key, project_path): every dashboard panel in
+# this repo filters on $project, so a row with no project could not honour the
+# picker. The cost is that someone active in three repos earns the entry-level
+# badges three times — accepted, because a per-project ladder is also the more
+# meaningful one for a person who only works in one of them.
+achievements = Table(
+    "achievements",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("awarded_at", String, nullable=False),  # unlock detected (ISO UTC)
+    Column("username", String, nullable=False),    # GitLab @handle of the earner
+    Column("user_name", String),                   # display name, for the dashboard
+    Column("project_path", String, nullable=False),
+    Column("achievement_key", String, nullable=False),  # joins ACHIEVEMENTS[].key
+    Column("progress_value", Integer),             # counter value at unlock time
+    Index(
+        "uq_achievements_user_key_project",
+        "username",
+        "achievement_key",
+        "project_path",
+        unique=True,
+    ),
+    Index("idx_achievements_username", "username"),
+    Index("idx_achievements_project", "project_path"),
+)
+
+# One row per (ISO week, project, category): who won that week. Stored rather
+# than derived, because a closed week's result is a fact and must not drift when
+# somebody revokes a reaction three months later — the Mattermost announcement
+# and the dashboard have to still agree a year from now.
+#
+# Keyed on the **ISO week** (``2026-W34``), never a rolling window: a "last 7
+# days" board changes every time you look at it, so nobody can be told they won.
+# ``week_start`` carries the Monday as an ISO date because Grafana's
+# ``$__timeFilter`` cannot filter on ``2026-W34``, and a panel that ignores the
+# time picker is worse than one that has none.
+weekly_awards = Table(
+    "weekly_awards",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("iso_week", String, nullable=False),    # "2026-W34" (ISO year + week)
+    Column("week_start", String, nullable=False),  # "2026-08-17" (that week's Monday)
+    Column("project_path", String, nullable=False),
+    Column("category", String, nullable=False),    # joins WEEKLY_AWARDS[].key
+    Column("username", String),
+    Column("user_name", String),
+    Column("value", Float),                        # the winning metric value
+    Column("computed_at", String),
+    Index(
+        "uq_weekly_awards_week_project_category",
+        "iso_week",
+        "project_path",
+        "category",
+        unique=True,
+    ),
+    Index("idx_weekly_awards_week_start", "week_start"),
+    Index("idx_weekly_awards_project", "project_path"),
+)
+
+# One row per ISO week the weekly digest has dealt with. Operational state, not
+# engagement data — it records what this *service* did, which is why it lives here
+# rather than in engagement.py.
+#
+# The unique index on iso_week is a **claim**: a worker takes a week with
+# `INSERT … ON CONFLICT DO NOTHING`, at most one insert wins, so exactly one
+# claimant posts however many workers or replicas are running (one today, and the
+# cost of being right about that is one index). A claim is never released, even on
+# failure — see migration 0012 for why at-most-once beats at-least-once when the
+# output is a message in a team channel.
+digest_runs = Table(
+    "digest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("iso_week", String, nullable=False),   # week reported on, e.g. 2026-W34
+    Column("claimed_at", String, nullable=False),
+    Column("posted_at", String),
+    Column("status", String, nullable=False),     # posted | skipped | failed
+    Column("channel_id", String),
+    Column("post_id", String),
+    Column("error", String),
+    Index("uq_digest_runs_iso_week", "iso_week", unique=True),
 )
 
 # Emoji-name → score mapping for the rating scale the reviewer seeds.
@@ -745,13 +838,22 @@ def record_note_event(payload: dict[str, Any]) -> dict[str, Any]:
             },
         )
         conn.execute(stmt)
-    return {
+
+    # The other moment engagement data arrives. Same fail-open contract as the
+    # rating path: the reply is committed, a badge is downstream of it.
+    unlocked = _evaluate_achievements_quietly(
+        row["author_username"], row["author_name"], row["project_path"]
+    )
+    result = {
         "status": "recorded",
         "note_id": note_id,
         "parent_note_id": row["parent_note_id"],
         "parent_kind": row["parent_kind"],
         "discussion_id": discussion_id,
     }
+    if unlocked:
+        result["achievements_unlocked"] = unlocked
+    return result
 
 
 def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
@@ -872,7 +974,24 @@ def record_emoji_event(payload: dict[str, Any]) -> dict[str, Any]:
             },
         )
         conn.execute(stmt)
-    return {"status": "recorded", "kind": kind, "note_id": note_id, "emoji": emoji, "score": score}
+
+    # A new rating can cross a badge threshold, and this is one of only two
+    # moments new engagement data arrives. Never allowed to raise: the score is
+    # already committed above and is the thing we came for (see
+    # _evaluate_achievements_quietly).
+    unlocked = _evaluate_achievements_quietly(
+        row["username"], row["user_name"], project_path
+    )
+    result = {
+        "status": "recorded",
+        "kind": kind,
+        "note_id": note_id,
+        "emoji": emoji,
+        "score": score,
+    }
+    if unlocked:
+        result["achievements_unlocked"] = unlocked
+    return result
 
 
 def list_review_comments(
@@ -986,3 +1105,244 @@ def _as_bool(value: Any) -> Optional[bool]:
         if lowered in ("false", "0", "no", "off"):
             return False
     return None
+
+
+# ---------------------------------------------------------------------------
+# Engagement (points, achievements) — thin wrappers over ``engagement.py``.
+#
+# The domain lives in its own module for one reason: migration 0011 backfills the
+# achievement history, so it has to import the catalogue and the queries, and a
+# migration importing *this* module would import the whole ingest layer to read a
+# threshold table. ``engagement`` takes a connection and knows nothing about the
+# engine, so both callers get the same logic with no cycle.
+# ---------------------------------------------------------------------------
+
+
+def evaluate_achievements(
+    username: Optional[str],
+    user_name: Optional[str],
+    project_path: Optional[str],
+) -> list[str]:
+    """Award any newly earned achievements for one (user, project). Returns keys."""
+    with get_engine().begin() as conn:
+        return engagement.evaluate(conn, username, user_name, project_path)
+
+
+def _evaluate_achievements_quietly(
+    username: Optional[str], user_name: Optional[str], project_path: Optional[str]
+) -> list[str]:
+    """``evaluate_achievements`` that can never break the caller.
+
+    The caller is webhook ingestion, whose contract is that GitLab always gets a
+    2xx on an accepted delivery so it does not disable the hook. A badge sits
+    downstream of the rating itself: losing one is invisible and recoverable
+    (``recompute_achievements``), while raising here would lose the *score* —
+    the data this whole loop exists to collect. Same fail-open posture as the
+    reviewer's MCP init and analytics send.
+    """
+    try:
+        return evaluate_achievements(username, user_name, project_path)
+    except Exception:  # noqa: BLE001 — engagement must never cost us a rating
+        return []
+
+
+def recompute_achievements() -> dict[str, Any]:
+    """Re-evaluate every participant over all history. Idempotent (see engagement)."""
+    with get_engine().begin() as conn:
+        return engagement.backfill(conn)
+
+
+def list_achievements(
+    limit: int = 200,
+    offset: int = 0,
+    project_path: Optional[str] = None,
+    username: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Unlocked achievements, newest first, enriched from the catalogue.
+
+    Only the key is stored, so a badge can be renamed or re-illustrated without a
+    migration. A row whose key has left the catalogue keeps its key and gets no
+    label — retired rather than hidden, since someone did earn it.
+    """
+    query = select(achievements).order_by(
+        achievements.c.awarded_at.desc(), achievements.c.id.desc()
+    )
+    if project_path:
+        query = query.where(achievements.c.project_path == project_path)
+    if username:
+        query = query.where(achievements.c.username == username)
+    query = query.limit(limit).offset(offset)
+
+    with get_engine().connect() as conn:
+        rows = conn.execute(query).mappings().all()
+
+    out = []
+    for row in rows:
+        item = dict(row)
+        meta = engagement.ACHIEVEMENTS_BY_KEY.get(item.get("achievement_key", ""))
+        item["emoji"] = meta.emoji if meta else None
+        item["label"] = meta.label if meta else None
+        item["blurb"] = meta.blurb if meta else None
+        out.append(item)
+    return out
+
+
+def list_engagement_points(
+    limit: int = 100,
+    project_path: Optional[str] = None,
+    since: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """The points leaderboard, highest first, with each total's breakdown."""
+    with get_engine().connect() as conn:
+        return engagement.points_leaderboard(
+            conn, limit=limit, project_path=project_path, since=since
+        )
+
+
+def list_weekly_awards(
+    limit: int = 200,
+    project_path: Optional[str] = None,
+    iso_week: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Stored weekly winners, most recent week first, enriched from the catalogue."""
+    with get_engine().connect() as conn:
+        return engagement.list_weekly_awards(
+            conn, limit=limit, project_path=project_path, iso_week=iso_week
+        )
+
+
+def refresh_weekly_awards(
+    iso_week: Optional[str] = None, project_path: Optional[str] = None
+) -> dict[str, Any]:
+    """Recompute weekly winners and store them.
+
+    With no arguments, settles **every** week that has ever had activity — the
+    same sweep migration 0011 runs, and the repair path when a scheduled digest
+    was missed. Pass ``iso_week`` to re-settle one week (what the digest does for
+    the week it is about to announce), optionally narrowed to one project.
+
+    Idempotent: every week upserts on (iso_week, project, category), so a week
+    recomputed daily while it is still open keeps exactly one row per category
+    and lands on its final answer when it closes.
+    """
+    with get_engine().begin() as conn:
+        if iso_week is None:
+            return engagement.backfill_weekly_awards(conn)
+
+        projects = (
+            [project_path]
+            if project_path
+            else sorted(
+                {
+                    row["project_path"]
+                    for row in engagement.active_weeks(conn)
+                    if row["project_path"]
+                }
+            )
+        )
+        total = 0
+        for project in projects:
+            total += len(engagement.compute_weekly_awards(conn, iso_week, project))
+        return {"weeks": len(projects), "awards": total, "iso_week": iso_week}
+
+
+# ---------------------------------------------------------------------------
+# Weekly digest bookkeeping (see digest_runs above and scheduler.py)
+# ---------------------------------------------------------------------------
+
+
+def claim_digest_week(iso_week: str) -> bool:
+    """Try to become the one caller responsible for announcing ``iso_week``.
+
+    Returns True if this call won the claim, False if the week is already taken —
+    either announced earlier, or being announced right now by another worker. The
+    unique index does the arbitration, so this is safe without a lock table and
+    without reading before writing.
+
+    A claim is **not released on failure** (see migration 0012): a post that fails
+    after the request reached Mattermost cannot be distinguished from one that
+    failed before it, so retrying risks announcing the same week twice. Losing a
+    week is recoverable with ``digest.py --week``; a duplicate in a channel is not.
+    """
+    with get_engine().begin() as conn:
+        stmt = (
+            pg_insert(digest_runs)
+            .values(
+                [{
+                    "iso_week": iso_week,
+                    "claimed_at": datetime.now(timezone.utc).isoformat(),
+                    "status": "claimed",
+                }]
+            )
+            .on_conflict_do_nothing(index_elements=["iso_week"])
+            .returning(digest_runs.c.id)
+        )
+        return conn.execute(stmt).first() is not None
+
+
+def _finish_digest_week(iso_week: str, **values: Any) -> None:
+    """Record the outcome of a claimed week. Upserts, so a manual
+    ``digest.py --week`` run that was never claimed still leaves a record."""
+    row = {
+        "iso_week": iso_week,
+        "claimed_at": datetime.now(timezone.utc).isoformat(),
+        **values,
+    }
+    with get_engine().begin() as conn:
+        stmt = pg_insert(digest_runs).values([row])
+        conn.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["iso_week"],
+                # claimed_at is deliberately not overwritten: it records when the
+                # week was first taken, which is what makes a stuck claim legible.
+                set_={k: stmt.excluded[k] for k in values},
+            )
+        )
+
+
+def mark_digest_posted(iso_week: str, channel_id: str, post_id: Optional[str]) -> None:
+    """The week was announced."""
+    _finish_digest_week(
+        iso_week,
+        status="posted",
+        posted_at=datetime.now(timezone.utc).isoformat(),
+        channel_id=channel_id,
+        post_id=post_id,
+        error=None,
+    )
+
+
+def mark_digest_skipped(iso_week: str, reason: str) -> None:
+    """The week had nothing worth announcing.
+
+    Recorded rather than left blank so the scheduler does not reconsider it every
+    tick — and deliberately *not* posted: a weekly "nothing to report" message is
+    how a digest channel gets muted.
+    """
+    _finish_digest_week(iso_week, status="skipped", error=reason)
+
+
+def mark_digest_failed(iso_week: str, error: str) -> None:
+    """The week was claimed and could not be announced. Stays claimed on purpose;
+    re-post it by hand with ``digest.py --week <iso_week>``."""
+    _finish_digest_week(iso_week, status="failed", error=error[:2000])
+
+
+def digest_week_status(iso_week: str) -> Optional[dict[str, Any]]:
+    """What happened to one week, or None if it has never been claimed."""
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(digest_runs).where(digest_runs.c.iso_week == iso_week)
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def list_digest_runs(limit: int = 50) -> list[dict[str, Any]]:
+    """Digest history, most recent week first."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(digest_runs)
+            .order_by(digest_runs.c.iso_week.desc())
+            .limit(limit)
+        ).mappings().all()
+    return [dict(r) for r in rows]

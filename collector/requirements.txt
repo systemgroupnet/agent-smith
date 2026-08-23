@@ -4,3 +4,8 @@ gunicorn>=22.0.0         # production WSGI server used by the Docker image
 SQLAlchemy>=2.0,<3.0     # storage layer (PostgreSQL)
 alembic>=1.13,<2.0       # schema migrations (applied at startup)
 psycopg[binary]>=3.1     # PostgreSQL driver (binary wheel bundles libpq — no system deps)
+# zoneinfo's data source. The weekly digest fires at a local wall-clock time
+# (DIGEST_TIMEZONE), and a slim base image may ship no /usr/share/zoneinfo at all —
+# in which case ZoneInfo("Asia/Tehran") raises and the schedule silently falls back
+# to UTC. This package is the guaranteed lookup path, and it is pure data.
+tzdata>=2024.1

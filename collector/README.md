@@ -24,6 +24,11 @@ numeric score and the written feedback on each finding can be measured over time
 | `POST` | `/api/webhooks/gitlab` | Receive GitLab webhook events: **emoji** reactions on review comments → 1–5 scores, and **comments** in a review comment's thread → replies. Optionally guarded by `X-Gitlab-Token` (see `GITLAB_WEBHOOK_SECRET`). |
 | `GET`  | `/api/review-comments` | List posted review comments with their current human scores and replies (each carries a `scores` array + `score_count`/`score_avg`, and a `replies` array + `reply_count`). Query params: `limit` (1–500, default 100), `offset`, `run_id`, `project`. |
 | `GET`  | `/api/comment-replies` | List human replies to the agent's review comments, newest first. Query params: `limit` (1–500, default 100), `offset`, `run_id`, `project`, `note_id` (the parent agent comment). |
+| `GET`  | `/api/points` | Engagement points leaderboard, highest first, each total with its breakdown (ratings, replies, bonuses) and level. Query params: `limit`, `project`, `days` (window; omit for all-time). |
+| `GET`  | `/api/achievements` | Unlocked badges, newest first, enriched with emoji/label/blurb from the catalogue. Query params: `limit`, `offset`, `project`, `username`. |
+| `GET`  | `/api/weekly-awards` | Weekly winners per ISO week. Query params: `limit`, `project`, `week` (e.g. `2026-W34`). |
+| `POST` | `/api/achievements/recompute` | Re-evaluate every participant over all history and award what they have earned but not been credited with. Idempotent; honours `COLLECTOR_TOKEN`. |
+| `POST` | `/api/weekly-awards/refresh` | Settle one ISO week (`?week=2026-W34`, optionally `?project=`), or every week that has ever had activity when `week` is omitted. Idempotent; honours `COLLECTOR_TOKEN`. |
 | `GET`  | `/health`     | Liveness + stored-event count. |
 
 ### Comment-evaluation loop
@@ -145,6 +150,123 @@ tables:
   `author_id`/`author_username`/`author_name`, the `body` text, `note_type`
   (`DiffNote`/`DiscussionNote`), `url`, `noted_at`, `updated_at`, `action`.
 
+- `achievements` — one row per unlocked badge, unique on
+  `(username, achievement_key, project_path)`. **`awarded_at` is when the
+  threshold was crossed**, derived from the rating or reply that crossed it —
+  not when the row was written — so a backfill over a year of history produces a
+  real timeline instead of a thousand badges stamped with the migration date.
+  `progress_value` records the counter at unlock, which is how a live unlock at
+  exactly 100 is told apart from a backfill that crossed several thresholds at
+  once. Per-project by design: every dashboard panel filters `$project`, so a row
+  with no project could not honour the picker.
+- `weekly_awards` — one row per `(iso_week, project_path, category)`: who won.
+  `iso_week` is `2026-W34` (ISO year **and** week — plain week numbers collide
+  across years, and 1 Jan 2027 belongs to `2026-W53`); `week_start` carries that
+  week's Monday as an ISO date because Grafana's `$__timeFilter` cannot filter on
+  a week label.
+
+### Engagement: points, badges, weekly awards
+
+`engagement.py` owns all of it — the catalogue, the queries, the points weights.
+`storage.py` only holds the table definitions and thin wrappers, because
+migration `0011` imports the module to backfill and must not drag the ingest
+layer in with it.
+
+Three deliberate splits:
+
+- **Points are derived, never stored.** A revoked reaction has to take its points
+  back with it, and a materialized counter would get that wrong exactly when
+  somebody noticed.
+- **Achievements are stored and never revoked.** A milestone must not vanish when
+  a dashboard window rolls past it.
+- **Weekly awards are stored per ISO week, never computed over a rolling window.**
+  A "last 7 days" board changes every time you look at it, so nobody can be told
+  they won; a named week closes, gets a winner, and stays settled.
+
+Points:
+
+| Action | Points |
+|---|---|
+| Rate a finding | 2 |
+| Rate a review summary | 1 |
+| Bonus: the merge request is someone else's | +1 |
+| Bonus: rated within 24 h of the comment being posted | +1 |
+| First substantive reply in a thread (≥ 15 chars) | 5 |
+| Any other reply | 1 |
+
+Levels: 🥉 Bronze < 50, 🥈 Silver < 150, 🥇 Gold < 400, 💎 Diamond.
+
+**Nothing scores a rater on the value they gave.** Rewarding "highest average
+awarded" would inflate the exact signal the ratings exist to measure, so no
+weight above reads `score` — a rule pinned down by
+`tests/test_engagement.py::test_no_achievement_is_earned_by_the_score_a_rater_gave`.
+For the same reason nothing rewards an author for *receiving* few findings: that
+would pay people to open smaller merge requests. There is also no per-MR cap on
+rating points — rating all 30 findings on a large MR is the behaviour worth
+paying for, and the anti-farm metric is coverage, which is bounded at 100% per
+person. Replies are the one action cheap enough to repeat, which is why only the
+first substantive one in a thread earns full value.
+
+Findings and summaries are **unioned** for engagement (a rating is a rating) and
+stay separate for quality: `weekly_stats`' `agent_grade` reads
+`kind = 'finding'` only, so what migration `0010` split apart is not silently
+pooled back together.
+
+### Weekly digest → Mattermost
+
+`digest.py` posts a closed week's result to a channel: the five award winners, the
+points table, badges crossed that week, and the two numbers that say whether the
+loop is working (coverage, and the grade the reviewer earned).
+
+```bash
+python digest.py                    # last completed ISO week, all projects
+python digest.py --week 2026-W34    # a past week — regenerates byte-identically
+python digest.py --current          # the week in progress, as a preview
+python digest.py --dry-run          # print it, post nothing
+```
+
+It settles the week's awards before reading them, so a missed run or a late
+rating cannot leave the announcement disagreeing with the dashboard. One HTTP
+POST via `urllib` — no new dependency in a service that would need `requests` for
+nothing else. The token is a write credential for the channel and is never
+printed, including in error paths.
+
+**The service schedules it — there is no host crontab.** `scheduler.py` starts a
+daemon thread from `main.py` (after the migrations, since its first pass reads
+`digest_runs`). Setting `MATTERMOST_URL` + `MATTERMOST_TOKEN` +
+`MATTERMOST_CHANNEL_ID` turns it on; `DIGEST_ENABLED=false` is an explicit
+off-switch, and an **empty** `DIGEST_ENABLED` means enabled, because the
+credentials are already the opt-in. Cadence is `DIGEST_DAY` / `DIGEST_HOUR` /
+`DIGEST_TIMEZONE`, default Monday 09:00 UTC.
+
+Three properties worth knowing:
+
+- **It is a ticker, not a timer.** Every `DIGEST_TICK_S` (default 900 s) the thread
+  asks "which week is due, and has anyone dealt with it?" — it never sleeps until
+  Monday. So a restart costs nothing, a deploy at the firing moment does not lose
+  a digest, and a service that was down posts as soon as it is back. The schedule
+  holds no state of its own.
+- **The week is claimed before it is posted.** `digest_runs` is unique on
+  `iso_week`, so at most one worker can announce a given week however many
+  replicas run. **A claim is never released, even on failure** — a post that fails
+  after the request reached Mattermost is indistinguishable from one that failed
+  before it, and a duplicate announcement in a channel is permanent while a missed
+  week is one command away. A failure logs loudly and records `status='failed'`
+  with the error; re-send it with `python digest.py --week 2026-W34`.
+- **A week with no activity is recorded and not posted.** A weekly "nothing to
+  report" message is how a digest channel gets muted. `python digest.py --force`
+  overrides that for a first announcement.
+
+Only the most recent due week is ever posted: a service down for a fortnight sends
+one digest, not three, because dumping a wall of history into the channel during
+an outage helps nobody. Earlier weeks are still reachable with `--week`.
+
+Inspect what the scheduler has done with `storage.list_digest_runs()`, or:
+
+```sql
+SELECT iso_week, status, posted_at, error FROM digest_runs ORDER BY iso_week DESC;
+```
+
 Schema is managed by **Alembic** (`migrations/`). `storage.run_migrations()`
 applies `alembic upgrade head` at startup (called from `main.py` at import), so a
 fresh database is created and an existing one is upgraded automatically. The
@@ -153,8 +275,16 @@ initial revision is guarded to adopt a table created by the earlier
 old `review_runs.errors` JSONB into `run_events` before dropping that column;
 revision `0005` adds `review_comments` + `comment_scores`; revision `0006` adds
 `comment_scores.project_path`; revision `0007` renames `comment_scores.mr_iid`
-→ `mr_id`; revision `0008` adds `comment_replies`. To run migrations by hand:
-`COLLECTOR_DATABASE_URL=… alembic upgrade head` (from `collector/`).
+→ `mr_id`; revision `0008` adds `comment_replies`; revision `0011` adds
+`achievements` + `weekly_awards` **and backfills both over the entire rating
+history** — unlocks are otherwise only awarded on the ingest path, so a deploy
+would leave everyone who rated before it at zero badges, and the people with the
+most ratings to their name would be exactly the ones it looked broken for. That
+backfill is non-fatal: a failure warns and leaves the tables empty rather than
+aborting the migration, since the schema is what the service needs to start and
+the data credit is one API call away (`POST /api/achievements/recompute`). To run
+migrations by hand: `COLLECTOR_DATABASE_URL=… alembic upgrade head` (from
+`collector/`).
 
 ## Configuration
 
@@ -164,6 +294,16 @@ revision `0005` adds `review_comments` + `comment_scores`; revision `0006` adds
 | `COLLECTOR_TOKEN` | _(unset)_ | When set, `POST /api/events` requires a matching `X-Collector-Token` header. Unset → open (fine on a trusted network). |
 | `GITLAB_WEBHOOK_SECRET` | _(unset)_ | When set, `POST /api/webhooks/gitlab` requires a matching `X-Gitlab-Token` header (the secret token you configure on the GitLab webhook). Unset → open. |
 | `PORT` | `8000` | Only used by the local dev server (`python main.py`). |
+| `MATTERMOST_URL` | _(unset)_ | Mattermost base URL for the weekly digest, e.g. `https://mattermost.example.com`. |
+| `MATTERMOST_TOKEN` | _(unset)_ | Bot account or personal access token. A **write credential for the channel** — keep it out of git. |
+| `MATTERMOST_CHANNEL_ID` | _(unset)_ | Target channel id (Channel → View Info). Overridable per run with `--channel`. |
+| `DIGEST_PROJECTS` | _(unset)_ | Comma-separated allowlist of project paths the digest reports on. Unset → every project with any engagement data. |
+| `DIGEST_ENABLED` | _(enabled)_ | Explicit off-switch for the in-service scheduler. The three `MATTERMOST_*` values are the opt-in, so an **empty value means enabled** — set `false`/`0`/`no`/`off` to stop the service posting. |
+| `DIGEST_DAY` | `mon` | Day the digest goes out (`mon`…`sun`, or `0`…`6`). Only changes *when* it is announced — the week reported is always the one before the firing moment's week. Since ISO weeks close on Sunday midnight, `sun` is always a week behind (7 days old) and `mon` reports the week that closed the previous night. |
+| `DIGEST_HOUR` | `9` | When it goes out, in `DIGEST_TIMEZONE`. Takes `HH` or `HH:MM` — `11:45` means a quarter to twelve. |
+| `DIGEST_MINUTE` | _(from `DIGEST_HOUR`)_ | Minute past the hour, if you would rather keep it separate from `DIGEST_HOUR`. Set explicitly, it wins over the `HH:MM` form. |
+| `DIGEST_TIMEZONE` | `UTC` | IANA zone the schedule is expressed in, e.g. `Asia/Tehran`. Every date in the due-week calculation is derived from this one clock. |
+| `DIGEST_TICK_S` | `900` | How often the thread checks whether a week is due (floor 60). It is a ticker, not a timer, so a restart loses nothing. |
 
 ## Build / run locally
 

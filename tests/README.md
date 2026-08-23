@@ -28,6 +28,14 @@ top-level name (`from core.utils…`) — that is how `main.py` runs.
 | `test_sql_routing.py` | the one routing judgement — deterministic SQL evidence gathering, hallucinated paths discarded, fails closed, and additions that never displace the static assignment |
 | `test_comment_dedup.py` | duplicate suppression: normalisation across posted-vs-candidate markup, the exact-match pre-pass, cycle resolution that can never empty a group, and fail-open on every malformed response |
 | `test_severity.py` | one shared severity rubric in all nine reviewer prompts (no per-prompt drift), and the demotion channel's three asymmetries |
+| `test_engagement.py` | the collector's engagement layer — the badge ladder's thresholds and no-double-award rule, level boundaries, ISO-week arithmetic (including that 1 Jan 2027 is `2026-W53`, which is why the bucket key carries the ISO year), the digest's rendering, and that its error paths never print the Mattermost token. Also the in-service scheduler's due-week decision, whose nastiest case is a week boundary read in the wrong clock — 03:00 Monday in Tehran is still Sunday in UTC, so a UTC-derived boundary reports the wrong week once a week and looks like a fluke. Above all the design rule the feature rests on: **no metric and no points weight may read the score a rater gave** — a future "gave ten 5-stars" badge fails the suite, which is the point |
+
+`test_engagement.py` needs `collector/` on `sys.path`, which `conftest.py` adds
+alongside `reviewer/` (the collector's modules also import each other by top-level
+name, because gunicorn runs with `collector/` as its working directory). Only
+modules that touch no database at import time are testable that way — `engagement`
+and `digest` are pure; `main` runs Alembic on import and is deliberately never
+imported here.
 
 ## What is not covered
 
@@ -39,3 +47,37 @@ be present and still not calibrate. Those questions need a live run.
 Nothing here talks to GitLab either. The end-to-end harness that does
 (clone → review → gate → dedup → would-post, with every write intercepted) needs a
 token and a real merge request, so it is not part of this suite.
+
+**Nothing here talks to PostgreSQL**, which is the notable gap in
+`test_engagement.py`: it pins down the logic *around* the SQL and the design rules
+the SQL must obey, but not whether a query returns the right rows. Two scripts at
+the repo root cover that against a throwaway database, and they are how the
+engagement SQL was actually verified — run them by hand when changing it, the same
+way the dashboards' panel queries are checked (`dashboards/README.md` →
+*Validating changes*):
+
+```bash
+docker run -d --name crg-verify-pg -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB=collector -p 55433:5432 postgres:18
+
+# drives the real webhook ingest paths: canonical-score dedupe, points,
+# revoke semantics, badge awards, ISO-week awards, idempotency
+python scripts/verify_engagement.py
+
+# migrates 0010 → ten weeks of history → head, and checks the backfill dates
+# each badge to the event that earned it rather than to today
+python scripts/verify_engagement_backfill.py
+
+# the in-service digest scheduler: the claim serialises under 8 racing threads,
+# a restart does not re-announce, a failed week keeps its claim. Posts real
+# messages when given credentials — use a scratch channel.
+MATTERMOST_URL=… MATTERMOST_TOKEN=… MATTERMOST_CHANNEL_ID=… \
+  python scripts/verify_digest_scheduler.py
+
+docker rm -f crg-verify-pg
+```
+
+All three are **destructive** — they write into (and the backfill one drops the
+schema of) whatever `COLLECTOR_DATABASE_URL` points at, defaulting to that
+throwaway container, and the scheduler one clears `digest_runs` and sends real
+Mattermost messages. Never aim them at the real collector or the team's channel.

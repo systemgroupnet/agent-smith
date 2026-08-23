@@ -5,3 +5,10 @@
 # pydantic, …) because it imports the code under test. CI installs both:
 #   pip install -r reviewer/requirements.txt -r tests/requirements.txt
 pytest>=8.0,<10.0
+
+# The collector's engagement/digest modules import SQLAlchemy for `text()`, so the
+# suite needs it to cover them. Deliberately *not* psycopg: the engagement tests
+# exercise the pure logic (thresholds, ISO weeks, formatting) and never open a
+# connection, so CI needs no PostgreSQL. The SQL itself is verified against a real
+# database by hand — see tests/README.md.
+SQLAlchemy>=2.0,<3.0

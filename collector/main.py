@@ -13,6 +13,11 @@ Endpoints:
   POST /api/webhooks/gitlab   receive GitLab emoji + comment events.
   GET  /api/review-comments   list posted review comments with scores and replies.
   GET  /api/comment-replies   list human replies to the agent's review comments.
+  GET  /api/points            engagement points leaderboard (?project, ?days).
+  GET  /api/achievements      unlocked badges (?project, ?username).
+  GET  /api/weekly-awards     weekly winners per ISO week (?project, ?week).
+  POST /api/achievements/recompute  backfill/repair unlocks from existing data.
+  POST /api/weekly-awards/refresh   settle one ISO week, or every week (?week).
   GET  /health                liveness + stored-event count.
 
 The webhook endpoint powers the review-evaluation loop, on two triggers:
@@ -34,9 +39,11 @@ field on the payload lets the two evolve independently.
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request
 
+import scheduler
 import storage
 
 app = Flask(__name__)
@@ -44,6 +51,14 @@ app = Flask(__name__)
 # Apply Alembic migrations at import time so the schema is ready under any WSGI
 # server (gunicorn imports the module; there is no __main__). Idempotent.
 storage.run_migrations()
+
+# Start the weekly digest thread — *after* the migrations, since its first tick
+# reads the digest_runs table 0012 creates. Scheduling lives in the service rather
+# than in a crontab on the host: the collector already has the data, the
+# credentials and the code, and a schedule that ships with them cannot be lost in
+# a host migration. No-ops unless the Mattermost settings are present, so a
+# deployment that has not configured them is unaffected. See scheduler.py.
+scheduler.start()
 
 
 def _clamp_int(raw, default: int, low: int, high: int) -> int:
@@ -205,6 +220,119 @@ def get_comment_replies():
         return jsonify({"error": f"failed to read comment replies: {e}"}), 500
 
     return jsonify({"count": len(replies), "comment_replies": replies})
+
+
+@app.route("/api/points", methods=["GET"])
+def get_points():
+    """Engagement points leaderboard, highest first.
+
+    Filters: ?project, ?days (window, omit for all-time), ?limit. Each row
+    carries its breakdown (ratings, replies, bonuses) and its level, so a total
+    is always explainable back to the actions that earned it.
+
+    Points are *derived* from the ratings and replies that currently exist — a
+    revoked reaction takes its points with it — and the weights live in the
+    ``v_engagement_points_ledger`` view, which the Grafana panels read too."""
+    limit = _clamp_int(request.args.get("limit"), default=100, low=1, high=500)
+    project = request.args.get("project") or None
+    days_raw = request.args.get("days")
+    since = None
+    if days_raw:
+        days = _clamp_int(days_raw, default=7, low=1, high=3650)
+        since = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).isoformat()
+
+    try:
+        rows = storage.list_engagement_points(
+            limit=limit, project_path=project, since=since
+        )
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to read points: {e}"}), 500
+
+    return jsonify({"count": len(rows), "since": since, "points": rows})
+
+
+@app.route("/api/achievements", methods=["GET"])
+def get_achievements():
+    """Unlocked achievements, newest first. Filters: ?project, ?username.
+
+    Each row is enriched from the catalogue in ``storage.ACHIEVEMENTS`` (emoji,
+    label, blurb) — only the key is stored, so a badge can be renamed without a
+    migration."""
+    limit = _clamp_int(request.args.get("limit"), default=200, low=1, high=500)
+    offset = _clamp_int(request.args.get("offset"), default=0, low=0, high=1_000_000)
+    project = request.args.get("project") or None
+    username = request.args.get("username") or None
+
+    try:
+        rows = storage.list_achievements(
+            limit=limit, offset=offset, project_path=project, username=username
+        )
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to read achievements: {e}"}), 500
+
+    return jsonify({"count": len(rows), "achievements": rows})
+
+
+@app.route("/api/weekly-awards", methods=["GET"])
+def get_weekly_awards():
+    """Stored weekly winners, most recent week first. Filters: ?project, ?week.
+
+    ``week`` is an ISO year-week (``2026-W34``). Winners are settled per ISO week
+    rather than over a rolling window — a "last 7 days" board changes every time
+    you look at it, so nobody can be told they won."""
+    limit = _clamp_int(request.args.get("limit"), default=200, low=1, high=500)
+    project = request.args.get("project") or None
+    week = request.args.get("week") or None
+
+    try:
+        rows = storage.list_weekly_awards(
+            limit=limit, project_path=project, iso_week=week
+        )
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to read weekly awards: {e}"}), 500
+
+    return jsonify({"count": len(rows), "weekly_awards": rows})
+
+
+@app.route("/api/weekly-awards/refresh", methods=["POST"])
+def refresh_weekly_awards():
+    """Recompute weekly winners. Body/query: ?week (one ISO week), ?project.
+
+    With no ``week``, settles every week that has ever had activity. A write, so
+    it honours COLLECTOR_TOKEN. Idempotent — a week recomputed while still open
+    keeps one row per category and lands on its final answer when it closes."""
+    if not _token_ok():
+        return jsonify({"error": "unauthorized"}), 401
+
+    week = request.args.get("week") or None
+    project = request.args.get("project") or None
+    try:
+        result = storage.refresh_weekly_awards(iso_week=week, project_path=project)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to refresh weekly awards: {e}"}), 500
+
+    return jsonify({"status": "ok", **result})
+
+
+@app.route("/api/achievements/recompute", methods=["POST"])
+def recompute_achievements():
+    """Evaluate every participant against the whole ladder and award what they
+    have earned but not been credited with.
+
+    A write, so it honours COLLECTOR_TOKEN. Needed because unlocks are only ever
+    awarded on the ingest path: data that predates the feature, or that arrived
+    while a deploy was mid-flight, holds badges nobody has. Idempotent."""
+    if not _token_ok():
+        return jsonify({"error": "unauthorized"}), 401
+
+    try:
+        result = storage.recompute_achievements()
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"failed to recompute achievements: {e}"}), 500
+
+    return jsonify({"status": "ok", **result})
 
 
 if __name__ == "__main__":

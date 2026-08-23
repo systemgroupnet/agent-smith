@@ -19,11 +19,21 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REVIEWER = REPO_ROOT / "reviewer"
+COLLECTOR = REPO_ROOT / "collector"
 
 # Prepend, not append: a name collision with an installed package should resolve
 # to the code under test.
 if str(REVIEWER) not in sys.path:
     sys.path.insert(0, str(REVIEWER))
+
+# The collector's modules import each other by top-level name for the same reason
+# the reviewer's do (`import storage`, `import engagement` — gunicorn runs with
+# `collector/` as the working directory), so it needs the same treatment. Only
+# modules that touch no database at import time are testable this way:
+# ``engagement`` and ``digest`` are pure, while ``main`` runs Alembic on import
+# and is deliberately never imported here.
+if str(COLLECTOR) not in sys.path:
+    sys.path.insert(0, str(COLLECTOR))
 
 import pytest  # noqa: E402  (after the path setup, deliberately)
 

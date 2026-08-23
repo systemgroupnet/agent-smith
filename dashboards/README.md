@@ -6,7 +6,7 @@ PostgreSQL directly (datasource uid `ffrgyjxlmntogb`).
 
 | File | Grafana title | uid | What it answers |
 |---|---|---|---|
-| `rating-stats.json` | Rating Stats | `cfsrndx5q1la8d` | Are the review comments any good — human 1–5 ratings, replies, worst-rated comments, per-model quality |
+| `rating-stats.json` | Rating Stats | `cfsrndx5q1la8d` | Are the review comments any good — human 1–5 ratings, replies, worst-rated comments, per-model quality, plus the **🏆 Engagement** row (points, badges, weekly awards) |
 | `run-stats.json` | Run Stats | `efrh010c710jkf` | Is the reviewer healthy — run outcomes, durations, throughput, failover |
 
 ## Applying a file to Grafana
@@ -187,6 +187,31 @@ is **mixed** — some comments from each model — so:
 `review_comments.model` is `NULL` for rows written before migration `0009`. That
 means *unknown*, not *no failover* — filter `model IS NOT NULL` when comparing
 models, or those rows land in a bogus bucket.
+
+**The points formula is duplicated here, and `collector/engagement.py` is the
+source of truth.** The engagement layer keeps every query in Python — there are
+no database views — so the `Points & levels` panel carries its own copy of the
+ledger CTE. That copy was generated from `engagement.POINTS_LEDGER_SQL` rather
+than retyped, and the weights (`rate a finding 2 · rate a summary 1 · +1 peer ·
++1 within 24h · first substantive reply 5 · other replies 1`) exist in both
+places. **Change them in `engagement.py` and regenerate the panel**, or the
+dashboard and the Mattermost digest will quietly disagree about who is winning.
+The same applies to the emoji/label `CASE` expressions in `Achievement wall` and
+`Recently unlocked`, which mirror `engagement.ACHIEVEMENTS`, and to the level
+thresholds in `Points & levels`, which mirror `engagement.POINT_LEVELS`.
+
+Two things about the engagement panels that are easy to get wrong:
+
+- **Count `DISTINCT note_id`, never `COUNT(*)`, over `comment_scores`.** That
+  table is unique on `(note_id, user_id, emoji)`, so a rater who clicked 3,
+  reconsidered, clicked 4 and never revoked the 3 leaves **two rows** — which is
+  what the pre-existing `Rater leaderboard` was doing until it was given the
+  `DISTINCT ON (note_id, user_id) … ORDER BY … received_at DESC` canonical CTE it
+  now uses. Any panel that scores people needs the same treatment.
+- **Weekly awards filter on `week_start::timestamptz`, not on `iso_week`.**
+  `$__timeFilter` cannot filter a `2026-W34` label, and a panel that ignores the
+  time picker is the failure mode described above. `week_start` is that week's
+  Monday, stored precisely so the picker keeps working.
 
 ## Validating changes
 

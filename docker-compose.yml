@@ -99,6 +99,20 @@ services:
       # When set, POST /api/webhooks/gitlab requires a matching X-Gitlab-Token
       # header (the secret token configured on the GitLab emoji webhook).
       - GITLAB_WEBHOOK_SECRET=${GITLAB_WEBHOOK_SECRET:-}
+      # Weekly engagement digest, scheduled inside the service (scheduler.py).
+      # Locally you probably want it off — set DIGEST_ENABLED=false, or just leave
+      # the token unset. Try the message without posting anything:
+      #   docker compose exec collector python digest.py --current --dry-run
+      - MATTERMOST_URL=${MATTERMOST_URL:-}
+      - MATTERMOST_TOKEN=${MATTERMOST_TOKEN:-}
+      - MATTERMOST_CHANNEL_ID=${MATTERMOST_CHANNEL_ID:-}
+      - DIGEST_PROJECTS=${DIGEST_PROJECTS:-}
+      - DIGEST_DAY=${DIGEST_DAY:-sun}
+      - DIGEST_HOUR=${DIGEST_HOUR:-12:00}
+      - DIGEST_MINUTE=${DIGEST_MINUTE:-}
+      - DIGEST_TIMEZONE=${DIGEST_TIMEZONE:-Asia/Tehran}
+      - DIGEST_TICK_S=${DIGEST_TICK_S:-}
+      - DIGEST_ENABLED=${DIGEST_ENABLED:-}
     networks:
       - codereview-network
     ports:
