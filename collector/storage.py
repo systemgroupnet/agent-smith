@@ -1229,6 +1229,9 @@ def refresh_weekly_awards(
         if iso_week is None:
             return engagement.backfill_weekly_awards(conn)
 
+        # Include the global scope: the digest announces one set of winners
+        # across every project, and that cannot be derived from the per-project
+        # rows (the per-project ones stay, for the Grafana panels).
         projects = (
             [project_path]
             if project_path
@@ -1239,6 +1242,7 @@ def refresh_weekly_awards(
                     if row["project_path"]
                 }
             )
+            + [engagement.ALL_PROJECTS]
         )
         total = 0
         for project in projects:

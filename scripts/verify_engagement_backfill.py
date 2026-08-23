@@ -204,7 +204,11 @@ check("streak_4w is dated to the 4th consecutive week",
       by_user["alice"]["streak_4w"]["awarded_at"][:10], "2026-06-22")
 
 check("every one of the 10 active weeks was settled", len(weeks), 10)
-check("each week has all 5 categories", {w["n"] for w in weeks}, {5})
+# 5 per-project winners + 5 computed across every project at once (the scope the
+# digest reports on). The per-project rows stay for the Grafana panels, which
+# filter $project and cannot read a global row.
+check("each week has per-project and global winners",
+      {w["n"] for w in weeks}, {10})
 
 # --- 5. re-running the backfill changes nothing ---------------------------
 import engagement  # noqa: E402
@@ -232,8 +236,8 @@ check("timestamps are reproducible, not clock-based", stamps[:10], "2026-06-01")
 import digest as digest_mod  # noqa: E402
 
 for week in ("2026-W25", "2026-W30"):
-    message, _ = digest_mod.build_message(week, [PROJECT])
-    has_points_table = "| # | Who | Points | Level |" in message
+    message, _ = digest_mod.build_message(week)   # global scope
+    has_points_table = "| # | Who | This week | Total | Level |" in message
     check(f"{week} digest renders a points table", has_points_table, True)
 
     # And the announced Most Points winner is the leaderboard's top row.
@@ -242,8 +246,7 @@ for week in ("2026-W25", "2026-W30"):
         (l.split("|")[3].strip() for l in lines if "**Most Points**" in l), None
     )
     top = next(
-        (l.split("|")[2].strip() for i, l in enumerate(lines)
-         if l.startswith("| 1 |")), None
+        (l.split("|")[2].strip() for l in lines if l.startswith("| 1 |")), None
     )
     check(f"{week} Most Points winner is on the leaderboard", winner == top, True)
 

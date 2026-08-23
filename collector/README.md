@@ -218,6 +218,16 @@ pooled back together.
 points table, badges crossed that week, and the two numbers that say whether the
 loop is working (coverage, and the grade the reviewer earned).
 
+**One report for everybody, across every project.** A developer rating a review
+comment is engaging with the reviewer whichever repository it happened in, and
+splitting the announcement per project turns one small team into several smaller
+ones — two leaderboards nobody compares, and the same person congratulated twice.
+Winners are therefore also computed at a global scope, stored under
+`weekly_awards.project_path = '*'` ("top rater across everything" cannot be
+derived from per-project winners), while the per-project rows stay for the Grafana
+panels, which filter `$project` and cannot read a global row. `--project X` scopes
+a run to one project when you want that.
+
 ```bash
 python digest.py                    # last completed ISO week, all projects
 python digest.py --week 2026-W34    # a past week — regenerates byte-identically
@@ -297,7 +307,6 @@ migrations by hand: `COLLECTOR_DATABASE_URL=… alembic upgrade head` (from
 | `MATTERMOST_URL` | _(unset)_ | Mattermost base URL for the weekly digest, e.g. `https://mattermost.example.com`. |
 | `MATTERMOST_TOKEN` | _(unset)_ | Bot account or personal access token. A **write credential for the channel** — keep it out of git. |
 | `MATTERMOST_CHANNEL_ID` | _(unset)_ | Target channel id (Channel → View Info). Overridable per run with `--channel`. |
-| `DIGEST_PROJECTS` | _(unset)_ | Comma-separated allowlist of project paths the digest reports on. Unset → every project with any engagement data. |
 | `DIGEST_ENABLED` | _(enabled)_ | Explicit off-switch for the in-service scheduler. The three `MATTERMOST_*` values are the opt-in, so an **empty value means enabled** — set `false`/`0`/`no`/`off` to stop the service posting. |
 | `DIGEST_DAY` | `mon` | Day the digest goes out (`mon`…`sun`, or `0`…`6`). Only changes *when* it is announced — the week reported is always the one before the firing moment's week. Since ISO weeks close on Sunday midnight, `sun` is always a week behind (7 days old) and `mon` reports the week that closed the previous night. |
 | `DIGEST_HOUR` | `9` | When it goes out, in `DIGEST_TIMEZONE`. Takes `HH` or `HH:MM` — `11:45` means a quarter to twelve. |

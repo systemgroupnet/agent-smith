@@ -19,7 +19,7 @@ Usage::
     python digest.py                      # last completed ISO week, all projects
     python digest.py --week 2026-W34      # a specific week (regenerates exactly)
     python digest.py --current            # the week in progress, as a preview
-    python digest.py --project mars/x     # one project only
+    python digest.py --project mars/x     # scope to one project (default: all)
     python digest.py --dry-run            # print the message, post nothing
 
 Configuration (environment):
@@ -28,7 +28,6 @@ Configuration (environment):
     MATTERMOST_TOKEN        bot account or personal access token
     MATTERMOST_CHANNEL_ID   target channel id (Channel → View Info)
     COLLECTOR_DATABASE_URL  the collector's PostgreSQL (as the service uses)
-    DIGEST_PROJECTS         optional comma-separated allowlist of project paths
 
 Deliberately no new dependency: one HTTP POST goes out through ``urllib`` from
 the standard library rather than pulling ``requests`` into a service that needs
@@ -112,8 +111,18 @@ def _who(username, user_name) -> str:
     return f"@{username}"
 
 
-def build_message(iso_week: str, projects: list[str]) -> tuple[str, dict]:
+def build_message(
+    iso_week: str, scope: str = engagement.ALL_PROJECTS
+) -> tuple[str, dict]:
     """Render the digest for one ISO week. Returns ``(markdown, payload_summary)``.
+
+    **One report for everybody, not one per project.** A developer rating a
+    review comment is engaging with the reviewer whichever repository it happened
+    in, and splitting the announcement by project turns one small team into
+    several smaller ones — two separate leaderboards nobody compares, and the same
+    person congratulated twice. ``scope`` is ``engagement.ALL_PROJECTS`` by
+    default; pass a real project path to report on just that one (what
+    ``--project`` does).
 
     Reads through ``storage``/``engagement`` so the digest and the API cannot
     disagree about who won or what a rating is worth.
@@ -121,110 +130,109 @@ def build_message(iso_week: str, projects: list[str]) -> tuple[str, dict]:
     lines: list[str] = [
         f"### 🏆 Code Review Engagement — week {iso_week} ({week_span(iso_week)})",
     ]
-    summary: dict = {"iso_week": iso_week, "projects": {}}
+    summary: dict = {"iso_week": iso_week, "scope": scope}
     anything = False
 
     with storage.get_engine().connect() as conn:
-        for project in projects:
-            stats = engagement.weekly_stats(conn, iso_week, project)
-            awards = engagement.list_weekly_awards(
-                conn, project_path=project, iso_week=iso_week
+        stats = engagement.weekly_stats(conn, iso_week, scope)
+        awards = engagement.list_weekly_awards(
+            conn, project_path=scope, iso_week=iso_week
+        )
+        # Both bounds, in SQL. The window is the ISO week's Monday up to (not
+        # including) the next one — filtering the result in Python instead
+        # drops anyone active during the week *and* afterwards, which emptied
+        # this table for every past week.
+        week_from = date.fromisoformat(engagement.week_start_date(iso_week))
+        points = engagement.points_leaderboard(
+            conn,
+            limit=_MAX_LEADERBOARD_ROWS,
+            project_path=None if scope == engagement.ALL_PROJECTS else scope,
+            since=f"{week_from}T00:00:00+00:00",
+            until=f"{week_from + timedelta(days=7)}T00:00:00+00:00",
+        )
+        # A level is a *cumulative* standing, so it has to come from lifetime
+        # points, not from the week's. Deriving it from the weekly total put
+        # every single person on 🥉 Bronze in every digest forever — the
+        # column read as "nobody is getting anywhere", in the one place the
+        # ladder is supposed to mean something.
+        lifetime = {
+            row["username"]: int(row["points"] or 0)
+            for row in engagement.points_leaderboard(
+                conn, limit=1000,
+                project_path=None if scope == engagement.ALL_PROJECTS else scope,
             )
-            # Both bounds, in SQL. The window is the ISO week's Monday up to (not
-            # including) the next one — filtering the result in Python instead
-            # drops anyone active during the week *and* afterwards, which emptied
-            # this table for every past week.
-            week_from = date.fromisoformat(engagement.week_start_date(iso_week))
-            points = engagement.points_leaderboard(
-                conn,
-                limit=_MAX_LEADERBOARD_ROWS,
-                project_path=project,
-                since=f"{week_from}T00:00:00+00:00",
-                until=f"{week_from + timedelta(days=7)}T00:00:00+00:00",
+        }
+        badges = engagement.achievements_in_week(conn, iso_week, scope)
+
+    # Rendering needs no connection, so it happens outside the block — and the
+    # "was there anything at all?" guard reads as a plain condition rather than
+    # the loop-and-continue this used to be when the report was per project.
+    if awards or points or badges or stats.get("findings_posted"):
+        anything = True
+        summary["stats"] = stats
+        summary["awards"] = len(awards)
+        summary["badges"] = len(badges)
+
+        lines.append("")
+
+        # The two numbers the team can act on, first.
+        coverage = stats.get("coverage_pct")
+        grade = stats.get("agent_grade")
+        bits = []
+        if stats.get("findings_posted"):
+            covered = (
+                f"{coverage:.0f}%" if coverage is not None else "—"
             )
-            # A level is a *cumulative* standing, so it has to come from lifetime
-            # points, not from the week's. Deriving it from the weekly total put
-            # every single person on 🥉 Bronze in every digest forever — the
-            # column read as "nobody is getting anywhere", in the one place the
-            # ladder is supposed to mean something.
-            lifetime = {
-                row["username"]: int(row["points"] or 0)
-                for row in engagement.points_leaderboard(
-                    conn, limit=1000, project_path=project
-                )
-            }
-            badges = engagement.achievements_in_week(conn, iso_week, project)
+            bits.append(
+                f"📊 **{covered}** of {stats['findings_posted']} findings rated"
+            )
+        if grade is not None:
+            bits.append(f"🤖 reviewer scored **{float(grade):.2f}/5**")
+        if stats.get("replies"):
+            bits.append(
+                f"💬 {_plural(int(stats['replies']), 'written reply', 'written replies')}"
+            )
+        if bits:
+            lines.append(" · ".join(bits))
 
-            if not (awards or points or badges or stats.get("findings_posted")):
-                continue
-            anything = True
-            summary["projects"][project] = {
-                "stats": stats,
-                "awards": len(awards),
-                "badges": len(badges),
-            }
-
+        if awards:
             lines.append("")
-            lines.append(f"**{project}**")
-
-            # The two numbers the team can act on, first.
-            coverage = stats.get("coverage_pct")
-            grade = stats.get("agent_grade")
-            bits = []
-            if stats.get("findings_posted"):
-                covered = (
-                    f"{coverage:.0f}%" if coverage is not None else "—"
+            lines.append("| | Award | Winner | |")
+            lines.append("|:-:|---|---|---|")
+            # Catalogue order, not database order: the same categories in the
+            # same places every week is what makes the message skimmable.
+            by_cat = {a["category"]: a for a in awards}
+            for meta in engagement.WEEKLY_AWARDS:
+                row = by_cat.get(meta.key)
+                if not row:
+                    continue
+                lines.append(
+                    f"| {meta.emoji} | **{meta.label}** | "
+                    f"{_who(row['username'], row.get('user_name'))} | "
+                    f"{_fmt_value(meta.key, row.get('value'))} |"
                 )
-                bits.append(
-                    f"📊 **{covered}** of {stats['findings_posted']} findings rated"
+
+        if points:
+            lines.append("")
+            lines.append("| # | Who | This week | Total | Level |")
+            lines.append("|:-:|---|:-:|:-:|---|")
+            for i, row in enumerate(points, start=1):
+                total = lifetime.get(row["username"], int(row["points"] or 0))
+                emoji, level = engagement.level_for(total)
+                lines.append(
+                    f"| {i} | {_who(row['username'], row.get('user_name'))} | "
+                    f"**{row['points']}** | {total} | {emoji} {level} |"
                 )
-            if grade is not None:
-                bits.append(f"🤖 reviewer scored **{float(grade):.2f}/5**")
-            if stats.get("replies"):
-                bits.append(
-                    f"💬 {_plural(int(stats['replies']), 'written reply', 'written replies')}"
+
+        if badges:
+            lines.append("")
+            lines.append("**🎖️ Unlocked this week**")
+            for b in badges:
+                label = b.get("label") or b["achievement_key"]
+                lines.append(
+                    f"- {b.get('emoji') or '🏅'} **{label}** — "
+                    f"{_who(b['username'], b.get('user_name'))}"
                 )
-            if bits:
-                lines.append(" · ".join(bits))
-
-            if awards:
-                lines.append("")
-                lines.append("| | Award | Winner | |")
-                lines.append("|:-:|---|---|---|")
-                # Catalogue order, not database order: the same categories in the
-                # same places every week is what makes the message skimmable.
-                by_cat = {a["category"]: a for a in awards}
-                for meta in engagement.WEEKLY_AWARDS:
-                    row = by_cat.get(meta.key)
-                    if not row:
-                        continue
-                    lines.append(
-                        f"| {meta.emoji} | **{meta.label}** | "
-                        f"{_who(row['username'], row.get('user_name'))} | "
-                        f"{_fmt_value(meta.key, row.get('value'))} |"
-                    )
-
-            if points:
-                lines.append("")
-                lines.append("| # | Who | This week | Total | Level |")
-                lines.append("|:-:|---|:-:|:-:|---|")
-                for i, row in enumerate(points, start=1):
-                    total = lifetime.get(row["username"], int(row["points"] or 0))
-                    emoji, level = engagement.level_for(total)
-                    lines.append(
-                        f"| {i} | {_who(row['username'], row.get('user_name'))} | "
-                        f"**{row['points']}** | {total} | {emoji} {level} |"
-                    )
-
-            if badges:
-                lines.append("")
-                lines.append("**🎖️ Unlocked this week**")
-                for b in badges:
-                    label = b.get("label") or b["achievement_key"]
-                    lines.append(
-                        f"- {b.get('emoji') or '🏅'} **{label}** — "
-                        f"{_who(b['username'], b.get('user_name'))}"
-                    )
 
     if not anything:
         lines.append("")
@@ -269,27 +277,6 @@ def post_to_mattermost(message: str, channel_id: str) -> dict:
         raise RuntimeError(f"Mattermost returned {e.code}: {detail}") from None
 
 
-def resolve_projects(explicit: str | None) -> list[str]:
-    """Which projects the digest covers.
-
-    ``--project`` wins, then ``DIGEST_PROJECTS``, then every project that has
-    ever produced a rating or a reply.
-    """
-    if explicit:
-        return [explicit]
-    configured = (os.getenv("DIGEST_PROJECTS") or "").strip()
-    if configured:
-        return [p.strip() for p in configured.split(",") if p.strip()]
-    with storage.get_engine().connect() as conn:
-        return sorted(
-            {
-                row["project_path"]
-                for row in engagement.active_weeks(conn)
-                if row["project_path"]
-            }
-        )
-
-
 @dataclass
 class DigestOutcome:
     """What one digest attempt did. ``status`` is the vocabulary the
@@ -318,14 +305,7 @@ def run_digest(
     ``--week`` re-post has to work regardless of what that table says — that is the
     recovery path for a week whose claim is stuck.
     """
-    try:
-        projects = resolve_projects(project)
-    except Exception as e:  # noqa: BLE001
-        return DigestOutcome(iso_week, "error",
-                             error=f"cannot reach the collector database: {e}")
-    if not projects:
-        return DigestOutcome(iso_week, "empty",
-                             error="no projects have any engagement data yet")
+    scope = project or engagement.ALL_PROJECTS
 
     # Settle the week before reporting it, so a missed scheduled run or a rating
     # that arrived late cannot leave the announcement disagreeing with the
@@ -338,7 +318,7 @@ def run_digest(
                   file=sys.stderr)
 
     try:
-        message, summary = build_message(iso_week, projects)
+        message, summary = build_message(iso_week, scope)
     except Exception as e:  # noqa: BLE001
         return DigestOutcome(iso_week, "error", error=f"could not build: {e}")
 
@@ -347,7 +327,7 @@ def run_digest(
 
     # A week nobody touched gets no message. A weekly "nothing to report" post is
     # how a digest channel gets muted, and muting it costs more than the silence.
-    if not summary.get("projects"):
+    if not summary.get("stats"):
         return DigestOutcome(iso_week, "empty", message=message,
                              error="no activity in this week")
 

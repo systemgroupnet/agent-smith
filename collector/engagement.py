@@ -610,6 +610,15 @@ def backfill(conn) -> dict[str, Any]:
 # because it is embedded in a Python string that is itself embedded in SQL.
 _WEEK_KEY = "'IYYY\"-W\"IW'"
 
+#: Scope meaning "every project at once". Stored in ``weekly_awards.project_path``
+#: for the global winners, and accepted by every query below in place of a real
+#: path. The digest reports globally — a developer rating a comment is engaging
+#: with the reviewer whichever repository it happened in, and splitting the
+#: announcement by project fragments a small team into smaller ones. Per-project
+#: rows are still computed alongside, because the Grafana panels filter
+#: ``$project`` and a global row cannot honour that picker.
+ALL_PROJECTS = "*"
+
 
 @dataclass(frozen=True)
 class WeeklyAward:
@@ -647,7 +656,7 @@ _WEEKLY_AWARD_SQL: dict[str, str] = {
     "top_rater": _CANONICAL_CTE + f"""
         SELECT username, MAX(user_name) AS user_name, COUNT(*)::numeric AS value
         FROM scores
-        WHERE project_path = :project
+        WHERE (:project = '*' OR project_path = :project)
           AND username IS NOT NULL
           AND to_char(rated_at::timestamptz, {_WEEK_KEY}) = :week
         GROUP BY username
@@ -666,7 +675,7 @@ _WEEKLY_AWARD_SQL: dict[str, str] = {
                    )))
                ) / 3600.0)::numeric AS value
         FROM scores
-        WHERE project_path = :project
+        WHERE (:project = '*' OR project_path = :project)
           AND username IS NOT NULL
           AND artifact_posted_at IS NOT NULL
           AND to_char(rated_at::timestamptz, {_WEEK_KEY}) = :week
@@ -682,7 +691,7 @@ _WEEKLY_AWARD_SQL: dict[str, str] = {
                MAX(author_name) AS user_name,
                COUNT(*)::numeric AS value
         FROM comment_replies
-        WHERE project_path = :project
+        WHERE (:project = '*' OR project_path = :project)
           AND author_username IS NOT NULL
           AND length(btrim(COALESCE(body, ''))) >= 15
           AND to_char(received_at::timestamptz, {_WEEK_KEY}) = :week
@@ -703,7 +712,7 @@ _WEEKLY_AWARD_SQL: dict[str, str] = {
         LEFT JOIN scores cs
                ON cs.note_id = rc.note_id
               AND cs.username = rc.mr_author_username
-        WHERE rc.project_path = :project
+        WHERE (:project = '*' OR rc.project_path = :project)
           AND rc.mr_author_username IS NOT NULL
           AND to_char(rc.received_at::timestamptz, {_WEEK_KEY}) = :week
         GROUP BY rc.mr_author_username
@@ -715,7 +724,7 @@ _WEEKLY_AWARD_SQL: dict[str, str] = {
         WITH ledger AS ({POINTS_LEDGER_SQL})
         SELECT username, MAX(user_name) AS user_name, SUM(points)::numeric AS value
         FROM ledger
-        WHERE project_path = :project
+        WHERE (:project = '*' OR project_path = :project)
           AND username IS NOT NULL
           AND to_char(occurred_at::timestamptz, {_WEEK_KEY}) = :week
         GROUP BY username
@@ -834,7 +843,7 @@ def compute_weekly_awards(
 
 
 def backfill_weekly_awards(conn) -> dict[str, Any]:
-    """Compute awards for every week that has ever had activity, per project.
+    """Compute awards for every week that has ever had activity.
 
     Run from migration 0011, so the feature arrives with its whole history
     settled instead of starting from an empty board — the first Mattermost digest
@@ -846,6 +855,14 @@ def backfill_weekly_awards(conn) -> dict[str, Any]:
     total = 0
     for row in weeks:
         total += len(compute_weekly_awards(conn, row["iso_week"], row["project_path"]))
+    # …and once more across every project at the same time. The digest reports
+    # globally (a developer rating a comment is engaging with the reviewer
+    # whichever repository it happened in), and "top rater across everything"
+    # cannot be derived from per-project winners — it has to be its own query.
+    # The per-project rows above are kept for the Grafana panels, which filter
+    # $project and cannot read a global row.
+    for iso_week in sorted({row["iso_week"] for row in weeks}):
+        total += len(compute_weekly_awards(conn, iso_week, ALL_PROJECTS))
     return {"weeks": len(weeks), "awards": total}
 
 
@@ -912,13 +929,13 @@ def weekly_stats(conn, iso_week: str, project_path: str) -> dict[str, Any]:
             WITH scoped AS ({_CANONICAL_CTE} SELECT * FROM scores),
             rated AS (
                 SELECT * FROM scoped
-                WHERE project_path = :project
+                WHERE (:project = '*' OR project_path = :project)
                   AND to_char(rated_at::timestamptz, {_WEEK_KEY}) = :week
             ),
             posted AS (
                 SELECT rc.note_id
                 FROM review_comments rc
-                WHERE rc.project_path = :project
+                WHERE (:project = '*' OR rc.project_path = :project)
                   AND to_char(rc.received_at::timestamptz, {_WEEK_KEY}) = :week
             )
             SELECT
@@ -931,7 +948,7 @@ def weekly_stats(conn, iso_week: str, project_path: str) -> dict[str, Any]:
               (SELECT ROUND(AVG(score)::numeric, 2) FROM rated
                 WHERE kind = 'finding')                             AS agent_grade,
               (SELECT COUNT(*) FROM comment_replies
-                WHERE project_path = :project
+                WHERE (:project = '*' OR project_path = :project)
                   AND length(btrim(COALESCE(body, ''))) >= 15
                   AND to_char(received_at::timestamptz, {_WEEK_KEY}) = :week
               )                                                     AS replies
@@ -951,7 +968,7 @@ def weekly_stats(conn, iso_week: str, project_path: str) -> dict[str, Any]:
 
 def achievements_in_week(
     conn, iso_week: str, project_path: Optional[str] = None
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]]:  # noqa: D401
     """Badges whose threshold was crossed during one ISO week.
 
     Reads ``awarded_at``, which is the *crossing* time rather than the write
@@ -960,7 +977,7 @@ def achievements_in_week(
     """
     clauses = [f"to_char(awarded_at::timestamptz, {_WEEK_KEY}) = :week"]
     params: dict[str, Any] = {"week": iso_week}
-    if project_path:
+    if project_path and project_path != ALL_PROJECTS:
         clauses.append("project_path = :project")
         params["project"] = project_path
 
@@ -977,9 +994,18 @@ def achievements_in_week(
         params,
     ).mappings().all()
 
-    out = []
+    # Deduplicate across projects. Achievements are stored per project (every
+    # Grafana panel filters $project, so a project-less row could not honour the
+    # picker), but the digest reports globally — and listing somebody's "First
+    # Contact" twice because they rate in two repositories reads as a bug, not as
+    # two accomplishments. Earliest crossing wins, so the date stays truthful.
+    out, seen = [], set()
     for row in rows:
         item = dict(row)
+        key = (item.get("username"), item.get("achievement_key"))
+        if key in seen:
+            continue
+        seen.add(key)
         meta = ACHIEVEMENTS_BY_KEY.get(item.get("achievement_key", ""))
         item["emoji"] = meta.emoji if meta else None
         item["label"] = meta.label if meta else None
