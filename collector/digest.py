@@ -105,10 +105,27 @@ def _fmt_value(award_key: str, value) -> str:
 
 
 def _who(username, user_name) -> str:
-    """Display name with the handle, or just the handle when that is all we have."""
+    """Display name with the handle, or just the handle when that is all we have.
+
+    The ``@`` makes this a real Mattermost mention, so it is spent deliberately —
+    see ``_name_only``.
+    """
     if user_name and user_name != username:
         return f"{user_name} (@{username})"
     return f"@{username}"
+
+
+def _name_only(username, user_name) -> str:
+    """The person's name with **no** ``@``, so it does not notify anybody.
+
+    The badge list runs to thirty-odd entries in a busy week (every "First
+    Contact" and "First Words" fires once per person, so the early weeks are
+    front-loaded), and @-mentioning all of them turns a celebration into a
+    notification storm — which is how a digest channel gets muted. Award winners
+    and the points leaderboard keep their handles: being told you won is the
+    entire point of those lines.
+    """
+    return user_name or username
 
 
 def build_message(
@@ -231,7 +248,7 @@ def build_message(
                 label = b.get("label") or b["achievement_key"]
                 lines.append(
                     f"- {b.get('emoji') or '🏅'} **{label}** — "
-                    f"{_who(b['username'], b.get('user_name'))}"
+                    f"{_name_only(b['username'], b.get('user_name'))}"
                 )
 
     if not anything:

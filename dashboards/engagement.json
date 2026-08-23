@@ -1,0 +1,1298 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "Scorecard — pick a person in the filter above",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Sum over the selected people, projects and time range. rate a finding 2 · summary 1 · +1 peer · +1 within 24h · first substantive reply 5 · other replies 1.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "purple",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Filters: $project, $user and the time picker, on every panel without\n-- exception (see dashboards/README.md). The points weights below come from\n-- collector/engagement.py::POINTS_LEDGER_SQL — that module is the source of\n-- truth; regenerate this panel if they change.\nWITH ledger AS (\nWITH unified AS (\n    SELECT 'finding'::text AS kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM comment_scores\n    UNION ALL\n    SELECT 'summary'::text AS kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM summary_scores\n),\ncanonical AS (\n    SELECT DISTINCT ON (note_id, user_id)\n           kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM unified\n    -- latest click wins; emoji breaks a tie so the row is deterministic when two\n    -- awards share a received_at (a webhook redelivery burst).\n    ORDER BY note_id, user_id, received_at DESC, emoji DESC\n),\nscores AS (\n    SELECT c.kind,\n           c.note_id,\n           c.project_path,\n           c.mr_id,\n           c.username,\n           c.user_name,\n           -- Present for *quality* reads only (the agent's own grade). No\n           -- engagement weight anywhere in this module reads it: paying a rater\n           -- for the number they picked would inflate the one signal the ratings\n           -- exist to measure.\n           c.score,\n           c.received_at AS rated_at,\n           COALESCE(rc.mr_author_username, rs.mr_author_username) AS mr_author_username,\n           COALESCE(rc.received_at, rs.received_at)               AS artifact_posted_at\n    FROM canonical c\n    LEFT JOIN review_comments  rc ON c.kind = 'finding' AND rc.note_id = c.note_id\n    LEFT JOIN review_summaries rs ON c.kind = 'summary' AND rs.note_id = c.note_id\n)\n\nSELECT project_path,\n       username,\n       user_name,\n       to_char((rated_at::timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') || '+00:00' AS occurred_at,\n       CASE WHEN kind = 'finding' THEN 'rate_finding' ELSE 'rate_summary' END AS action,\n       kind,\n       mr_id,\n       note_id,\n       CASE WHEN kind = 'finding' THEN 2 ELSE 1 END AS base_points,\n       CASE WHEN mr_author_username IS NOT NULL AND mr_author_username <> username THEN 1 ELSE 0 END AS peer_bonus,\n       CASE WHEN artifact_posted_at IS NOT NULL AND rated_at::timestamptz <= artifact_posted_at::timestamptz + interval '24 hours' THEN 1 ELSE 0 END AS speed_bonus,\n       (CASE WHEN kind = 'finding' THEN 2 ELSE 1 END)\n       + (CASE WHEN mr_author_username IS NOT NULL AND mr_author_username <> username THEN 1 ELSE 0 END)\n       + (CASE WHEN artifact_posted_at IS NOT NULL AND rated_at::timestamptz <= artifact_posted_at::timestamptz + interval '24 hours' THEN 1 ELSE 0 END) AS points\nFROM scores\nWHERE username IS NOT NULL\n\nUNION ALL\n\nSELECT project_path,\n       username,\n       user_name,\n       occurred_at,\n       'reply' AS action,\n       kind,\n       mr_id,\n       note_id,\n       points AS base_points,\n       0 AS peer_bonus,\n       0 AS speed_bonus,\n       points\nFROM (\n    SELECT cr.project_path,\n           cr.author_username AS username,\n           cr.author_name     AS user_name,\n           to_char((cr.received_at::timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') || '+00:00' AS occurred_at,\n           COALESCE(cr.parent_kind, 'finding') AS kind,\n           cr.mr_id,\n           cr.note_id,\n           -- Full value for the first substantive reply in a thread; a token\n           -- acknowledgement, or a follow-up in a thread this person has already\n           -- replied to, earns 1. The weight goes to the reply that carries the\n           -- feedback rather than to the count of replies.\n           CASE WHEN length(btrim(COALESCE(cr.body, ''))) >= 15\n                     AND row_number() OVER (\n                         PARTITION BY cr.author_username, cr.discussion_id\n                         ORDER BY cr.received_at\n                     ) = 1\n                THEN 5 ELSE 1 END AS points\n    FROM comment_replies cr\n    WHERE cr.author_username IS NOT NULL\n) replies\n)\nSELECT COALESCE(SUM(points), 0) :: int AS \"Points\"\nFROM ledger\nWHERE $__timeFilter(occurred_at :: timestamptz)\n  AND project_path IN ($project)\n  AND username IN ($user);",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Points",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Distinct achievements, counted once even when earned in two projects.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "orange",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Distinct badges held. Achievements are stored per project (every panel here\n-- filters $project), so the same badge earned in two repositories is counted\n-- once — showing it twice reads as a bug, not as two accomplishments.\nSELECT COUNT(DISTINCT achievement_key) AS \"Badges\"\nFROM achievements\nWHERE $__timeFilter(awarded_at :: timestamptz)\n  AND project_path IN ($project)\n  AND username IN ($user);",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Badges held",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Deduped to one per (comment, rater).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- One row per (comment, rater): comment_scores is unique on\n-- (note_id, user_id, emoji), so a rater who clicked 3, reconsidered and clicked 4\n-- without revoking the 3 would otherwise be counted twice.\nSELECT COUNT(*) AS \"Ratings given\"\nFROM (\n  SELECT DISTINCT ON (note_id, user_id) note_id, user_id\n  FROM comment_scores\n  WHERE $__timeFilter(received_at :: timestamptz)\n    AND project_path IN ($project)\n    AND username IN ($user)\n  ORDER BY note_id, user_id, received_at DESC, emoji DESC\n) canonical;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Ratings given",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Written feedback is worth the most — it is the only thing that tells the reviewer *why*.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS \"Replies written\"\nFROM comment_replies\nWHERE $__timeFilter(received_at :: timestamptz)\n  AND project_path IN ($project)\n  AND author_username IN ($user);",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Replies written",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Share of findings that got at least one rating. Not filtered by person — this is the number the whole team owns.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "id": 6,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Team-wide share of findings that got at least one rating. Deliberately NOT\n-- filtered by $user: it is the one number the whole team owns, and slicing it per\n-- person would answer a different question (that is \"Coverage by developer\").\nSELECT\n  ROUND(\n    100.0 * COUNT(DISTINCT cs.note_id) / NULLIF(COUNT(DISTINCT rc.note_id), 0), 1\n  ) AS \"Coverage\"\nFROM review_comments rc\nLEFT JOIN comment_scores cs ON cs.note_id = rc.note_id\nWHERE $__timeFilter(rc.received_at :: timestamptz)\n  AND rc.project_path IN ($project);",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Team rating coverage (target 80%)",
+      "type": "gauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 10,
+      "panels": [],
+      "title": "Points & levels",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Levels: 🥉 Bronze < 50 · 🥈 Silver < 150 · 🥇 Gold < 400 · 💎 Diamond. Never scored on the rating value given — that would inflate the signal the ratings exist to measure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 14,
+        "x": 0,
+        "y": 7
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Points"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Filters: $project, $user and the time picker, on every panel without\n-- exception (see dashboards/README.md). The points weights below come from\n-- collector/engagement.py::POINTS_LEDGER_SQL — that module is the source of\n-- truth; regenerate this panel if they change.\n--\n--   rate a finding 2 · rate a summary 1 · +1 someone else's MR · +1 within 24h\n--   first substantive reply in a thread 5 · any other reply 1\n--\n-- Nothing here reads the score the rater gave: paying people for the number they\n-- pick would inflate the one signal the ratings exist to measure.\nWITH ledger AS (\nWITH unified AS (\n    SELECT 'finding'::text AS kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM comment_scores\n    UNION ALL\n    SELECT 'summary'::text AS kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM summary_scores\n),\ncanonical AS (\n    SELECT DISTINCT ON (note_id, user_id)\n           kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM unified\n    -- latest click wins; emoji breaks a tie so the row is deterministic when two\n    -- awards share a received_at (a webhook redelivery burst).\n    ORDER BY note_id, user_id, received_at DESC, emoji DESC\n),\nscores AS (\n    SELECT c.kind,\n           c.note_id,\n           c.project_path,\n           c.mr_id,\n           c.username,\n           c.user_name,\n           -- Present for *quality* reads only (the agent's own grade). No\n           -- engagement weight anywhere in this module reads it: paying a rater\n           -- for the number they picked would inflate the one signal the ratings\n           -- exist to measure.\n           c.score,\n           c.received_at AS rated_at,\n           COALESCE(rc.mr_author_username, rs.mr_author_username) AS mr_author_username,\n           COALESCE(rc.received_at, rs.received_at)               AS artifact_posted_at\n    FROM canonical c\n    LEFT JOIN review_comments  rc ON c.kind = 'finding' AND rc.note_id = c.note_id\n    LEFT JOIN review_summaries rs ON c.kind = 'summary' AND rs.note_id = c.note_id\n)\n\nSELECT project_path,\n       username,\n       user_name,\n       to_char((rated_at::timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') || '+00:00' AS occurred_at,\n       CASE WHEN kind = 'finding' THEN 'rate_finding' ELSE 'rate_summary' END AS action,\n       kind,\n       mr_id,\n       note_id,\n       CASE WHEN kind = 'finding' THEN 2 ELSE 1 END AS base_points,\n       CASE WHEN mr_author_username IS NOT NULL AND mr_author_username <> username THEN 1 ELSE 0 END AS peer_bonus,\n       CASE WHEN artifact_posted_at IS NOT NULL AND rated_at::timestamptz <= artifact_posted_at::timestamptz + interval '24 hours' THEN 1 ELSE 0 END AS speed_bonus,\n       (CASE WHEN kind = 'finding' THEN 2 ELSE 1 END)\n       + (CASE WHEN mr_author_username IS NOT NULL AND mr_author_username <> username THEN 1 ELSE 0 END)\n       + (CASE WHEN artifact_posted_at IS NOT NULL AND rated_at::timestamptz <= artifact_posted_at::timestamptz + interval '24 hours' THEN 1 ELSE 0 END) AS points\nFROM scores\nWHERE username IS NOT NULL\n\nUNION ALL\n\nSELECT project_path,\n       username,\n       user_name,\n       occurred_at,\n       'reply' AS action,\n       kind,\n       mr_id,\n       note_id,\n       points AS base_points,\n       0 AS peer_bonus,\n       0 AS speed_bonus,\n       points\nFROM (\n    SELECT cr.project_path,\n           cr.author_username AS username,\n           cr.author_name     AS user_name,\n           to_char((cr.received_at::timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') || '+00:00' AS occurred_at,\n           COALESCE(cr.parent_kind, 'finding') AS kind,\n           cr.mr_id,\n           cr.note_id,\n           -- Full value for the first substantive reply in a thread; a token\n           -- acknowledgement, or a follow-up in a thread this person has already\n           -- replied to, earns 1. The weight goes to the reply that carries the\n           -- feedback rather than to the count of replies.\n           CASE WHEN length(btrim(COALESCE(cr.body, ''))) >= 15\n                     AND row_number() OVER (\n                         PARTITION BY cr.author_username, cr.discussion_id\n                         ORDER BY cr.received_at\n                     ) = 1\n                THEN 5 ELSE 1 END AS points\n    FROM comment_replies cr\n    WHERE cr.author_username IS NOT NULL\n) replies\n)\nSELECT\n  COALESCE(user_name, '@' || username) AS \"Who\",\n  username AS \"Username\",\n  SUM(points) :: int AS \"Points\",\n  CASE\n    WHEN SUM(points) >= 400 THEN '💎 Diamond'\n    WHEN SUM(points) >= 150 THEN '🥇 Gold'\n    WHEN SUM(points) >= 50 THEN '🥈 Silver'\n    ELSE '🥉 Bronze'\n  END AS \"Level\",\n  COUNT(*) FILTER (WHERE action <> 'reply') :: int AS \"Ratings\",\n  COUNT(*) FILTER (WHERE action = 'reply') :: int AS \"Replies\",\n  SUM(peer_bonus) :: int AS \"Peer bonus\",\n  SUM(speed_bonus) :: int AS \"Speed bonus\"\nFROM ledger\nWHERE $__timeFilter(occurred_at :: timestamptz)\n  AND project_path IN ($project)\n  AND username IN ($user)\nGROUP BY username, user_name\nORDER BY \"Points\" DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Leaderboard",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "One line per selected person. With a single person picked in the filter, this is their own trend.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 10,
+        "x": 14,
+        "y": 7
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Filters: $project, $user and the time picker, on every panel without\n-- exception (see dashboards/README.md). The points weights below come from\n-- collector/engagement.py::POINTS_LEDGER_SQL — that module is the source of\n-- truth; regenerate this panel if they change.\n-- Points earned per ISO week. With one person selected in $user this is their\n-- own trend; with All it is the team's.\nWITH ledger AS (\nWITH unified AS (\n    SELECT 'finding'::text AS kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM comment_scores\n    UNION ALL\n    SELECT 'summary'::text AS kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM summary_scores\n),\ncanonical AS (\n    SELECT DISTINCT ON (note_id, user_id)\n           kind, note_id, project_path, mr_id,\n           user_id, username, user_name, emoji, score, received_at\n    FROM unified\n    -- latest click wins; emoji breaks a tie so the row is deterministic when two\n    -- awards share a received_at (a webhook redelivery burst).\n    ORDER BY note_id, user_id, received_at DESC, emoji DESC\n),\nscores AS (\n    SELECT c.kind,\n           c.note_id,\n           c.project_path,\n           c.mr_id,\n           c.username,\n           c.user_name,\n           -- Present for *quality* reads only (the agent's own grade). No\n           -- engagement weight anywhere in this module reads it: paying a rater\n           -- for the number they picked would inflate the one signal the ratings\n           -- exist to measure.\n           c.score,\n           c.received_at AS rated_at,\n           COALESCE(rc.mr_author_username, rs.mr_author_username) AS mr_author_username,\n           COALESCE(rc.received_at, rs.received_at)               AS artifact_posted_at\n    FROM canonical c\n    LEFT JOIN review_comments  rc ON c.kind = 'finding' AND rc.note_id = c.note_id\n    LEFT JOIN review_summaries rs ON c.kind = 'summary' AND rs.note_id = c.note_id\n)\n\nSELECT project_path,\n       username,\n       user_name,\n       to_char((rated_at::timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') || '+00:00' AS occurred_at,\n       CASE WHEN kind = 'finding' THEN 'rate_finding' ELSE 'rate_summary' END AS action,\n       kind,\n       mr_id,\n       note_id,\n       CASE WHEN kind = 'finding' THEN 2 ELSE 1 END AS base_points,\n       CASE WHEN mr_author_username IS NOT NULL AND mr_author_username <> username THEN 1 ELSE 0 END AS peer_bonus,\n       CASE WHEN artifact_posted_at IS NOT NULL AND rated_at::timestamptz <= artifact_posted_at::timestamptz + interval '24 hours' THEN 1 ELSE 0 END AS speed_bonus,\n       (CASE WHEN kind = 'finding' THEN 2 ELSE 1 END)\n       + (CASE WHEN mr_author_username IS NOT NULL AND mr_author_username <> username THEN 1 ELSE 0 END)\n       + (CASE WHEN artifact_posted_at IS NOT NULL AND rated_at::timestamptz <= artifact_posted_at::timestamptz + interval '24 hours' THEN 1 ELSE 0 END) AS points\nFROM scores\nWHERE username IS NOT NULL\n\nUNION ALL\n\nSELECT project_path,\n       username,\n       user_name,\n       occurred_at,\n       'reply' AS action,\n       kind,\n       mr_id,\n       note_id,\n       points AS base_points,\n       0 AS peer_bonus,\n       0 AS speed_bonus,\n       points\nFROM (\n    SELECT cr.project_path,\n           cr.author_username AS username,\n           cr.author_name     AS user_name,\n           to_char((cr.received_at::timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') || '+00:00' AS occurred_at,\n           COALESCE(cr.parent_kind, 'finding') AS kind,\n           cr.mr_id,\n           cr.note_id,\n           -- Full value for the first substantive reply in a thread; a token\n           -- acknowledgement, or a follow-up in a thread this person has already\n           -- replied to, earns 1. The weight goes to the reply that carries the\n           -- feedback rather than to the count of replies.\n           CASE WHEN length(btrim(COALESCE(cr.body, ''))) >= 15\n                     AND row_number() OVER (\n                         PARTITION BY cr.author_username, cr.discussion_id\n                         ORDER BY cr.received_at\n                     ) = 1\n                THEN 5 ELSE 1 END AS points\n    FROM comment_replies cr\n    WHERE cr.author_username IS NOT NULL\n) replies\n)\nSELECT\n  date_trunc('week', occurred_at :: timestamptz) AS \"time\",\n  COALESCE(user_name, '@' || username) AS metric,\n  SUM(points) :: int AS value\nFROM ledger\nWHERE $__timeFilter(occurred_at :: timestamptz)\n  AND project_path IN ($project)\n  AND username IN ($user)\nGROUP BY 1, 2\nORDER BY 1;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Points per week",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 20,
+      "panels": [],
+      "title": "Achievements",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Durable badges — earned once and never revoked, dated to when the threshold was crossed rather than when the row was written.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "id": 21,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Badges"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Every badge each person holds. awarded_at is when the threshold was *crossed*\n-- (derived from the rating or reply that crossed it), so this is truthful for the\n-- history credited by migration 0011's backfill too.\nSELECT\n  COALESCE(user_name, '@' || username) AS \"Who\",\n  COUNT(DISTINCT achievement_key) AS \"Badges\",\n  STRING_AGG(DISTINCT CASE achievement_key\n    WHEN 'first_rating' THEN '🌱'\n    WHEN 'ratings_10' THEN '⭐'\n    WHEN 'ratings_50' THEN '🌟'\n    WHEN 'ratings_100' THEN '💯'\n    WHEN 'ratings_500' THEN '🏛️'\n    WHEN 'first_reply' THEN '💬'\n    WHEN 'replies_10' THEN '📝'\n    WHEN 'replies_50' THEN '🗣️'\n    WHEN 'peer_10' THEN '🤝'\n    WHEN 'peer_50' THEN '🧭'\n    WHEN 'fast_10' THEN '⚡'\n    WHEN 'fast_50' THEN '🚀'\n    WHEN 'streak_4w' THEN '🔥'\n    WHEN 'streak_12w' THEN '🧗'\n    WHEN 'streak_26w' THEN '🏔️'\n    WHEN 'perfect_1' THEN '🎯'\n    WHEN 'perfect_5' THEN '🏆'\n    WHEN 'perfect_20' THEN '👑'\n    ELSE '🏅'\n  END, ' ') AS \"Unlocked\"\nFROM achievements\nWHERE $__timeFilter(awarded_at :: timestamptz)\n  AND project_path IN ($project)\n  AND username IN ($user)\nGROUP BY username, user_name\nORDER BY \"Badges\" DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Achievement wall",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Newly crossed thresholds, most recent first.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "id": 22,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "When"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Newly crossed thresholds, most recent first.\nSELECT\n  awarded_at :: timestamptz AS \"When\",\n  COALESCE(user_name, '@' || username) AS \"Who\",\n  CASE achievement_key\n    WHEN 'first_rating' THEN '🌱'\n    WHEN 'ratings_10' THEN '⭐'\n    WHEN 'ratings_50' THEN '🌟'\n    WHEN 'ratings_100' THEN '💯'\n    WHEN 'ratings_500' THEN '🏛️'\n    WHEN 'first_reply' THEN '💬'\n    WHEN 'replies_10' THEN '📝'\n    WHEN 'replies_50' THEN '🗣️'\n    WHEN 'peer_10' THEN '🤝'\n    WHEN 'peer_50' THEN '🧭'\n    WHEN 'fast_10' THEN '⚡'\n    WHEN 'fast_50' THEN '🚀'\n    WHEN 'streak_4w' THEN '🔥'\n    WHEN 'streak_12w' THEN '🧗'\n    WHEN 'streak_26w' THEN '🏔️'\n    WHEN 'perfect_1' THEN '🎯'\n    WHEN 'perfect_5' THEN '🏆'\n    WHEN 'perfect_20' THEN '👑'\n    ELSE '🏅'\n  END || ' ' || CASE achievement_key\n    WHEN 'first_rating' THEN 'First Contact'\n    WHEN 'ratings_10' THEN 'Ten Rated'\n    WHEN 'ratings_50' THEN 'Half Century'\n    WHEN 'ratings_100' THEN 'Century'\n    WHEN 'ratings_500' THEN 'Legend'\n    WHEN 'first_reply' THEN 'First Words'\n    WHEN 'replies_10' THEN 'Conversationalist'\n    WHEN 'replies_50' THEN 'Voice of the Team'\n    WHEN 'peer_10' THEN 'Good Neighbour'\n    WHEN 'peer_50' THEN 'Community Pillar'\n    WHEN 'fast_10' THEN 'Same-Day Service'\n    WHEN 'fast_50' THEN 'Always On'\n    WHEN 'streak_4w' THEN 'Month on Fire'\n    WHEN 'streak_12w' THEN 'Quarter Climber'\n    WHEN 'streak_26w' THEN 'Half-Year Hero'\n    WHEN 'perfect_1' THEN 'Clean Sweep'\n    WHEN 'perfect_5' THEN 'Perfectionist'\n    WHEN 'perfect_20' THEN 'Untouchable'\n    ELSE achievement_key\n  END AS \"Achievement\",\n  CASE achievement_key\n    WHEN 'first_rating' THEN 'Rated your first review comment'\n    WHEN 'ratings_10' THEN 'Rated 10 review comments'\n    WHEN 'ratings_50' THEN 'Rated 50 review comments'\n    WHEN 'ratings_100' THEN 'Rated 100 review comments'\n    WHEN 'ratings_500' THEN 'Rated 500 review comments'\n    WHEN 'first_reply' THEN 'Replied to the reviewer for the first time'\n    WHEN 'replies_10' THEN 'Wrote 10 replies to review comments'\n    WHEN 'replies_50' THEN 'Wrote 50 replies to review comments'\n    WHEN 'peer_10' THEN 'Rated 10 comments on other people''s merge requests'\n    WHEN 'peer_50' THEN 'Rated 50 comments on other people''s merge requests'\n    WHEN 'fast_10' THEN 'Rated 10 comments within a day of them being posted'\n    WHEN 'fast_50' THEN 'Rated 50 comments within a day of them being posted'\n    WHEN 'streak_4w' THEN 'Rated something 4 weeks running'\n    WHEN 'streak_12w' THEN 'Rated something 12 weeks running'\n    WHEN 'streak_26w' THEN 'Rated something 26 weeks running'\n    WHEN 'perfect_1' THEN 'Rated every finding on one of your own merge requests'\n    WHEN 'perfect_5' THEN 'Rated every finding on 5 of your own merge requests'\n    WHEN 'perfect_20' THEN 'Rated every finding on 20 of your own merge requests'\n    ELSE ''\n  END AS \"For\",\n  progress_value AS \"Counter at unlock\"\nFROM achievements\nWHERE $__timeFilter(awarded_at :: timestamptz)\n  AND project_path IN ($project)\n  AND username IN ($user)\nORDER BY awarded_at DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Recently unlocked",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "A rung nobody reaches is either too hard or measuring the wrong thing.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "orange",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "id": 23,
+      "options": {
+        "barRadius": 0.15,
+        "barWidth": 0.7,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Which rungs of the ladder people actually reach. A badge nobody has is either\n-- too hard or measuring the wrong thing.\nSELECT\n  CASE achievement_key\n    WHEN 'first_rating' THEN '🌱'\n    WHEN 'ratings_10' THEN '⭐'\n    WHEN 'ratings_50' THEN '🌟'\n    WHEN 'ratings_100' THEN '💯'\n    WHEN 'ratings_500' THEN '🏛️'\n    WHEN 'first_reply' THEN '💬'\n    WHEN 'replies_10' THEN '📝'\n    WHEN 'replies_50' THEN '🗣️'\n    WHEN 'peer_10' THEN '🤝'\n    WHEN 'peer_50' THEN '🧭'\n    WHEN 'fast_10' THEN '⚡'\n    WHEN 'fast_50' THEN '🚀'\n    WHEN 'streak_4w' THEN '🔥'\n    WHEN 'streak_12w' THEN '🧗'\n    WHEN 'streak_26w' THEN '🏔️'\n    WHEN 'perfect_1' THEN '🎯'\n    WHEN 'perfect_5' THEN '🏆'\n    WHEN 'perfect_20' THEN '👑'\n    ELSE '🏅'\n  END || ' ' || CASE achievement_key\n    WHEN 'first_rating' THEN 'First Contact'\n    WHEN 'ratings_10' THEN 'Ten Rated'\n    WHEN 'ratings_50' THEN 'Half Century'\n    WHEN 'ratings_100' THEN 'Century'\n    WHEN 'ratings_500' THEN 'Legend'\n    WHEN 'first_reply' THEN 'First Words'\n    WHEN 'replies_10' THEN 'Conversationalist'\n    WHEN 'replies_50' THEN 'Voice of the Team'\n    WHEN 'peer_10' THEN 'Good Neighbour'\n    WHEN 'peer_50' THEN 'Community Pillar'\n    WHEN 'fast_10' THEN 'Same-Day Service'\n    WHEN 'fast_50' THEN 'Always On'\n    WHEN 'streak_4w' THEN 'Month on Fire'\n    WHEN 'streak_12w' THEN 'Quarter Climber'\n    WHEN 'streak_26w' THEN 'Half-Year Hero'\n    WHEN 'perfect_1' THEN 'Clean Sweep'\n    WHEN 'perfect_5' THEN 'Perfectionist'\n    WHEN 'perfect_20' THEN 'Untouchable'\n    ELSE achievement_key\n  END AS \"Achievement\",\n  COUNT(DISTINCT username) AS \"People\"\nFROM achievements\nWHERE $__timeFilter(awarded_at :: timestamptz)\n  AND project_path IN ($project)\n  AND username IN ($user)\nGROUP BY achievement_key\nORDER BY \"People\" DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "How many people hold each badge",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Of the findings left on your merge requests, how many got rated. The fairest metric here — bounded at 100%, so it cannot be farmed by volume.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "id": 24,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Coverage %"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Of the findings the reviewer left on this person's merge requests, how many\n-- carry a rating. Bounded at 100%, so unlike a rating count it cannot be farmed\n-- by volume — which is why it is the fair number to hold people to.\nSELECT\n  rc.mr_author_username AS \"Developer\",\n  COUNT(DISTINCT rc.note_id) AS \"Findings received\",\n  COUNT(DISTINCT cs.note_id) AS \"Rated\",\n  ROUND(100.0 * COUNT(DISTINCT cs.note_id) / COUNT(DISTINCT rc.note_id)) AS \"Coverage %\"\nFROM review_comments rc\nLEFT JOIN comment_scores cs ON cs.note_id = rc.note_id\nWHERE $__timeFilter(rc.received_at :: timestamptz)\n  AND rc.project_path IN ($project)\n  AND rc.mr_author_username IS NOT NULL\n  AND rc.mr_author_username IN ($user)\nGROUP BY rc.mr_author_username\nORDER BY \"Coverage %\" DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Coverage by developer",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 30,
+      "panels": [],
+      "title": "Weekly awards",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Weeks in which this person won a category. NOTE: this is the one panel here that deliberately ignores the Project picker — it counts wins on the global scope, which is what the Mattermost digest announces and therefore what the team considers a win. Per-project winners are in 'Winners by week' beside it.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 0,
+        "y": 35
+      },
+      "id": 31,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Weekly wins"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- How many weeks each person has won something. The global ('*') rows are the\n-- ones the digest announces, so they are what \"won\" means here.\nSELECT\n  COALESCE(user_name, '@' || username) AS \"Who\",\n  COUNT(*) AS \"Weekly wins\",\n  STRING_AGG(DISTINCT CASE category\n    WHEN 'top_rater' THEN '🏅 Top Rater'\n    WHEN 'most_points' THEN '🔥 Most Points'\n    WHEN 'best_feedback' THEN '💬 Best Feedback'\n    WHEN 'fastest' THEN '⚡ Fastest Draw'\n    WHEN 'completionist' THEN '🎯 Completionist'\n    ELSE category\n  END, ', ') AS \"Categories\"\nFROM weekly_awards\nWHERE $__timeFilter(week_start :: timestamptz)\n  AND project_path = '*'\n  AND username IN ($user)\nGROUP BY username, user_name\nORDER BY \"Weekly wins\" DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Weekly wins",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ffrgyjxlmntogb"
+      },
+      "description": "Per-project winners. The digest announces the global ('*') scope, excluded here so this panel keeps honouring the Project picker.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 14,
+        "x": 10,
+        "y": 35
+      },
+      "id": 32,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.6.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ffrgyjxlmntogb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Winners per ISO week, as settled by the collector. Stored rather than\n-- recomputed here: a closed week's result is a fact, and the Mattermost\n-- announcement and this panel have to still agree a year from now.\n--\n-- project_path = '*' rows are the global winners the digest announces (top rater\n-- across everything cannot be derived from per-project winners); they are\n-- excluded here so this panel keeps honouring the $project picker.\nSELECT\n  week_start :: timestamptz AS \"Week of\",\n  iso_week AS \"Week\",\n  CASE category\n    WHEN 'top_rater' THEN '🏅 Top Rater'\n    WHEN 'most_points' THEN '🔥 Most Points'\n    WHEN 'best_feedback' THEN '💬 Best Feedback'\n    WHEN 'fastest' THEN '⚡ Fastest Draw'\n    WHEN 'completionist' THEN '🎯 Completionist'\n    ELSE category\n  END AS \"Award\",\n  COALESCE(user_name, '@' || username) AS \"Winner\",\n  CASE category\n    WHEN 'fastest' THEN\n      CASE WHEN value < 1 THEN ROUND(value * 60) || ' min'\n           ELSE ROUND(value :: numeric, 1) || ' h' END\n    WHEN 'completionist' THEN ROUND(value) || '%'\n    WHEN 'most_points' THEN ROUND(value) || ' pts'\n    ELSE ROUND(value) :: text\n  END AS \"Result\"\nFROM weekly_awards\nWHERE $__timeFilter(week_start :: timestamptz)\n  AND project_path IN ($project)\n  AND username IN ($user)\nORDER BY week_start DESC, category;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Winners by week",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "schemaVersion": 41,
+  "tags": [
+    "engagement",
+    "ratings"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allowCustomValue": false,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "ffrgyjxlmntogb"
+        },
+        "definition": "select distinct project_path from review_runs where project_path is not null",
+        "includeAll": true,
+        "label": "Project",
+        "multi": true,
+        "name": "project",
+        "options": [],
+        "query": "select distinct project_path from review_runs where project_path is not null",
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      },
+      {
+        "allowCustomValue": false,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "ffrgyjxlmntogb"
+        },
+        "definition": "select distinct username from (\n  select username from comment_scores where username is not null\n  union select username from summary_scores where username is not null\n  union select author_username from comment_replies where author_username is not null\n  union select mr_author_username from review_comments where mr_author_username is not null\n) people order by 1",
+        "includeAll": true,
+        "label": "Person",
+        "multi": true,
+        "name": "user",
+        "options": [],
+        "query": "select distinct username from (\n  select username from comment_scores where username is not null\n  union select username from summary_scores where username is not null\n  union select author_username from comment_replies where author_username is not null\n  union select mr_author_username from review_comments where mr_author_username is not null\n) people order by 1",
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Engagement",
+  "uid": "aid-engagement-1"
+}

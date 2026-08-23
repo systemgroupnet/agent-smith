@@ -6,7 +6,8 @@ PostgreSQL directly (datasource uid `ffrgyjxlmntogb`).
 
 | File | Grafana title | uid | What it answers |
 |---|---|---|---|
-| `rating-stats.json` | Rating Stats | `cfsrndx5q1la8d` | Are the review comments any good — human 1–5 ratings, replies, worst-rated comments, per-model quality, plus the **🏆 Engagement** row (points, badges, weekly awards) |
+| `rating-stats.json` | Rating Stats | `cfsrndx5q1la8d` | Are the review comments any good — human 1–5 ratings, replies, worst-rated comments, per-model quality |
+| `engagement.json` | Engagement | `aid-engagement-1` | Who is engaging, and what have they earned — points, levels, badges, weekly award winners, coverage. **Filterable by person** (`$user`), so it is the one dashboard meant to be shared with the team rather than read by whoever maintains the reviewer |
 | `run-stats.json` | Run Stats | `efrh010c710jkf` | Is the reviewer healthy — run outcomes, durations, throughput, failover |
 
 ## Applying a file to Grafana
@@ -187,6 +188,24 @@ is **mixed** — some comments from each model — so:
 `review_comments.model` is `NULL` for rows written before migration `0009`. That
 means *unknown*, not *no failover* — filter `model IS NOT NULL` when comparing
 models, or those rows land in a bogus bucket.
+
+**`engagement.json` has a `$user` variable, and every panel on it filters
+`$project`, `$user` *and* the time picker.** The exception is deliberate and
+labelled in the panel description: `Team rating coverage` ignores `$user` because
+it is the one number the whole team owns (slicing it per person answers a
+different question — that is what `Coverage by developer` is for), and
+`Weekly wins` ignores `$project` because it counts wins on the global (`'*'`)
+scope, which is what the Mattermost digest announces and therefore what the team
+treats as a win.
+
+**Two traps when generating these panels from the catalogue.** Badge labels and
+blurbs go into SQL `CASE` arms as string literals, and one of them contains an
+apostrophe — "Rated 10 comments on other people's merge requests" — which closed
+the string and broke the panel until the generator escaped it. And when checking
+the panels against a database, use **one connection per query**: the first
+failure aborts a shared transaction and every later query then reports "current
+transaction is aborted" instead of its own error, which hides the real one behind
+four fake ones.
 
 **The points formula is duplicated here, and `collector/engagement.py` is the
 source of truth.** The engagement layer keeps every query in Python — there are
