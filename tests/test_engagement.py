@@ -433,3 +433,22 @@ def test_a_sunday_schedule_reports_a_week_that_is_already_seven_days_old():
 
     monday = _at(2026, 8, 31, 11, 45)          # first day of 2026-W36
     assert scheduler.next_due_week(monday, day=0, hour=11, minute=45) == "2026-W35"
+
+
+def test_the_digest_points_table_shows_a_cumulative_level():
+    """A level is a standing, not a weekly score.
+
+    Regression: the digest derived the level from the week's points, so every
+    person landed on 🥉 Bronze in every digest forever — a rewards ladder that
+    reads as "nobody is getting anywhere". The Level column must come from
+    lifetime points, alongside the week's own total.
+    """
+    import inspect
+
+    source = inspect.getsource(digest.build_message)
+    assert "lifetime" in source, "the points table must consult lifetime totals"
+    assert "This week" in source and "Total" in source, (
+        "the table should show the week's points and the lifetime total separately"
+    )
+    # And the level itself must be derived from the lifetime figure, not the row.
+    assert "engagement.level_for(total)" in source

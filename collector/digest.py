@@ -142,6 +142,17 @@ def build_message(iso_week: str, projects: list[str]) -> tuple[str, dict]:
                 since=f"{week_from}T00:00:00+00:00",
                 until=f"{week_from + timedelta(days=7)}T00:00:00+00:00",
             )
+            # A level is a *cumulative* standing, so it has to come from lifetime
+            # points, not from the week's. Deriving it from the weekly total put
+            # every single person on 🥉 Bronze in every digest forever — the
+            # column read as "nobody is getting anywhere", in the one place the
+            # ladder is supposed to mean something.
+            lifetime = {
+                row["username"]: int(row["points"] or 0)
+                for row in engagement.points_leaderboard(
+                    conn, limit=1000, project_path=project
+                )
+            }
             badges = engagement.achievements_in_week(conn, iso_week, project)
 
             if not (awards or points or badges or stats.get("findings_posted")):
@@ -195,12 +206,14 @@ def build_message(iso_week: str, projects: list[str]) -> tuple[str, dict]:
 
             if points:
                 lines.append("")
-                lines.append("| # | Who | Points | Level |")
-                lines.append("|:-:|---|:-:|---|")
+                lines.append("| # | Who | This week | Total | Level |")
+                lines.append("|:-:|---|:-:|:-:|---|")
                 for i, row in enumerate(points, start=1):
+                    total = lifetime.get(row["username"], int(row["points"] or 0))
+                    emoji, level = engagement.level_for(total)
                     lines.append(
                         f"| {i} | {_who(row['username'], row.get('user_name'))} | "
-                        f"**{row['points']}** | {row['level_emoji']} {row['level']} |"
+                        f"**{row['points']}** | {total} | {emoji} {level} |"
                     )
 
             if badges:
