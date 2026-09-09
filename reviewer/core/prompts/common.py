@@ -149,6 +149,34 @@ SYMBOL_FORMATTING_RULE = (
 )
 
 
+# Shared across every reviewer prompt, and interpolated LAST of the shared rules:
+# a finding is only worth what its `problem` text says, and an empty one is worth
+# less than nothing. `ReviewIssue.problem` defaults to `""` — lenient on purpose,
+# so one omitted field cannot fail-validate a whole file's response — which means
+# a finding recorded without a description survives every stage and renders as a
+# comment whose entire body is the severity badge. Observed on real merge
+# requests, via the comment reviewer's synthesis rather than this end; but the
+# reviewers are the first writer of the text, and the cheapest place to refuse an
+# empty finding is before it exists. `FindingsSink.record` rejects one
+# deterministically and the posting loop refuses to post a body with no text —
+# this is the layer that stops the model spending a call on one at all.
+EMPTY_FINDING_RULE = (
+    "**Before you call `record_findings`, re-read every finding and drop any whose "
+    "`problem` field is empty, blank, or does not actually state what is wrong.** "
+    "The `problem` text *is* the comment a human reads: it becomes the whole body "
+    "of an inline comment on their merge request. A finding recorded without it "
+    "posts a bare severity badge next to their code — it costs them a click, tells "
+    "them nothing, and spends one of the few comment slots the merge request has. "
+    "A `suggestion` does not stand in for it: that field is code applied to the "
+    "file, and a fix with no explanation is a change someone is asked to trust "
+    "blind. So state the defect in `problem` or do not record the finding — "
+    "**`record_findings` with an empty list is a correct and expected answer**, and "
+    "it is how you report a file you reviewed and found clean. Never pad a report "
+    "to look thorough: a file with nothing wrong in it is a real result, and an "
+    "empty finding is not a smaller version of a real one."
+)
+
+
 # Explains the line-number gutter that format_file_content_section prepends to
 # every line of the reviewed file.
 LINE_NUMBER_GUTTER_NOTE = (

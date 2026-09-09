@@ -60,11 +60,13 @@ from core.agents.effort_agent import estimate_review_effort
 from core.agents.summary_agent import SummaryContext, generate_review_summary
 from core.utils.comment_formatter import (
     format_single_issue,
+    comment_body_has_text,
     format_review_summary,
     format_summary_description,
     extract_issues_for_review,
     get_severity,
     restore_issue_severities,
+    restore_issue_problems,
     apply_severity_corrections,
 )
 from core.utils.review_verbosity import (
@@ -1151,6 +1153,47 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                     f"'{was}'; restored to '{now}' from the reviewers' finding",
                     context=f"{file_name}:{line}",
                 )
+        # Deterministic backstop for the *text*, the same failure through the same
+        # door as the severity above: the comment reviewer synthesizes its output
+        # and ReviewIssue.problem defaults to "", so a response that names a
+        # finding and omits its description posts a comment whose whole body is
+        # the severity badge — a red dot on the diff that says nothing. Recovered
+        # from the reviewers' own finding at that position where there is one, and
+        # dropped where there is not: a severity has a defensible fallback, a
+        # description has none. Placed before dedup so the dedup agent compares
+        # real text rather than "(no text)", and before the cap so a text-less
+        # comment can never occupy a slot a real finding could have taken.
+        filtered_issues, problem_fixes, problem_drops = restore_issue_problems(
+            filtered_issues, issues_for_review
+        )
+        if problem_fixes:
+            print(
+                f"  🩹 Restored the reviewers' text on {len(problem_fixes)} "
+                f"comment(s) the comment reviewer returned with no description"
+            )
+            for file_name, line in problem_fixes:
+                record_warning(
+                    metrics,
+                    "comment_problem_restored",
+                    f"{file_name}:{line} came back from the comment reviewer with an "
+                    f"empty problem; restored the reviewers' own text",
+                    context=f"{file_name}:{line}",
+                )
+        if problem_drops:
+            print(
+                f"  🚫 {len(problem_drops)} comment(s) had no description and no "
+                f"matching finding to recover one from — not posted"
+            )
+            for file_name, line in problem_drops:
+                record_warning(
+                    metrics,
+                    "comment_dropped_empty",
+                    f"{file_name}:{line} came back from the comment reviewer with an "
+                    f"empty problem and matched no finding; dropped rather than "
+                    f"posting a comment with no text",
+                    context=f"{file_name}:{line}",
+                )
+
         # Duplicate suppression, against the MR's existing comments and within
         # this batch. Runs *before* the cap so a repeat never occupies a slot a
         # unique finding could have taken.
@@ -1299,6 +1342,27 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                 metrics,
                 "comment_dropped_unknown_file",
                 f"{file_name}:{line} references a file that is not part of this MR; dropped as a likely hallucination",
+                context=f"{file_name}:{line}",
+            )
+            continue
+
+        # Final cross-check, on the artifact rather than a field: never POST a
+        # comment that says nothing. Every guard before this one protects a single
+        # stage against a single known failure — the reviewer prompts and the
+        # findings sink at the source, the comment reviewer's prompt and
+        # restore_issue_problems over its synthesis. This asks the reader's own
+        # question, so it holds for a stage nobody has thought of yet, and it is
+        # placed after the unknown-file drop so the warning only ever fires for a
+        # comment that would otherwise genuinely have been posted. If it does fire,
+        # a guard upstream was bypassed — that is the signal, not the drop.
+        if not comment_body_has_text(comment):
+            print(f"  🚫 Skipping {file_name}:{line} — the comment body carries no text")
+            record_warning(
+                metrics,
+                "comment_dropped_empty_body",
+                f"{file_name}:{line} rendered to a body with nothing but the severity "
+                f"badge; dropped at the posting loop, which means a guard upstream "
+                f"was bypassed",
                 context=f"{file_name}:{line}",
             )
             continue

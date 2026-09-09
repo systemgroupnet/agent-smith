@@ -242,6 +242,13 @@ def _set_severity(issue: Any, severity: str) -> None:
         setattr(issue, "severity", severity)
 
 
+def _set_problem(issue: Any, problem: str) -> None:
+    if isinstance(issue, dict):
+        issue["problem"] = problem
+    else:
+        setattr(issue, "problem", problem)
+
+
 def restore_issue_severities(
     selected: list, originals: list, severities=("high",)
 ) -> Tuple[list, list]:
@@ -305,6 +312,81 @@ def restore_issue_severities(
             changes.append((file_name, line, current or "<missing>", want))
             _set_severity(issue, want)
     return selected, changes
+
+
+def restore_issue_problems(selected: list, originals: list) -> Tuple[list, list, list]:
+    """Put the reviewers' text back over an empty ``problem``, or drop the comment.
+
+    Returns ``(kept, restored, dropped)``, where each entry of the latter two is
+    ``(file_name, line)``. ``kept`` issues are updated in place.
+
+    The same failure as :func:`restore_issue_severities`, through the same door.
+    The comment reviewer *synthesizes* ``selected_issues`` and ``ReviewIssue.problem``
+    defaults to ``""``, so a response that names a finding and omits its description
+    posts a comment whose entire body is the severity badge::
+
+        **🔴 High severity issue**
+
+    A reader sees a red dot on their diff and no statement of what is wrong — worse
+    than no comment at all, because it costs them the click and tells them nothing.
+    The ``suggestion`` field does not save it either: a bare fix block with no
+    explanation is a patch someone is asked to trust blind.
+
+    Recovery is the same as for severity, and for the same reason: the text is a
+    fact the reviewers already established, the issue must keep its
+    ``file_name``/``line`` to be posted at all, and the sink guarantees every
+    finding it stored has a non-empty ``problem``
+    (``FindingsSink.record``) — so a positional match gives real text back. A
+    position that carried several findings resolves to the most severe one's text,
+    matching how the severity restore picks a merged comment's level.
+
+    Where the two differ is the no-match case. A severity has a defensible
+    fallback (the most severe level in scope), because *some* badge has to be
+    printed. A description has none: there is nothing to say, and inventing a
+    sentence would be worse than either alternative. So an empty problem whose
+    position matches no finding is **dropped**. That is the honest outcome — the
+    model rewrote both the text and the position, and nothing here can tell what
+    it meant.
+    """
+    if not selected:
+        return selected, [], []
+
+    by_pos: dict = {}
+    by_base: dict = {}
+    for issue in originals or []:
+        problem = str(_issue_field(issue, "problem") or "")
+        if not problem.strip():
+            continue
+        file_name = str(_issue_field(issue, "file_name") or "")
+        if not file_name:
+            continue
+        line = _issue_field(issue, "line")
+        rank = _rank(_norm(get_severity(issue)))
+        for index, key in ((by_pos, (file_name, line)),
+                           (by_base, (file_name.rsplit("/", 1)[-1], line))):
+            # Strictly greater, so the first finding wins a tie: the input is
+            # ordered highs-first in file order, so the earliest is the one the
+            # ranking stage read first.
+            if rank > index.get(key, (-1, ""))[0]:
+                index[key] = (rank, problem)
+
+    kept, restored, dropped = [], [], []
+    for issue in selected:
+        problem = str(_issue_field(issue, "problem") or "")
+        if problem.strip():
+            kept.append(issue)
+            continue
+        file_name = str(_issue_field(issue, "file_name") or "")
+        line = _issue_field(issue, "line")
+        hit = (by_pos.get((file_name, line))
+               or by_base.get((file_name.rsplit("/", 1)[-1], line)))
+        if hit is None:
+            dropped.append((file_name, line))
+            continue
+        _set_problem(issue, hit[1])
+        restored.append((file_name, line))
+        kept.append(issue)
+    return kept, restored, dropped
 
 
 def apply_severity_corrections(
@@ -409,6 +491,30 @@ def format_single_issue(issue: Any, applyable: bool = True) -> str:
         return comment + f"**Suggested Fix:**\n{_comment_prose(cleaned)}"
     fence = "suggestion:-0+0" if applyable else ""
     return comment + f"**Suggested Fix:**\n```{fence}\n{cleaned}\n```"
+
+
+def comment_body_has_text(body: str) -> bool:
+    """True when a rendered comment says anything at all beyond its badge.
+
+    The final cross-check, and the only guard in the pipeline that inspects the
+    **artifact** rather than a field. Every other defence — the reviewer prompts,
+    ``FindingsSink.record``, the comment reviewer's prompt, ``restore_issue_problems``
+    — protects one stage against one known failure. This one asks the question the
+    reader actually asks, which is whether the thing about to be posted contains a
+    sentence, and it therefore holds for a stage nobody has thought of yet.
+
+    Cheap to keep honest: :func:`format_single_issue` always emits the severity
+    badge on the first line, so "empty" is exactly "nothing survives after it".
+
+    Deliberately **narrow**. A body carrying a ``suggestion`` block but no
+    ``problem`` passes, because a fix *is* information and discarding a real one to
+    enforce a formatting rule trades a defect shipped for a comment tidied. That
+    case is handled upstream where it can be handled properly —
+    ``restore_issue_problems`` puts the reviewer's own description back — and this
+    net exists for the case where the body says nothing whatsoever.
+    """
+    _, _, rest = str(body or "").partition("\n")
+    return bool(rest.strip())
 
 
 def extract_issues_for_review(all_comments: list, severities=("high",)) -> list:

@@ -15,6 +15,7 @@ from core.prompts.common import (
     NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
+    EMPTY_FINDING_RULE,
 )
 
 if TYPE_CHECKING:
@@ -54,6 +55,8 @@ SUGGESTION FIELD FORMAT:
 {SUGGESTION_FIELD_RULE}
 
 {SYMBOL_FORMATTING_RULE}
+
+{EMPTY_FINDING_RULE}
 
 TOOLS AVAILABLE:
 You review from a real checkout of this merge request's source branch: `read_file` reads any file, `grep` and `glob` search the whole repository, `ls` looks around. Use them to resolve what the diff references but does not show — a definition, a caller, a sibling implementation — instead of assuming. There are no repository, Jira or Confluence tools; the merge request details and its Jira ticket, when it has one, are already in the Merge Request Context section below.
@@ -126,6 +129,8 @@ SUGGESTION FIELD FORMAT:
 {SUGGESTION_FIELD_RULE}
 
 {SYMBOL_FORMATTING_RULE}
+
+{EMPTY_FINDING_RULE}
 
 TOOLS AVAILABLE:
 You have no Jira or Confluence tools: the ticket text, when this merge request has one, is already included in the Merge Request Context section below. Use `grep` and `read_file` over the checkout of the source branch to confirm what the code actually does before judging it against those requirements.
