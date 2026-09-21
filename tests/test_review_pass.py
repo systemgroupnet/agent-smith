@@ -239,7 +239,7 @@ def test_a_finding_reaches_the_sink_verbatim(checkout):
     result = asyncio.run(review_changed_files(
         classified=[("svc/order.go", "service")], clone_root=str(checkout),
         source_branch="feature/x", mr_context="", model=Scripted(),
-        batch_size=2, per_file_timeout_s=30, provider_policy=False))
+        concurrency=2, per_file_timeout_s=30, provider_policy=False))
     assert result.reviewed_files == {"svc/order.go"}
     issues = dict(result.all_comments)["svc/order.go"]
     assert issues[0]["line"] == 4 and issues[0]["severity"] == "high"
@@ -252,7 +252,7 @@ def test_a_reviewer_that_never_records_is_a_failed_file(checkout):
     result = asyncio.run(review_changed_files(
         classified=[("svc/order.go", "service")], clone_root=str(checkout),
         source_branch=None, mr_context="", model=Silent(),
-        batch_size=1, per_file_timeout_s=30, provider_policy=False))
+        concurrency=1, per_file_timeout_s=30, provider_policy=False))
     assert result.failed_files == ["svc/order.go"]
     assert result.reviewed_files == set()
 
@@ -262,9 +262,78 @@ def test_an_expired_budget_truncates_without_blaming_a_file(checkout):
     result = asyncio.run(review_changed_files(
         classified=[("svc/order.go", "service")], clone_root=str(checkout),
         source_branch=None, mr_context="", model=Scripted(),
-        batch_size=1, deadline=time.monotonic() - 1, provider_policy=False))
+        concurrency=1, deadline=time.monotonic() - 1, provider_policy=False))
     assert result.truncated
     assert result.failed_files == [], "the marker is held; a re-run picks these up"
+
+
+def test_a_free_worker_takes_the_next_file_instead_of_waiting_for_a_batch(checkout):
+    """The pass is a queue, not batches.
+
+    `asyncio.gather` over a slice is a barrier, and reviews are wildly uneven —
+    seconds to record a finding, minutes to grep to the call ceiling, the whole
+    `FILE_REVIEW_TIMEOUT_S` to hang. Under batching the other lanes sat idle for the
+    difference, which against a fixed `OVERALL_TIMEOUT_S` is files that never get
+    reviewed. Asserted structurally rather than with a stopwatch: with two lanes and
+    a slow first file, the third and fourth files must *start* before the first one
+    finishes — under batching they could not have.
+    """
+    delay = {"m/slow.sql": 0.4}
+    calls: dict = {}
+    events: list = []
+
+    class Paced(Scripted):
+        """Records one empty finding per file, after sleeping that file's delay."""
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            asked = next(m for m in messages if getattr(m, "type", "") == "human")
+            path = str(asked.content).replace("Review", "", 1).strip()
+            seen = calls.get(path, 0)
+            calls[path] = seen + 1
+            if seen == 0:
+                events.append(("start", path))
+                await asyncio.sleep(delay.get(path, 0.02))
+                message = AIMessage(content="", tool_calls=[
+                    {"name": "record_findings", "id": "r",
+                     "args": {"file_path": path, "findings": []}}])
+            else:
+                events.append(("finish", path))
+                message = AIMessage(content="done")
+            return ChatResult(generations=[ChatGeneration(message=message)])
+
+    files = [(f"m/{n}.sql", "sql") for n in ("slow", "b", "c", "d")]
+    result = asyncio.run(review_changed_files(
+        classified=files, clone_root=str(checkout), source_branch=None,
+        mr_context="", model=Paced(), concurrency=2, provider_policy=False))
+
+    assert result.reviewed_files == {p for p, _ in files}
+    assert result.failed_files == [] and not result.truncated
+    done = events.index(("finish", "m/slow.sql"))
+    for path in ("m/c.sql", "m/d.sql"):
+        assert events.index(("start", path)) < done, (
+            f"{path} waited for the slow file's batch to drain: {events}")
+
+
+def test_an_expired_budget_blames_only_the_files_the_pool_dispatched(checkout):
+    """A pool cannot infer what it started from a batch index, and guessing would
+    blame the budget for a file that genuinely failed. One lane, a deadline that
+    expires while the first file runs: the first is a real failure, the second was
+    never dispatched and is the re-run's problem."""
+    import time
+
+    class SlowSilent(Silent):
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            await asyncio.sleep(0.3)
+            return ChatResult(generations=[ChatGeneration(message=self._step(messages))])
+
+    files = [("m/a.sql", "sql"), ("m/b.sql", "sql")]
+    result = asyncio.run(review_changed_files(
+        classified=files, clone_root=str(checkout), source_branch=None,
+        mr_context="", model=SlowSilent(), concurrency=1,
+        deadline=time.monotonic() + 0.1, provider_policy=False))
+
+    assert result.truncated
+    assert result.failed_files == ["m/a.sql"], "it ran and recorded nothing"
 
 
 def test_nothing_to_review_is_not_an_error(checkout):

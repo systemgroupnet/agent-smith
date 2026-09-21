@@ -1,10 +1,10 @@
 """The review pass: one specialist agent per changed file, over a real checkout.
 
 Each ``(file, reviewer)`` pair in the dispatch plan becomes one agent invocation
-with its own message history, run `FILE_BATCH_SIZE` at a time. The nine reviewers
-and their prompts are unchanged from the LangGraph era; what changed is where they
-get the code — a checkout on disk rather than inlined text — and that the fan-out
-is a loop.
+with its own message history, drawn from a queue by `FILE_BATCH_SIZE` workers so
+that many are in flight at every instant. The nine reviewers and their prompts are
+unchanged from the LangGraph era; what changed is where they get the code — a
+checkout on disk rather than inlined text — and that the fan-out is a worker pool.
 
 **Why every reviewer reads a checkout.** The two previous sources of code — the
 GitLab REST API and a semantic code-index MCP — both answered about *a ref you have
@@ -23,10 +23,10 @@ findings never passed through it. What it added was ~120 model calls of dispatch
 chatter per run, a coverage guarantee that had to be checked and repaired
 afterwards because a model can skip a file, and the loss of a per-file call site
 for `FILE_REVIEW_TIMEOUT_S` to watchdog. The two things it genuinely provided,
-context isolation and concurrent reviews, a batched loop provides by construction:
+context isolation and concurrent reviews, a worker pool provides by construction:
 there is no shared context window to fill because there is no shared window, and
-`asyncio.gather` needs no model to emit parallel tool calls. Coverage stops being
-a property to verify and becomes arithmetic.
+`asyncio` needs no model to emit parallel tool calls. Coverage stops being a
+property to verify and becomes arithmetic.
 
 `deepagents` remains a dependency, for its filesystem layer only: a real-FS
 backend, a tool allowlist, permissions, and a ``read_file`` that numbers its
@@ -55,7 +55,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 # deepagents supplies the filesystem layer only — a real-FS backend, a tool
 # allowlist, permissions, and a read_file that numbers its output. Its agent
@@ -570,7 +570,7 @@ async def review_changed_files(
     sql_paths: Sequence[str] = (),
     model=None,
     config: Optional[RunnableConfig] = None,
-    batch_size: int = 5,
+    concurrency: int = 5,
     per_file_timeout_s: Optional[float] = None,
     deadline: Optional[float] = None,
     provider_policy: bool = True,
@@ -588,8 +588,8 @@ async def review_changed_files(
     anyway. What it added was ~120 model calls of dispatch chatter, a coverage
     guarantee that had to be checked and repaired afterwards, and the loss of a
     per-file call site to watchdog. Everything it genuinely provided — context
-    isolation, concurrent reviews — a batched loop provides by construction, and
-    the loop cannot decide to skip a file.
+    isolation, concurrent reviews — a worker pool provides by construction, and
+    the pool cannot decide to skip a file.
 
     Args:
         classified: ``[(file_path, file_type)]`` to review.
@@ -599,11 +599,15 @@ async def review_changed_files(
         sql_paths: Go files the routing classifier sent to the SQL reviewer too.
         model: Chat model; ``None`` resolves one from the gateway's provider.
         config: Tracing run config, so every reviewer lands in the MR's session.
-        batch_size: Concurrent reviewer-file pairs (``FILE_BATCH_SIZE``).
+        concurrency: Reviewer-file pairs in flight at once (``FILE_BATCH_SIZE``).
+            A ceiling held continuously, not a batch size: a worker that finishes
+            takes the next pair immediately.
         per_file_timeout_s: Watchdog per reviewer invocation
             (``FILE_REVIEW_TIMEOUT_S``). Every file is its own await, so unlike a
             `task` dispatch this can actually be bounded.
-        deadline: ``time.monotonic()`` value past which no new batch starts.
+        deadline: ``time.monotonic()`` value past which no further review is
+            dispatched. Checked per pair, so the pool stops taking work the moment
+            the budget is gone rather than at the next batch boundary.
         provider_policy: Whether to apply the run's retry/failover policy. Leave
             it on in production. Turning it off is the only way to run against a
             model supplied here, because :class:`ProviderPolicyMiddleware` resolves
@@ -629,14 +633,15 @@ async def review_changed_files(
     backend = FilesystemBackend(root_dir=clone_root, virtual_mode=True)
     resolved = model if model is not None else resolve_model()
     record_tool = make_record_findings_tool(sink)
-    size = max(1, batch_size)
-    total_batches = (len(jobs) + size - 1) // size
+    # `FILE_BATCH_SIZE` names a concurrency ceiling, not a batch — the variable is
+    # kept because it is deployed, and lowering it is still the documented answer to
+    # a provider's concurrency limit.
+    lanes = max(1, min(concurrency, len(jobs)))
 
     limit = reviewer_call_limit()
     print(
         f"\n🧠 Review pass: {len(jobs)} reviewer-file pair(s) over {len({p for p, _ in jobs})} "
-        f"file(s), in {total_batches} batch(es) of up to {size}, "
-        f"{limit} model call(s) each"
+        f"file(s), {lanes} at a time, {limit} model call(s) each"
     )
     # Say when the trace is off, because its *absence* is the confusing case: a run
     # with no 🔧 lines looks like a run whose reviewers never read anything, and the
@@ -697,26 +702,63 @@ async def review_changed_files(
         reasons[(path, spec.name)] = _describe_finish(state, limit)
         return None
 
-    for index in range(total_batches):
-        if deadline is not None and time.monotonic() >= deadline:
-            remaining = len(jobs) - index * size
-            truncated = True
-            print(
-                f"\n⏳ Review budget reached after {index}/{total_batches} batch(es); "
-                f"skipping ~{remaining} remaining review(s) and proceeding to posting"
-            )
-            break
+    # A queue, not batches. `asyncio.gather` over a slice is a barrier, and these
+    # slices are wildly uneven: a reviewer that finds its file and reports costs
+    # seconds, one that greps its way to the call ceiling costs minutes, and one
+    # that hangs costs the whole `FILE_REVIEW_TIMEOUT_S` watchdog. Under batching
+    # the other four lanes sat idle for the difference — on a long merge request
+    # most of the wall clock, and against a fixed `OVERALL_TIMEOUT_S` idle lanes
+    # are files that never get reviewed. Workers take the next pair the instant
+    # they are free, so `lanes` reviews are in flight until the queue is empty.
+    queue: "asyncio.Queue[Tuple[int, str, ReviewerSpec]]" = asyncio.Queue()
+    for position, (path, spec) in enumerate(jobs, start=1):
+        queue.put_nowait((position, path, spec))
 
-        batch = jobs[index * size:(index + 1) * size]
-        print(f"\n📦 Batch {index + 1}/{total_batches} ({len(batch)} review(s))")
-        results = await asyncio.gather(
-            *(_one(path, spec) for path, spec in batch), return_exceptions=True
-        )
-        for outcome in results:
-            if isinstance(outcome, str):
+    # Which pairs were actually dispatched. A batch loop could derive this from the
+    # batch index; a pool cannot, and the truncation arithmetic below needs it to be
+    # exact — inferring it would blame the budget for a file that genuinely failed.
+    started: Set[str] = set()
+
+    async def _worker() -> None:
+        nonlocal truncated
+        while True:
+            try:
+                position, path, spec = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            # Checked per dispatch rather than per batch, which is the finer grain
+            # the queue makes available: nothing new starts past the deadline, and
+            # whatever is already running keeps its own watchdog. The queue is
+            # drained rather than abandoned so every worker exits by the same door.
+            if deadline is not None and time.monotonic() >= deadline:
+                if not truncated:
+                    truncated = True
+                    print(
+                        f"\n⏳ Review budget reached with {queue.qsize() + 1} review(s) "
+                        f"still queued; skipping them and proceeding to posting"
+                    )
+                continue
+            started.add(path)
+            print(f"  ▶️  [{position}/{len(jobs)}] {spec.name} on {path}")
+            began = time.monotonic()
+            try:
+                outcome = await _one(path, spec)
+            except Exception as e:
+                # `_one` handles its own failures; this is the net under it, and it
+                # must not take the other lanes down with it. CancelledError is a
+                # BaseException and deliberately passes through, so the run's own
+                # watchdogs still stop the pool.
+                print(f"  ❌ review raised: {describe_error(e)}")
+                continue
+            if outcome is not None:
                 failed.append(outcome)
-            elif isinstance(outcome, BaseException):
-                print(f"  ❌ review raised: {describe_error(outcome)}")
+            print(
+                f"  {'✔️ ' if outcome is None else '⚠️ '} [{position}/{len(jobs)}] "
+                f"{spec.name} on {path} — {time.monotonic() - began:.0f}s, "
+                f"{queue.qsize()} queued"
+            )
+
+    await asyncio.gather(*(_worker() for _ in range(lanes)))
 
     # A path failed only if *nothing* reported on it: one of two service reviewers
     # erroring still leaves the file reviewed. Also catches a reviewer that
@@ -725,8 +767,10 @@ async def review_changed_files(
     attempted = {path for path, _spec in jobs}
     if truncated:
         # Files we never got to are not failures — the marker is held and a re-run
-        # picks them up, same contract as the overall timeout has always had.
-        attempted = sink.reviewed_files | {p for p in failed}
+        # picks them up, same contract as the overall timeout has always had. The
+        # pool records what it dispatched, so this is the exact set rather than the
+        # approximation a batch index could give.
+        attempted = set(started)
     unreported = sorted(attempted - sink.reviewed_files)
 
     # Say why, per file. "3 file(s) failed" with nothing explaining it is the least

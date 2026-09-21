@@ -224,10 +224,13 @@ async def _post_review_summary(
 DEEP_REVIEW_POST_RESERVE_S = 240
 
 
-def _review_batch_size() -> int:
-    """Concurrent reviewer-file pairs. `FILE_BATCH_SIZE` governs the review pass
-    again: with no orchestrator, concurrency is ours rather than a property of
-    whether the model chose to emit parallel tool calls."""
+def _review_concurrency() -> int:
+    """Reviewer-file pairs in flight at once. `FILE_BATCH_SIZE` governs the review
+    pass again: with no orchestrator, concurrency is ours rather than a property of
+    whether the model chose to emit parallel tool calls. The variable's name is
+    historical — the pass is a worker pool, so this is a ceiling held continuously
+    rather than the size of a batch everything waits on.
+    """
     return max(1, int_env("FILE_BATCH_SIZE", 5))
 
 
@@ -353,7 +356,7 @@ async def _run_review_pass(
         mr_context=mr_context,
         sql_paths=sql_paths,
         config=review_config,
-        batch_size=_review_batch_size(),
+        concurrency=_review_concurrency(),
         per_file_timeout_s=float(int_env("FILE_REVIEW_TIMEOUT_S", 1200)),
         deadline=review_deadline,
     )
