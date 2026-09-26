@@ -82,10 +82,13 @@ from core.utils.file_classifier import StaticFileClassifier
 from core.config.tracing import build_thread_id, build_run_config
 from core.config.langfuse_config import get_langfuse_handler, flush_langfuse
 from core.config.langchain_config import (
+    DEFAULT_OPENROUTER_BASE_URL,
     fallback_configured,
     get_default_model,
     get_fallback_model,
     int_env,
+    primary_api_key,
+    primary_base_url,
 )
 from core.llm.gateway import FALLBACK, LLMGateway
 from core.utils.llm_retry import is_provider_hard_block, describe_error, parse_llm_error
@@ -519,7 +522,7 @@ async def llm_preflight(metrics: RunMetrics) -> Optional[BaseException]:
     those are deterministic — every request in the run would fail identically.
     """
     timeout_s = int_env("LLM_PREFLIGHT_TIMEOUT_S", 60)
-    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    base_url = primary_base_url() or DEFAULT_OPENROUTER_BASE_URL
     print(f"🩺 LLM endpoint pre-flight ({base_url})...")
     # retries=False: the probe reports the endpoint's state, it does not work
     # around it, and it has one wall-clock budget to do that in. Transient-failure
@@ -1543,9 +1546,9 @@ def main():
     args = parser.parse_args()
     
     # Check for OpenAI API key
-    if not os.getenv("OPENROUTER_API_KEY"):
-        print("Error: OPENROUTER_API_KEY not found in environment variables.")
-        print("Please set OPENROUTER_API_KEY in your .env file.")
+    if not primary_api_key():
+        print("Error: DEFAULT_LLM_API_KEY not found in environment variables.")
+        print("Please set DEFAULT_LLM_API_KEY in your .env file.")
         sys.exit(1)
     
     # Run async main function with cleanup in the same event loop

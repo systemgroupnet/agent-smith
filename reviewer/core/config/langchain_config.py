@@ -26,7 +26,7 @@ endpoint that doesn't know them ignores them (verified against GLM 5.3).
 A side benefit: ``ChatOpenAI`` implements ``_astream``, which ``ChatOpenRouter``
 did not. LangChain's ``astream`` — what the agent loop calls — no longer degrades
 to a single blocking ``ainvoke``, so a long completion arrives incrementally
-instead of having to land inside one ``OPENROUTER_TIMEOUT_MS`` read window. That
+instead of having to land inside one ``LLM_TIMEOUT_MS`` read window. That
 window expiring is what produced the `httpx.ReadTimeout` failures in CI.
 """
 
@@ -48,10 +48,20 @@ from langchain_openai import ChatOpenAI
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
+def llm_timeout_ms() -> int:
+    """Per-request LLM timeout (``LLM_TIMEOUT_MS``, formerly OPENROUTER_TIMEOUT_MS)."""
+    raw = renamed_env("LLM_TIMEOUT_MS")
+    try:
+        return int(raw) if raw else 300000
+    except ValueError:
+        print(f"  ⚠️  [config] Ignoring invalid LLM_TIMEOUT_MS={raw!r}; using default 300000")
+        return 300000
+
+
 def int_env(name: str, default: int) -> int:
     """Read an int env var, falling back to ``default`` on a missing/malformed value.
 
-    A garbled numeric env var (e.g. OPENROUTER_TIMEOUT_MS="5min") must not crash
+    A garbled numeric env var (e.g. LLM_TIMEOUT_MS="5min") must not crash
     the process — especially for the resilience timeouts, where the crash would
     defeat the very feature the timeout provides.
     """
@@ -63,6 +73,39 @@ def int_env(name: str, default: int) -> int:
     except ValueError:
         print(f"  ⚠️  [config] Ignoring invalid {name}={raw!r}; using default {default}")
         return default
+
+
+# ── Renamed settings ─────────────────────────────────────────────────────────
+# The provider settings were named OPENROUTER_* when OpenRouter was the only
+# endpoint. They configure any OpenAI-compatible endpoint, so they now carry the
+# DEFAULT_LLM_* / LLM_* names that match DEFAULT_LLM_MODEL and FALLBACK_LLM_*.
+# The old names are still read — a deployment is never broken by a rename — and
+# say once per process that they are deprecated.
+RENAMED_ENV = {
+    "DEFAULT_LLM_API_KEY": "OPENROUTER_API_KEY",
+    "DEFAULT_LLM_BASE_URL": "OPENROUTER_BASE_URL",
+    "LLM_TIMEOUT_MS": "OPENROUTER_TIMEOUT_MS",
+}
+_warned_renames: set = set()
+
+
+def renamed_env(name: str, default: str = "") -> str:
+    """Read ``name``, falling back to the deprecated name it replaced.
+
+    The new name wins when both are set, so a half-finished migration behaves
+    as the new configuration says.
+    """
+    value = os.getenv(name)
+    if value is not None and value.strip():
+        return value.strip()
+    old = RENAMED_ENV.get(name)
+    legacy = os.getenv(old) if old else None
+    if legacy is not None and legacy.strip():
+        if old not in _warned_renames:
+            _warned_renames.add(old)
+            print(f"  ⚠️  [config] {old} is deprecated — rename it to {name}")
+        return legacy.strip()
+    return default
 
 
 # ── The primary provider ─────────────────────────────────────────────────────
@@ -77,14 +120,14 @@ def get_default_model() -> str:
 
 def primary_api_key() -> str:
     """Key for the primary endpoint."""
-    return os.getenv("OPENROUTER_API_KEY", "").strip()
+    return renamed_env("DEFAULT_LLM_API_KEY")
 
 
 def primary_base_url() -> str:
     """Primary endpoint, or "" to mean OpenRouter — see DEFAULT_OPENROUTER_BASE_URL,
     applied in :func:`build_chat_model` rather than here, so the "was an endpoint
     configured?" question the id-prefixing rule asks still has an answer."""
-    return os.getenv("OPENROUTER_BASE_URL", "").strip()
+    return renamed_env("DEFAULT_LLM_BASE_URL")
 
 
 # ── The fallback provider ────────────────────────────────────────────────────
@@ -180,7 +223,7 @@ def build_chat_model(
     if not api_key:
         raise ValueError(
             "No LLM API key found in environment variables. "
-            "Please set OPENROUTER_API_KEY (and FALLBACK_LLM_API_KEY if the "
+            "Please set DEFAULT_LLM_API_KEY (and FALLBACK_LLM_API_KEY if the "
             "fallback provider uses a different account) in your .env file."
         )
 
@@ -204,7 +247,7 @@ def build_chat_model(
         # timeout + SDK retry instead of hanging the review forever. ChatOpenAI
         # takes seconds, so convert — passing the raw ms would be an ~83-hour
         # timeout, i.e. no bound at all.
-        "timeout": int_env("OPENROUTER_TIMEOUT_MS", 300000) / 1000.0,
+        "timeout": llm_timeout_ms() / 1000.0,
     }
     if max_tokens:
         kwargs["max_tokens"] = max_tokens

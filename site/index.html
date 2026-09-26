@@ -411,9 +411,9 @@ footer .wrap { display: flex; gap: 16px; justify-content: space-between; flex-wr
   <span class="k">script</span>:
     - cd /app &amp;&amp; python main.py --gitlab-mr <span class="s">"$CI_MERGE_REQUEST_PROJECT_URL/-/merge_requests/$CI_MERGE_REQUEST_IID"</span>
 
-<span class="c"># Settings → CI/CD → Variables: OPENROUTER_API_KEY, DEFAULT_LLM_MODEL, GITLAB_URL, GITLAB_TOKEN</span></pre>
+<span class="c"># Settings → CI/CD → Variables: DEFAULT_LLM_API_KEY, DEFAULT_LLM_MODEL, GITLAB_URL, GITLAB_TOKEN</span></pre>
 <pre class="code panel" id="p-docker" role="tabpanel" aria-labelledby="t-docker" hidden>git clone https://github.com/systemgroup/codereviewagent.git && cd codereviewagent
-cp .env.example .env     <span class="c"># OPENROUTER_API_KEY, DEFAULT_LLM_MODEL, GITLAB_URL, GITLAB_TOKEN</span>
+cp .env.example .env     <span class="c"># DEFAULT_LLM_API_KEY, DEFAULT_LLM_MODEL, GITLAB_URL, GITLAB_TOKEN</span>
 
 docker build -t codereviewagent reviewer
 docker run --rm --env-file .env codereviewagent \

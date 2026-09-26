@@ -87,7 +87,7 @@ OpenAI-compatible LLM endpoint ([OpenRouter](https://openrouter.ai) works out of
 ```bash
 git clone https://github.com/systemgroup/codereviewagent.git
 cd codereviewagent
-cp .env.example .env        # set OPENROUTER_API_KEY, DEFAULT_LLM_MODEL, GITLAB_URL, GITLAB_TOKEN
+cp .env.example .env        # set DEFAULT_LLM_API_KEY, DEFAULT_LLM_MODEL, GITLAB_URL, GITLAB_TOKEN
 
 docker build -t codereviewagent reviewer
 docker run --rm --env-file .env codereviewagent \
@@ -110,7 +110,7 @@ ai-review:
     - cd /app && python main.py --gitlab-mr "$CI_MERGE_REQUEST_PROJECT_URL/-/merge_requests/$CI_MERGE_REQUEST_IID"
 ```
 
-Put `OPENROUTER_API_KEY`, `DEFAULT_LLM_MODEL`, `GITLAB_URL` and `GITLAB_TOKEN` in
+Put `DEFAULT_LLM_API_KEY`, `DEFAULT_LLM_MODEL`, `GITLAB_URL` and `GITLAB_TOKEN` in
 **Settings → CI/CD → Variables** (masked). The token needs `api` scope, which also covers
 the read-only clone.
 
@@ -184,8 +184,8 @@ most likely touch:
 
 | Variable | Purpose |
 |---|---|
-| `OPENROUTER_API_KEY`, `DEFAULT_LLM_MODEL` | LLM credentials and model id |
-| `OPENROUTER_BASE_URL` | Any OpenAI-compatible endpoint (default: OpenRouter) |
+| `DEFAULT_LLM_API_KEY`, `DEFAULT_LLM_MODEL` | LLM credentials and model id |
+| `DEFAULT_LLM_BASE_URL` | Any OpenAI-compatible endpoint (default: OpenRouter) |
 | `FALLBACK_LLM_MODEL` | Model to fail over to when the primary is rate-limited |
 | `GITLAB_URL`, `GITLAB_TOKEN` | Your GitLab and an `api`-scoped token |
 | `REVIEW_PROFILE` | Which review profile to use |

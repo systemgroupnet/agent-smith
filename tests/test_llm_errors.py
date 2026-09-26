@@ -100,7 +100,7 @@ def test_a_rejected_reasoning_field_retries_without_it(monkeypatch):
     not know it. A 400 is not retryable, so without this one call shape being
     repairable, a config value nobody could test would kill every call in the run."""
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("DEFAULT_LLM_API_KEY", "test-key-never-used")
     monkeypatch.setenv("LLM_REASONING_EFFORT", "xhigh")
     monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
     LLMGateway.reset()
@@ -130,7 +130,7 @@ def test_a_rejected_reasoning_field_retries_without_it(monkeypatch):
 def test_a_400_about_the_prompt_is_not_blamed_on_reasoning(monkeypatch):
     """The sniff must not turn an ordinary bad request into a silent retry."""
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("DEFAULT_LLM_API_KEY", "test-key-never-used")
     monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
     LLMGateway.reset()
     calls = []
@@ -153,7 +153,7 @@ def test_a_structured_call_with_no_tool_call_is_retried(monkeypatch):
     which is how the dedup stage crashed in production. Measured as intermittent
     (1 in 3 on deepseek-v4-flash at effort=xhigh), so a retry is the right answer."""
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("DEFAULT_LLM_API_KEY", "test-key-never-used")
     monkeypatch.setenv("LLM_RETRY_WAIT_MIN_S", "0")
     monkeypatch.setenv("LLM_RETRY_WAIT_MAX_S", "0")
     monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
@@ -176,7 +176,7 @@ def test_a_none_from_a_plain_call_is_left_alone(monkeypatch):
     """Only *structured* calls promise an object; a loop call may legitimately
     return something falsy, and inventing a failure there would be worse."""
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("DEFAULT_LLM_API_KEY", "test-key-never-used")
     monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
     LLMGateway.reset()
 
@@ -193,7 +193,7 @@ def test_a_persistently_missing_structured_output_reaches_the_caller(monkeypatch
     """After the budget, it must arrive as an exception the caller can handle —
     every structured agent already degrades on one, and none recognises a None."""
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("DEFAULT_LLM_API_KEY", "test-key-never-used")
     monkeypatch.setenv("LLM_RETRY_ATTEMPTS", "2")
     monkeypatch.setenv("LLM_RETRY_WAIT_MIN_S", "0")
     monkeypatch.setenv("LLM_RETRY_WAIT_MAX_S", "0")
@@ -214,7 +214,7 @@ def test_a_persistently_missing_structured_output_reaches_the_caller(monkeypatch
 @pytest.fixture
 def two_providers(monkeypatch):
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "primary/model")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("DEFAULT_LLM_API_KEY", "test-key-never-used")
     monkeypatch.setenv("FALLBACK_LLM_MODEL", "fallback/model")
     monkeypatch.setenv("LLM_RETRY_ATTEMPTS", "2")
     monkeypatch.setenv("LLM_RETRY_WAIT_MIN_S", "0")
@@ -319,7 +319,7 @@ def test_an_empty_model_response_is_retried_not_returned(monkeypatch):
     from core.llm.gateway_middleware import ProviderPolicyMiddleware
 
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "vendor/model")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-never-used")
+    monkeypatch.setenv("DEFAULT_LLM_API_KEY", "test-key-never-used")
     monkeypatch.setenv("LLM_RETRY_WAIT_MIN_S", "0")
     monkeypatch.setenv("LLM_RETRY_WAIT_MAX_S", "0")
     monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)

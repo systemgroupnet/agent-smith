@@ -35,7 +35,7 @@ so an accidental live call fails loudly instead of billing someone.
   rules in `common.py`, register a `ReviewerSpec` in `reviewer/core/agents/deep_reviewer.py`,
   and route a file type to it in a profile.
 - **A new LLM provider.** Anything OpenAI-compatible already works through
-  `OPENROUTER_BASE_URL`. Provider-specific behaviour belongs in `reviewer/core/llm/`.
+  `DEFAULT_LLM_BASE_URL`. Provider-specific behaviour belongs in `reviewer/core/llm/`.
 
 ## Code style
 

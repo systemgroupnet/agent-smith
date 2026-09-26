@@ -47,8 +47,13 @@ def _no_ambient_llm_credentials(monkeypatch):
     developer running the suite locally has `reviewer/.env` sitting right there
     with working credentials in it.
     """
-    for key in ("OPENROUTER_API_KEY", "FALLBACK_LLM_API_KEY"):
+    for key in ("DEFAULT_LLM_API_KEY", "FALLBACK_LLM_API_KEY"):
         monkeypatch.setenv(key, "test-suite-must-not-call-a-provider")
+    # The deprecated names are still read as fallbacks; a developer's shell may
+    # export them, and they must not leak a real key into a test either.
+    for key in ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "OPENROUTER_TIMEOUT_MS",
+                "DEFAULT_LLM_BASE_URL", "LLM_TIMEOUT_MS"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("DEFAULT_LLM_MODEL", "test/model")
     monkeypatch.delenv("FALLBACK_LLM_MODEL", raising=False)
 

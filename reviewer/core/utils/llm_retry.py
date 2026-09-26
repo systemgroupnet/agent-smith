@@ -133,7 +133,7 @@ _TRANSIENT_SIGNATURES = (
 )
 
 # Timeout-class failures get a lower attempt cap than other transient errors:
-# every attempt costs a *full* OPENROUTER_TIMEOUT_MS window (5 min by default),
+# every attempt costs a *full* LLM_TIMEOUT_MS window (5 min by default),
 # so the usual 3 attempts would spend ~15 min on one file and starve the rest of
 # the run's OVERALL_TIMEOUT_S budget. One retry is the useful part — it clears a
 # stalled connection — while a genuinely too-slow generation fails in ~10 min.
@@ -379,7 +379,7 @@ def parse_llm_error(err: BaseException) -> LLMErrorInfo:
 
     **HTTP 429 alone decides a rate limit.** The provider's own error code is
     extracted for the log label and never for a decision, because those codes are
-    provider-specific and the endpoint behind OPENROUTER_BASE_URL is whatever the
+    provider-specific and the endpoint behind DEFAULT_LLM_BASE_URL is whatever the
     deployment points at. z.ai's numbering (1302 concurrency, 1303 QPS, 1304 daily
     call cap, 1305 frequency) means nothing on OpenRouter or a vendor API that
     reuses the same integers for something else — reading them universally turns
@@ -551,7 +551,7 @@ def retry_attempt_budget(info: LLMErrorInfo) -> int:
     LLM_RETRY_ATTEMPTS (default 3) for most transient failures, with a cap either
     way where the *cost per attempt* argues for one. Timeout-class failures are
     capped at ``_TIMEOUT_MAX_ATTEMPTS``, because each attempt costs a full
-    OPENROUTER_TIMEOUT_MS window and three would spend ~15 min on one file. An empty
+    LLM_TIMEOUT_MS window and three would spend ~15 min on one file. An empty
     completion gets a *larger* budget (``_EMPTY_RESPONSE_MAX_ATTEMPTS``) for the
     mirror-image reason: it costs no output tokens and returns in seconds, and giving
     up on it loses the file.
