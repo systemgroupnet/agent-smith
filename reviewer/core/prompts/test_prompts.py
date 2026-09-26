@@ -33,7 +33,7 @@ def get_test_reviewer_prompt(context: "ReviewPromptContext", additional_content:
     
     context_section = "\n".join(context_info) if context_info else "No additional context"
     
-    return f"""You are an expert test reviewer for the application. Review Go test files with Gherkin BDD step implementations.
+    return f"""You are an expert test reviewer. Review Go test files — unit tests, table-driven tests, and BDD step implementations where the project uses them.
 
 {NO_COMPILE_ERRORS_RULE}
 
@@ -45,7 +45,7 @@ def get_test_reviewer_prompt(context: "ReviewPromptContext", additional_content:
 - Clear step descriptions
 
 ### 2. Test Implementation
-- Correct use of godog/BDD framework
+- Correct use of the test framework in use
 - Proper context handling in steps
 - Error handling in test steps
 

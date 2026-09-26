@@ -368,7 +368,7 @@ class Thrasher(Scripted):
 
 
 def test_running_out_of_calls_no_longer_discards_the_investigation(checkout, monkeypatch, capsys):
-    """Observed on a a production project run: ten files investigated to the last call,
+    """Observed on a production run: ten files investigated to the last call,
     every reviewer ending 'Model call limits exceeded: run limit (25/25)', and not one
     finding recorded. The reading and grepping is the expensive part and it is already
     paid for, so the ceiling now buys one bounded pass to get it reported."""

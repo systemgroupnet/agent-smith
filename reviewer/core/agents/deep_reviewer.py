@@ -68,6 +68,7 @@ from langchain.agents.middleware import ModelCallLimitMiddleware, TodoListMiddle
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
+from core.config.review_profile import get_profile
 from core.agents.findings_sink import FindingsSink, make_record_findings_tool
 from core.agents.review_contexts import ReviewPromptContext
 from core.config.langchain_config import build_chat_model
@@ -123,7 +124,7 @@ READ_ONLY_PERMISSIONS = [
 #: out to be well under what a real investigation costs: **every** tool round trip is a
 #: model call, and a reviewer spends two or three before it even reaches the file
 #: (looking for `.aid` instructions at the root, then the module, then a glob) plus one
-#: per grep. Observed on a a production project run — ten files, every reviewer ending
+#: per grep. Observed on a production run — ten files, every reviewer ending
 #: `26 model call(s) — hit the 25-call ceiling; ended with: 'Model call limits
 #: exceeded: run limit (25/25)'`, nothing recorded for any of them, the whole run
 #: wasted. 50 is chosen to leave room for that pattern rather than to be generous; the
@@ -237,20 +238,9 @@ REVIEWER_SPECS: Tuple[ReviewerSpec, ...] = (
 
 _SPECS_BY_NAME: Dict[str, ReviewerSpec] = {spec.name: spec for spec in REVIEWER_SPECS}
 
-#: file_type (from `core/utils/file_classifier.py`) -> reviewer subagent name(s).
-#: The same routing table as `graph.py::route_by_file_type`, including
-#: ``validation`` files being reviewed by the service reviewers.
-FILE_TYPE_ROUTING: Dict[str, Tuple[str, ...]] = {
-    "service": ("service_reviewer", "service_business_reviewer"),
-    "validation": ("service_reviewer", "service_business_reviewer"),
-    "sql": ("sql_reviewer",),
-    "test": ("test_reviewer",),
-    "pbook": ("pbook_reviewer",),
-    "dataview": ("dataview_reviewer",),
-    "typescript": ("typescript_reviewer",),
-    "html": ("html_reviewer",),
-    "scss": ("scss_reviewer",),
-}
+#: Which reviewers a file type goes to is not decided here: it comes from the
+#: review profile (`core/config/review_profile.py`, ``REVIEW_PROFILE``), so a
+#: codebase describes its own layout in YAML.
 
 
 def business_logic_enabled() -> bool:
@@ -260,20 +250,21 @@ def business_logic_enabled() -> bool:
 
 def route_file(file_type: str) -> Tuple[str, ...]:
     """Which reviewer subagent(s) a classified file goes to; () when unreviewable."""
-    names = FILE_TYPE_ROUTING.get((file_type or "").strip().lower(), ())
+    names = get_profile().reviewers_for(file_type)
     if not business_logic_enabled():
         names = tuple(n for n in names if n != "service_business_reviewer")
     return names
 
 
 def go_files(classified: Sequence[Tuple[str, str]]) -> List[str]:
-    """Paths in the plan that the *service* reviewers own, i.e. plain Go files.
+    """Paths the SQL routing classifier should scan for embedded SQL.
 
-    These are the only candidates for the SQL routing classifier: `db.go` already
-    goes to the SQL reviewer by name, and no other file type can hide SQL from its
-    extension.
+    The types come from the profile's ``sql_routing.scan_file_types`` — by default
+    plain Go files: `db.go` already goes to the SQL reviewer by name, and no other
+    type hides SQL behind its extension.
     """
-    return [path for path, file_type in classified if file_type in ("service", "validation")]
+    scan = get_profile().sql_scan_types
+    return [path for path, file_type in classified if file_type in scan]
 
 
 def add_sql_dispatches(
@@ -444,7 +435,7 @@ def build_reviewer(
     context = _prompt_context(source_branch=source_branch, mr_context=mr_context)
     return create_deep_agent(
         model=model,
-        system_prompt=spec.prompt_getter(context, "") + format_checkout_addendum(
+        system_prompt=spec.prompt_getter(context, get_profile().instructions_for(spec.name)) + format_checkout_addendum(
             clone_root=clone_root,
             agent_type=spec.agent_type,
             source_branch=source_branch,
@@ -516,7 +507,7 @@ async def _report_pass(build_agent, state: dict, path: str, spec_name: str) -> O
 
     The investigation is the expensive part and it is already paid for: the file has
     been read, the greps have run, and all of it is in the message history. Ending
-    there throws it away — observed on a a production project run where ten files were
+    there throws it away — observed on a production run where ten files were
     investigated to the last call and *none* produced a finding, because
     ``record_findings`` is the only channel out and nobody reached it.
 

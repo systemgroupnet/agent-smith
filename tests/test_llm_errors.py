@@ -54,7 +54,7 @@ def _json_decode_error():
 
 
 def test_an_unparseable_body_on_a_200_is_retryable():
-    """The failure that killed all four files of a production project MR 1180.
+    """The failure that killed all four files of a production MR.
 
     A 200 means the request was fine, so nothing about it can be *fixed* by the
     client — the body simply did not arrive intact. That is the definition of a

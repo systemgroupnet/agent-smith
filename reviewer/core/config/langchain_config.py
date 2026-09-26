@@ -321,7 +321,7 @@ def reasoning_config_for(model: str, *, structured: bool) -> Optional[dict]:
 
     Endpoints that do not know the field ignore it, which is the same passthrough
     contract ``provider`` rides on — and "ignore" is measured, not assumed, for the
-    endpoint this project is pointed at. On ``glm-5.3`` at ``…/llm-proxy/v4`` the
+    endpoint this project is pointed at. On ``glm-5.3`` behind an OpenAI-compatible reverse proxy the
     reasoning tokens the endpoint reports do not move with the level: ``high`` 379,
     ``low`` 374, ``minimal`` 279/356, **no field** 515/400, and its own native
     ``thinking={"type":"disabled"}`` produced *more* thinking (788) than ``enabled``

@@ -37,7 +37,7 @@ def get_dataview_reviewer_prompt(context: "ReviewPromptContext", additional_cont
     
     context_section = "\n".join(context_info) if context_info else "No additional context"
     
-    return f"""You are an expert reviewer for dataview files in the application.
+    return f"""You are an expert reviewer for dataview files — the query/projection layer that shapes stored data into what a screen or API returns.
 
 {NO_COMPILE_ERRORS_RULE}
 

@@ -1,0 +1,54 @@
+# Default review profile — a Go / SQL / TypeScript / web codebase.
+#
+# Copy this file, adapt it to your repository layout, and point REVIEW_PROFILE
+# at it (a path, or a bare name for a file in this directory).
+#
+# file_types is an ordered list: the FIRST rule a file matches decides its type.
+# Put specific names (db.go) before broad extensions (*.go). A pattern without a
+# "/" matches the basename; with a "/" it matches the whole repo-relative path.
+# Matching is case-insensitive. A file matching nothing is skipped.
+#
+# Reviewers available: service_reviewer, service_business_reviewer, sql_reviewer,
+# test_reviewer, typescript_reviewer, html_reviewer, scss_reviewer,
+# dataview_reviewer, pbook_reviewer.
+version: 1
+
+# Never reviewed. REVIEW_EXCLUDE_PATTERNS (comma-separated) is added to this.
+exclude:
+  - "vendor/*"
+  - "node_modules/*"
+  - "*.pb.go"
+  - "*.gen.go"
+  - "*.min.js"
+
+file_types:
+  - name: sql
+    match: ["*.sql"]
+    reviewers: [sql_reviewer]
+
+  - name: test
+    match: ["*_test.go"]
+    reviewers: [test_reviewer]
+
+  - name: typescript
+    match: ["*.ts", "*.tsx"]
+    reviewers: [typescript_reviewer]
+
+  - name: html
+    match: ["*.html"]
+    reviewers: [html_reviewer]
+
+  - name: scss
+    match: ["*.scss", "*.css"]
+    reviewers: [scss_reviewer]
+
+  # Two reviewers on the same file: technical quality, and "does it do what the
+  # ticket asked". BUSINESS_LOGIC_REVIEW_ENABLED=false drops the second.
+  - name: service
+    match: ["*.go"]
+    reviewers: [service_reviewer, service_business_reviewer]
+
+# Files of these types are scanned for embedded SQL (query strings, DDL); the
+# ones carrying real SQL also get sql_reviewer. An empty list disables it.
+sql_routing:
+  scan_file_types: [service]

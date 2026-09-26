@@ -68,7 +68,7 @@ from urllib.parse import urlsplit, urlunsplit
 #: slow but not unbounded; past this the review is better off degrading to the
 #: API-only path than spending its whole CI window on git.
 #:
-#: Measured on acme/shop (462 MiB repo, 28,229 files in the tree): a
+#: Measured on a large monorepo (462 MiB repo, 28,229 files in the tree): a
 #: ``--shallow-exclude`` clone took **403 s** over a WAN link, of which ~190 s was
 #: the server packing and sending ~40 MiB and **3 s** was writing the working
 #: tree. So this is a *download* budget, not a disk one, and it scales with the
@@ -168,7 +168,7 @@ def _run_git(args: Sequence[str], cwd: Optional[str] = None) -> subprocess.Compl
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_ASKPASS"] = "true"
-    # Never download LFS content. acme-shop carries **203 MiB of LFS objects**
+    # Never download LFS content. that monorepo carries **203 MiB of LFS objects**
     # on top of a 462 MiB repository, and on a runner that has git-lfs installed a
     # plain clone smudges every one of them — several minutes of download for
     # binaries a code reviewer will never read. The pointer files are still checked

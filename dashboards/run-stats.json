@@ -924,7 +924,7 @@
         "type": "grafana-postgresql-datasource",
         "uid": "ffrgyjxlmntogb"
       },
-      "description": "Comments actually posted on the MR, by the severity shown in the comment body (\ud83d\udd34 high / \ud83d\udfe0 medium / \ud83d\udd35 low). Compare with 'Issues found over time': the gap is what the in-diff gate and the comment reviewer removed.",
+      "description": "Comments actually posted on the MR, by the severity shown in the comment body (🔴 high / 🟠 medium / 🔵 low). Compare with 'Issues found over time': the gap is what the in-diff gate and the comment reviewer removed.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1081,7 +1081,7 @@
         "type": "grafana-postgresql-datasource",
         "uid": "ffrgyjxlmntogb"
       },
-      "description": "Severity mix of everything posted in the selected range. 'Unlabelled' means a comment reached the collector with no usable severity \u2014 normally zero.",
+      "description": "Severity mix of everything posted in the selected range. 'Unlabelled' means a comment reached the collector with no usable severity — normally zero.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1415,7 +1415,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  CASE\n    WHEN model_fallback_used THEN model || ' \u2192 ' || model_fallback_model\n    ELSE model\n  END AS \"Model\",\n  count(*) AS \"Runs\",\n  sum(issues_high) AS \"HighSeverityIssues\",\n  sum(comments_posted) AS \"CommentsPosted\",\n  round(\n    avg(duration_seconds) FILTER (\n      WHERE\n        review_type IN ('full', 'incremental')\n    ) :: numeric,\n    1\n  ) AS \"AverageSeconds\"\nFROM\n  review_runs\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(timestamp :: timestamptz)\nGROUP BY\n  1\nORDER BY\n  \"Runs\" DESC;",
+          "rawSql": "SELECT\n  CASE\n    WHEN model_fallback_used THEN model || ' → ' || model_fallback_model\n    ELSE model\n  END AS \"Model\",\n  count(*) AS \"Runs\",\n  sum(issues_high) AS \"HighSeverityIssues\",\n  sum(comments_posted) AS \"CommentsPosted\",\n  round(\n    avg(duration_seconds) FILTER (\n      WHERE\n        review_type IN ('full', 'incremental')\n    ) :: numeric,\n    1\n  ) AS \"AverageSeconds\"\nFROM\n  review_runs\nWHERE\n  project_path IN ($project)\n  AND $__timeFilter(timestamp :: timestamptz)\nGROUP BY\n  1\nORDER BY\n  \"Runs\" DESC;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2056,7 +2056,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  'https://gitlab.example.com/' || r.project_path || '/-/merge_requests/' || r.mr_id AS \"Link\",\n  r.project_path AS \"Project\",\n  r.mr_id AS \"MergeRequest\",\n  r.review_type AS \"ReviewType\",\n  r.status AS \"Status\",\n  coalesce(\n    replace(nullif(r.raw_json ->> 'review_verbosity', ''), 'review::', ''),\n    '\u2014'\n  ) AS \"Verbosity\",\n  p.high AS \"PostedHigh\",\n  p.medium AS \"PostedMedium\",\n  r.comments_posted AS \"CommentsPosted\",\n  r.comments_failed AS \"CommentsFailed\",\n  round(r.duration_seconds / 60) AS \"DurationMinutes\",\n  r.timestamp :: timestamptz AS \"Time\"\nFROM\n  review_runs r\n  LEFT JOIN LATERAL (\n    SELECT\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'high'\n      ) AS high,\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'medium'\n      ) AS medium\n    FROM\n      review_comments\n    WHERE\n      review_run_id = r.id\n  ) p ON TRUE\nWHERE\n  r.project_path IN ($project)\n  AND $__timeFilter(r.timestamp :: timestamptz)\nORDER BY\n  r.timestamp :: timestamptz DESC\nLIMIT\n  100;",
+          "rawSql": "SELECT\n  '${gitlab_url}' || r.project_path || '/-/merge_requests/' || r.mr_id AS \"Link\",\n  r.project_path AS \"Project\",\n  r.mr_id AS \"MergeRequest\",\n  r.review_type AS \"ReviewType\",\n  r.status AS \"Status\",\n  coalesce(\n    replace(nullif(r.raw_json ->> 'review_verbosity', ''), 'review::', ''),\n    '—'\n  ) AS \"Verbosity\",\n  p.high AS \"PostedHigh\",\n  p.medium AS \"PostedMedium\",\n  r.comments_posted AS \"CommentsPosted\",\n  r.comments_failed AS \"CommentsFailed\",\n  round(r.duration_seconds / 60) AS \"DurationMinutes\",\n  r.timestamp :: timestamptz AS \"Time\"\nFROM\n  review_runs r\n  LEFT JOIN LATERAL (\n    SELECT\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'high'\n      ) AS high,\n      count(*) FILTER (\n        WHERE\n          lower(severity) = 'medium'\n      ) AS medium\n    FROM\n      review_comments\n    WHERE\n      review_run_id = r.id\n  ) p ON TRUE\nWHERE\n  r.project_path IN ($project)\n  AND $__timeFilter(r.timestamp :: timestamptz)\nORDER BY\n  r.timestamp :: timestamptz DESC\nLIMIT\n  100;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2079,7 +2079,7 @@
       ],
       "title": "Latest runs",
       "type": "table",
-      "description": "PostedHigh / PostedMedium are comments actually posted on the MR (from review_comments), not issues found \u2014 the reviewers' raw counts pass through the in-diff gate, the compile-time purge and the verbosity cap before anything is posted, so they belong to 'Issues found over time', not here. Verbosity is the MR label in force: at the default level mediums are counted and then discarded, so PostedMedium 0 there is by design, not a loss. '\u2014' means the run predates the field. PostedHigh + PostedMedium below CommentsPosted means something else was posted (a low, or a comment with no severity)."
+      "description": "PostedHigh / PostedMedium are comments actually posted on the MR (from review_comments), not issues found — the reviewers' raw counts pass through the in-diff gate, the compile-time purge and the verbosity cap before anything is posted, so they belong to 'Issues found over time', not here. Verbosity is the MR label in force: at the default level mediums are counted and then discarded, so PostedMedium 0 there is by design, not a loss. '—' means the run predates the field. PostedHigh + PostedMedium below CommentsPosted means something else was posted (a low, or a comment with no severity)."
     }
   ],
   "preload": false,
@@ -2110,6 +2110,25 @@
         "refresh": 1,
         "regex": "",
         "type": "query"
+      },
+      {
+        "name": "gitlab_url",
+        "label": "GitLab URL",
+        "type": "textbox",
+        "description": "Base URL of your GitLab, with a trailing slash. Used to build merge-request links.",
+        "query": "https://gitlab.example.com/",
+        "current": {
+          "text": "https://gitlab.example.com/",
+          "value": "https://gitlab.example.com/"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "https://gitlab.example.com/",
+            "value": "https://gitlab.example.com/"
+          }
+        ],
+        "hide": 0
       }
     ]
   },

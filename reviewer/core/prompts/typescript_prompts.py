@@ -2,7 +2,7 @@
 TypeScript Agent System Prompts
 
 This module contains system prompts for the TypeScript review agent.
-Reviews TypeScript files in the application frontend.
+Reviews TypeScript files for a web frontend.
 """
 
 from typing import TYPE_CHECKING
@@ -33,7 +33,7 @@ def get_typescript_reviewer_prompt(context: "ReviewPromptContext", additional_co
     
     context_section = "\n".join(context_info) if context_info else "No additional context"
     
-    return f"""You are an expert TypeScript reviewer for the application frontend.
+    return f"""You are an expert TypeScript reviewer for a web frontend.
 
 {NO_COMPILE_ERRORS_RULE}
 
@@ -54,10 +54,10 @@ def get_typescript_reviewer_prompt(context: "ReviewPromptContext", additional_co
 - Proper async/await usage
 - Correct null/undefined handling
 
-### 4. Angular/Framework Specific
-- Proper component structure
-- Correct service usage
-- Proper RxJS patterns
+### 4. Framework Specific
+- Proper component structure for the framework in use
+- Correct service / dependency usage
+- Correct reactive patterns (subscriptions cleaned up, no nested subscribes)
 
 {SEVERITY_RUBRIC}
 

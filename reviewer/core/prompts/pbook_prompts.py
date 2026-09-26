@@ -2,7 +2,7 @@
 Pbook Agent System Prompts
 
 This module contains system prompts for the pbook (error message) review agent.
-Reviews error message definition files (pbook) in the application.
+Reviews error message definition files (pbook).
 """
 
 from typing import TYPE_CHECKING
@@ -33,7 +33,7 @@ def get_pbook_reviewer_prompt(context: "ReviewPromptContext", additional_content
     
     context_section = "\n".join(context_info) if context_info else "No additional context"
     
-    return f"""You are an expert reviewer for pbook (error message) files in the application.
+    return f"""You are an expert reviewer for message catalogue files — the error and user-facing messages an application defines, often in more than one language.
 
 {NO_COMPILE_ERRORS_RULE}
 
@@ -42,7 +42,7 @@ def get_pbook_reviewer_prompt(context: "ReviewPromptContext", additional_content
 ### 1. Error Message Quality
 - Clear, descriptive error messages
 - Consistent formatting and tone
-- Proper bilingual support (Persian/English)
+- Every supported language present and consistent
 
 ### 2. Error Code Structure
 - Unique error codes

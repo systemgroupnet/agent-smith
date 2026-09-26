@@ -41,7 +41,7 @@ def get_reviewer_version() -> str:
     """Resolve the running reviewer's version from the PR_AGENT_IMAGE env.
 
     The GitLab runner sets PR_AGENT_IMAGE to this agent's full image ref
-    (e.g. ``registry.example.com/aid/codereviewagent/reviewer:v0.3.2``).
+    (e.g. ``registry.example.com/codereviewagent/reviewer:v0.3.2``).
     The version is the tag after the final ':'. We guard against a registry-port
     colon with no tag (that trailing segment still contains '/') by falling back
     to the full value. Always returns a non-empty string so every event carries

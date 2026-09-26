@@ -106,7 +106,7 @@ class EmptyModelResponse(RuntimeError):
     no tool calls, treats the message as the final answer, and ends. A reviewer that
     ends this way has read nothing and recorded nothing, and it does so without an
     error — which is how a run reported ``3 file(s) failed to review`` with no
-    failure anywhere in the log (a production project MR 1162: the whole conversation was one
+    failure anywhere in the log (a production MR: the whole conversation was one
     human turn and one empty assistant message with ``finish_reason: stop``).
 
     Measured on ``deepseek/deepseek-v4-flash-0731`` through the reverse proxy, with
@@ -515,7 +515,7 @@ class LLMGateway:
                     #
                     #    The exhaustion arm is what turns "this file is lost" into
                     #    "this file runs on the throttled provider that still works".
-                    #    Observed on a production project MR 1180: the primary hit its
+                    #    Observed on a production MR: the primary hit its
                     #    concurrency limit (429/1302), the run switched, and the
                     #    fallback answered **HTTP 200 with a body that was not JSON**
                     #    (`JSONDecodeError: Expecting value`) — so all four files died

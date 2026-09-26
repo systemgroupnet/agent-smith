@@ -4,34 +4,23 @@ services:
     container_name: codereview-atlassian-mcp
     restart: unless-stopped
     env_file:
-      - .env.mcp.atlassian
+      - path: .env.mcp.atlassian      # cp .env.mcp.atlassian.example .env.mcp.atlassian
+        required: false
     networks:
       - codereview-network
     command: ["--transport", "streamable-http", "--port", "9000"]
     ports:
       - "3011:9000"
 
-  mcp-gitlab:
-    image: iwakitakuma/gitlab-mcp
-    container_name: codereview-gitlab-mcp
-    restart: unless-stopped
-    env_file:
-      - .env.mcp.gitlab
-    networks:
-      - codereview-network
-    ports:
-      - "3010:3002"
-
   codereviewagent:
     build:
       context: ./reviewer
       dockerfile: Dockerfile
-    image: registry.example.com/code-reviewer:v0.0.1
+    image: codereviewagent-reviewer:local
     container_name: codereviewagent
     restart: unless-stopped
     depends_on:
       - mcp-atlassian
-      - mcp-gitlab
       - collector
     env_file:
       - .env
@@ -46,7 +35,7 @@ services:
       - MCP_ATLASSIAN_ENABLED=${MCP_ATLASSIAN_ENABLED:-false}
       - MCP_ATLASSIAN_URL=${MCP_ATLASSIAN_URL:-http://mcp-atlassian:9000}
       - MCP_ATLASSIAN_TRANSPORT=${MCP_ATLASSIAN_TRANSPORT:-streamable-http}
-      - MCP_GITLAB_ENABLED=true
+      - MCP_GITLAB_ENABLED=${MCP_GITLAB_ENABLED:-false}
       - MCP_GITLAB_URL=${MCP_GITLAB_URL:-http://mcp-gitlab:3002}
       - MCP_GITLAB_TRANSPORT=${MCP_GITLAB_TRANSPORT:-streamable-http}
       - GITLAB_URL=${GITLAB_URL}
@@ -106,10 +95,10 @@ services:
       - MATTERMOST_URL=${MATTERMOST_URL:-}
       - MATTERMOST_TOKEN=${MATTERMOST_TOKEN:-}
       - MATTERMOST_CHANNEL_ID=${MATTERMOST_CHANNEL_ID:-}
-      - DIGEST_DAY=${DIGEST_DAY:-sun}
-      - DIGEST_HOUR=${DIGEST_HOUR:-12:00}
+      - DIGEST_DAY=${DIGEST_DAY:-mon}
+      - DIGEST_HOUR=${DIGEST_HOUR:-9}
       - DIGEST_MINUTE=${DIGEST_MINUTE:-}
-      - DIGEST_TIMEZONE=${DIGEST_TIMEZONE:-Asia/Tehran}
+      - DIGEST_TIMEZONE=${DIGEST_TIMEZONE:-UTC}
       - DIGEST_TICK_S=${DIGEST_TICK_S:-}
       - DIGEST_ENABLED=${DIGEST_ENABLED:-}
     networks:

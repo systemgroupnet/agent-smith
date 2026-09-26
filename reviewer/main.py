@@ -24,6 +24,7 @@ load_dotenv()
 from core.MCP.toolkit_manager import initialize_mcp_toolkits, close_mcp_toolkits
 
 # Import utility modules
+from core.config.review_profile import ProfileError, get_profile
 from core.utils.url_parser import parse_gitlab_mr_url, should_exclude_file
 from core.utils.gitlab_helpers import (
     get_gitlab_mr_info,
@@ -654,6 +655,17 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         record_error(metrics, "config", "GITLAB_TOKEN is not set")
         return 1
 
+    # The review profile decides what gets reviewed at all, so a broken one is a
+    # configuration error before any LLM call — not a file silently skipped later.
+    try:
+        profile = get_profile()
+    except ProfileError as err:
+        print(f"❌ {err}")
+        metrics.status = "config_error"
+        record_error(metrics, "config", str(err))
+        return 1
+    print(f"🗂️  Review profile: {profile.source}\n")
+
     # Fail fast if the LLM endpoint is unreachable or the key is rejected. A
     # *throttled* endpoint is not a failure — see llm_preflight.
     preflight_error = await llm_preflight(metrics)
@@ -807,9 +819,11 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     elif effort_already_labeled:
         print("🧮 Review-effort label already set — skipping estimation\n")
 
-    # Get exclusion patterns from environment variable
+    # Exclusions: the review profile's, plus REVIEW_EXCLUDE_PATTERNS
     exclusion_patterns_str = os.getenv("REVIEW_EXCLUDE_PATTERNS", "")
-    exclusion_patterns = [p.strip() for p in exclusion_patterns_str.split(",") if p.strip()]
+    exclusion_patterns = list(get_profile().exclude) + [
+        p.strip() for p in exclusion_patterns_str.split(",") if p.strip()
+    ]
     if exclusion_patterns:
         print(f"🚫 Exclusion patterns: {', '.join(exclusion_patterns)}\n")
     
@@ -890,7 +904,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     # without one has nothing to review and says so.
     #
     # The budget starts **before** the clone, not after: measured on
-    # acme-shop, checking out the source branch took 403s of a 1500s budget
+    # a large monorepo, checking out the source branch took 403s of a 1500s budget
     # (download-bound — ~190s of it the server sending 40MiB, 3s writing 28k
     # files). A deadline computed afterwards would hand the coverage pass a fresh
     # full budget on top. One clock for the whole review.

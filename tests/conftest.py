@@ -69,6 +69,22 @@ def _reset_provider_latch():
     LLMGateway.reset()
 
 
+@pytest.fixture(autouse=True)
+def _default_review_profile(monkeypatch):
+    """Every test starts on the bundled default profile, freshly loaded.
+
+    The profile is cached per process (it is read once at startup in a real run),
+    so a test that points ``REVIEW_PROFILE`` elsewhere would otherwise leak its
+    routing into every test after it.
+    """
+    from core.config.review_profile import reset_profile
+
+    monkeypatch.delenv("REVIEW_PROFILE", raising=False)
+    reset_profile()
+    yield
+    reset_profile()
+
+
 @pytest.fixture
 def git_origin(tmp_path):
     """A real local git repository: `main` with 3 commits, a feature branch with 4.

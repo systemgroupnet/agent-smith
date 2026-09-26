@@ -93,3 +93,7 @@ pip-delete-this-directory.txt
 # Claude Code local session state
 .claude/
 
+
+# MCP server credentials (templates: .env.mcp.*.example)
+.env.mcp.gitlab
+.env.mcp.atlassian

@@ -2,7 +2,7 @@
 HTML Agent System Prompts
 
 This module contains system prompts for the HTML template review agent.
-Reviews HTML template files for the application frontend.
+Reviews HTML template files for a web frontend.
 """
 
 from typing import TYPE_CHECKING
@@ -33,7 +33,7 @@ def get_html_reviewer_prompt(context: "ReviewPromptContext", additional_content:
     
     context_section = "\n".join(context_info) if context_info else "No additional context"
     
-    return f"""You are an expert HTML reviewer for the application frontend.
+    return f"""You are an expert HTML reviewer for a web frontend.
 
 {NO_COMPILE_ERRORS_RULE}
 
@@ -54,7 +54,7 @@ def get_html_reviewer_prompt(context: "ReviewPromptContext", additional_content:
 - Proper form structure
 - Valid HTML5
 
-### 4. Angular Templates
+### 4. Framework Templates
 - Correct directive usage
 - Proper data binding
 - Event handler patterns

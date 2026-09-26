@@ -1110,7 +1110,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH per_user AS (\n  SELECT\n    note_id,\n    user_id,\n    AVG(score) AS user_score\n  FROM\n    comment_scores\n  WHERE\n    $__timeFilter(received_at :: timestamptz)\n    AND project_path IN ($project)\n  GROUP BY\n    note_id,\n    user_id\n)\nSELECT\n  rc.project_path AS \"Project\",\n  'https://gitlab.example.com/' || rc.project_path || '/-/merge_requests/' || rc.mr_id || '#note_' || rc.note_id AS \"Link\",\n  -- rc.mr_id AS \"MR\",\n  rc.file AS \"File\",\n  rc.line AS \"Line\",\n  INITCAP(rc.severity) AS \"Severity\",\n  COUNT(*) AS \"Raters\",\n  AVG(pu.user_score) :: numeric(4, 2) AS \"Avg Rating\"\nFROM\n  per_user pu\n  JOIN review_comments rc ON rc.note_id = pu.note_id\nGROUP BY\n  rc.note_id,\n  rc.project_path,\n  rc.mr_id,\n  rc.file,\n  rc.line,\n  rc.severity\nORDER BY\n  \"Avg Rating\" ASC,\n  \"Raters\" DESC\nLIMIT\n  20;",
+          "rawSql": "WITH per_user AS (\n  SELECT\n    note_id,\n    user_id,\n    AVG(score) AS user_score\n  FROM\n    comment_scores\n  WHERE\n    $__timeFilter(received_at :: timestamptz)\n    AND project_path IN ($project)\n  GROUP BY\n    note_id,\n    user_id\n)\nSELECT\n  rc.project_path AS \"Project\",\n  '${gitlab_url}' || rc.project_path || '/-/merge_requests/' || rc.mr_id || '#note_' || rc.note_id AS \"Link\",\n  -- rc.mr_id AS \"MR\",\n  rc.file AS \"File\",\n  rc.line AS \"Line\",\n  INITCAP(rc.severity) AS \"Severity\",\n  COUNT(*) AS \"Raters\",\n  AVG(pu.user_score) :: numeric(4, 2) AS \"Avg Rating\"\nFROM\n  per_user pu\n  JOIN review_comments rc ON rc.note_id = pu.note_id\nGROUP BY\n  rc.note_id,\n  rc.project_path,\n  rc.mr_id,\n  rc.file,\n  rc.line,\n  rc.severity\nORDER BY\n  \"Avg Rating\" ASC,\n  \"Raters\" DESC\nLIMIT\n  20;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1232,7 +1232,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  -- cs.project_path AS \"Project\",\n  'https://gitlab.example.com/' || cs.project_path || '/-/merge_requests/' || cs.mr_id || '#note_' || cs.note_id AS \"Link\",\n  cs.score AS \"Score\",\n  rr.reviewer_version AS \"Version\",\n  cs.user_name AS \"User\"\nFROM\n  comment_scores cs\n  INNER JOIN review_comments rc ON cs.note_id = rc.note_id\n  INNER JOIN review_runs rr ON rr.id = rc.review_run_id\nWHERE\n  $__timeFilter(cs.awarded_at::timestamptz)\n  AND cs.project_path IN ($project)\nORDER BY\n  cs.awarded_at DESC",
+          "rawSql": "SELECT\n  -- cs.project_path AS \"Project\",\n  '${gitlab_url}' || cs.project_path || '/-/merge_requests/' || cs.mr_id || '#note_' || cs.note_id AS \"Link\",\n  cs.score AS \"Score\",\n  rr.reviewer_version AS \"Version\",\n  cs.user_name AS \"User\"\nFROM\n  comment_scores cs\n  INNER JOIN review_comments rc ON cs.note_id = rc.note_id\n  INNER JOIN review_runs rr ON rr.id = rc.review_run_id\nWHERE\n  $__timeFilter(cs.awarded_at::timestamptz)\n  AND cs.project_path IN ($project)\nORDER BY\n  cs.awarded_at DESC",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1337,7 +1337,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH replies AS (\n  SELECT cr.parent_note_id, cr.parent_kind, cr.author_username, cr.body,\n         COALESCE(NULLIF(cr.noted_at,'')::timestamptz, cr.received_at::timestamptz) AS reply_time\n  FROM comment_replies cr\n)\nSELECT\n  'https://gitlab.example.com/' || COALESCE(rc.project_path, rs.project_path)\n    || '/-/merge_requests/' || COALESCE(rc.mr_id, rs.mr_id)\n    || '#note_' || r.parent_note_id                    AS \"Link\",\n  INITCAP(COALESCE(r.parent_kind, 'finding'))          AS \"Kind\",\n  r.body                                               AS \"Reply\",\n  r.author_username                                    AS \"Replied by\"\nFROM replies r\nLEFT JOIN review_comments  rc ON rc.note_id = r.parent_note_id\nLEFT JOIN review_summaries rs ON rs.note_id = r.parent_note_id\nWHERE $__timeFilter(r.reply_time)\n  AND COALESCE(rc.project_path, rs.project_path) IN ($project)\nORDER BY r.reply_time DESC;",
+          "rawSql": "WITH replies AS (\n  SELECT cr.parent_note_id, cr.parent_kind, cr.author_username, cr.body,\n         COALESCE(NULLIF(cr.noted_at,'')::timestamptz, cr.received_at::timestamptz) AS reply_time\n  FROM comment_replies cr\n)\nSELECT\n  '${gitlab_url}' || COALESCE(rc.project_path, rs.project_path)\n    || '/-/merge_requests/' || COALESCE(rc.mr_id, rs.mr_id)\n    || '#note_' || r.parent_note_id                    AS \"Link\",\n  INITCAP(COALESCE(r.parent_kind, 'finding'))          AS \"Kind\",\n  r.body                                               AS \"Reply\",\n  r.author_username                                    AS \"Replied by\"\nFROM replies r\nLEFT JOIN review_comments  rc ON rc.note_id = r.parent_note_id\nLEFT JOIN review_summaries rs ON rs.note_id = r.parent_note_id\nWHERE $__timeFilter(r.reply_time)\n  AND COALESCE(rc.project_path, rs.project_path) IN ($project)\nORDER BY r.reply_time DESC;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1577,7 +1577,7 @@
           "format": "table",
           "rawQuery": true,
           "refId": "A",
-          "rawSql": "SELECT\n  'https://gitlab.example.com/' || rs.project_path\n    || '/-/merge_requests/' || rs.mr_id || '#note_' || rs.note_id  AS \"Link\",\n  COALESCE(rs.model, '(unknown)')   AS \"Model\",\n  AVG(ss.score)::numeric(4,2)       AS \"Avg Rating\",\n  COUNT(DISTINCT ss.id)             AS \"Ratings\",\n  COUNT(DISTINCT cr.note_id)        AS \"Replies\",\n  rs.mr_author_username             AS \"MR Author\"\nFROM review_summaries rs\nLEFT JOIN summary_scores ss ON ss.note_id = rs.note_id\nLEFT JOIN comment_replies cr\n       ON cr.parent_note_id = rs.note_id AND cr.parent_kind = 'summary'\nWHERE rs.project_path IN ($project)\n  AND $__timeFilter(rs.received_at::timestamptz)\nGROUP BY rs.note_id, rs.project_path, rs.mr_id, rs.model, rs.mr_author_username\nORDER BY \"Avg Rating\" ASC NULLS LAST, \"Ratings\" DESC\nLIMIT 50;",
+          "rawSql": "SELECT\n  '${gitlab_url}' || rs.project_path\n    || '/-/merge_requests/' || rs.mr_id || '#note_' || rs.note_id  AS \"Link\",\n  COALESCE(rs.model, '(unknown)')   AS \"Model\",\n  AVG(ss.score)::numeric(4,2)       AS \"Avg Rating\",\n  COUNT(DISTINCT ss.id)             AS \"Ratings\",\n  COUNT(DISTINCT cr.note_id)        AS \"Replies\",\n  rs.mr_author_username             AS \"MR Author\"\nFROM review_summaries rs\nLEFT JOIN summary_scores ss ON ss.note_id = rs.note_id\nLEFT JOIN comment_replies cr\n       ON cr.parent_note_id = rs.note_id AND cr.parent_kind = 'summary'\nWHERE rs.project_path IN ($project)\n  AND $__timeFilter(rs.received_at::timestamptz)\nGROUP BY rs.note_id, rs.project_path, rs.mr_id, rs.model, rs.mr_author_username\nORDER BY \"Avg Rating\" ASC NULLS LAST, \"Ratings\" DESC\nLIMIT 50;",
           "sql": {
             "columns": [
               {
@@ -1607,11 +1607,12 @@
       {
         "allowCustomValue": false,
         "current": {
+          "selected": true,
           "text": [
-            "acme/shop"
+            "All"
           ],
           "value": [
-            "acme/shop"
+            "$__all"
           ]
         },
         "datasource": {
@@ -1628,6 +1629,25 @@
         "refresh": 1,
         "regex": "",
         "type": "query"
+      },
+      {
+        "name": "gitlab_url",
+        "label": "GitLab URL",
+        "type": "textbox",
+        "description": "Base URL of your GitLab, with a trailing slash. Used to build merge-request links.",
+        "query": "https://gitlab.example.com/",
+        "current": {
+          "text": "https://gitlab.example.com/",
+          "value": "https://gitlab.example.com/"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "https://gitlab.example.com/",
+            "value": "https://gitlab.example.com/"
+          }
+        ],
+        "hide": 0
       }
     ]
   },

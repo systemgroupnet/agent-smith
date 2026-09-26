@@ -2,7 +2,7 @@
 SCSS Agent System Prompts
 
 This module contains system prompts for the SCSS/CSS review agent.
-Reviews SCSS/CSS files for the application frontend.
+Reviews SCSS/CSS files for a web frontend.
 """
 
 from typing import TYPE_CHECKING
@@ -33,7 +33,7 @@ def get_scss_reviewer_prompt(context: "ReviewPromptContext", additional_content:
     
     context_section = "\n".join(context_info) if context_info else "No additional context"
     
-    return f"""You are an expert SCSS/CSS reviewer for the application frontend.
+    return f"""You are an expert SCSS/CSS reviewer for a web frontend.
 
 {NO_COMPILE_ERRORS_RULE}
 

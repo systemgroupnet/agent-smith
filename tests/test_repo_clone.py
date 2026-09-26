@@ -155,7 +155,7 @@ def test_credentials_never_reach_a_log(monkeypatch):
 
 
 def test_lfs_is_never_smudged():
-    """acme-shop carries 203 MiB of LFS objects no reviewer will read."""
+    """A real monorepo carries 203 MiB of LFS objects no reviewer will read."""
     import inspect
 
     assert 'GIT_LFS_SKIP_SMUDGE"] = "1"' in inspect.getsource(rc._run_git)

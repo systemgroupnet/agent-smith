@@ -43,7 +43,7 @@ def get_semantic_reviewer_prompt(context: "ReviewPromptContext", additional_cont
 CRITICAL AREAS TO REVIEW:
 1. Correctness: Nil checks, race conditions, defer in loops, type assertions
 2. Error Handling: Ignored errors, missing wrapping (fmt.Errorf with %w), transaction rollbacks
-3. GORM/Database: Transaction management, N+1 queries (missing Preload), SQL injection, using db vs tx
+3. Database access: Transaction management, N+1 queries, SQL injection, using the connection instead of the open transaction
 4. Context: Missing ctx parameters, not propagating context, goroutine leaks
 5. Performance: DB queries in loops, missing pagination, inefficient queries
 6. Security: SQL injection, logging sensitive data, hardcoded secrets
@@ -67,7 +67,6 @@ CONSTRAINTS:
 - Focus on changed code (Git Diff)
 - NO comments on documentation, tests, or business logic
 
-DATABASE CONTEXT: Postgres + GORM
 
 RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (specific), suggestion (actionable with code), file_name, line (exact number), severity ("high"|"medium"|"low").
 
