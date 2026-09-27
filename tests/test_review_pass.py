@@ -395,3 +395,60 @@ def test_the_call_ceiling_is_configurable():
         assert reviewer_call_limit() == DEFAULT_REVIEWER_CALL_LIMIT, "0 is not a ceiling"
     finally:
         del os.environ["REVIEWER_CALL_LIMIT"]
+
+
+class SlowThrasher(Thrasher):
+    """Every call is slow, the way a reasoning model at high effort is.
+
+    Observed on `acme/shop!12798`: 62 calls, fifteen of them 36–121 s of
+    reasoning, 1119 s of model time — the watchdog fired well before the call ceiling
+    and the reviewer's whole investigation was discarded.
+    """
+
+    delay_s: float = 0.15
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        await asyncio.sleep(self.delay_s)
+        return await super()._agenerate(messages, stop, run_manager, **kwargs)
+
+
+def test_a_slow_reviewer_is_braked_and_salvaged_before_the_watchdog(checkout, capsys):
+    """The call ceiling bounds calls, not time. The time brake ends the reviewer cleanly
+    at a share of FILE_REVIEW_TIMEOUT_S, so it goes through the same salvage pass as one
+    that ran out of calls instead of being cancelled with nothing recorded."""
+    result = asyncio.run(review_changed_files(
+        classified=[("svc/order.go", "service")], clone_root=str(checkout),
+        source_branch="feature/x", mr_context="", model=SlowThrasher(),
+        per_file_timeout_s=2.0, provider_policy=False))
+
+    out = capsys.readouterr().out
+    assert result.failed_files == [], out
+    assert sum(len(issues) for _p, issues in result.all_comments) >= 1
+    assert "ran out of time" in out
+    assert "timed out" not in out, "the brake should fire before the watchdog"
+
+
+class Hanger(Thrasher):
+    """Greps a few times, then makes one call that never comes back.
+
+    The brake is checked between calls, so it cannot interrupt this; the watchdog
+    does, and what was read before it fired must still be reported."""
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        told = any("used your entire tool budget" in str(getattr(m, "content", "") or "")
+                   for m in messages)
+        if not told and sum(1 for m in messages if isinstance(m, ToolMessage)) >= 2:
+            await asyncio.sleep(60)
+        return await super()._agenerate(messages, stop, run_manager, **kwargs)
+
+
+def test_a_watchdog_timeout_still_salvages_what_was_read(checkout, capsys):
+    result = asyncio.run(review_changed_files(
+        classified=[("svc/order.go", "service")], clone_root=str(checkout),
+        source_branch="feature/x", mr_context="", model=Hanger(),
+        per_file_timeout_s=1.0, provider_policy=False))
+
+    out = capsys.readouterr().out
+    assert "timed out" in out
+    assert result.failed_files == [], out
+    assert sum(len(issues) for _p, issues in result.all_comments) >= 1

@@ -64,7 +64,10 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from deepagents import FilesystemMiddleware, FilesystemPermission, create_deep_agent
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from deepagents.backends import FilesystemBackend
-from langchain.agents.middleware import ModelCallLimitMiddleware, TodoListMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware, ModelCallLimitMiddleware, TodoListMiddleware, hook_config,
+)
+from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
@@ -136,6 +139,66 @@ DEFAULT_REVIEWER_CALL_LIMIT = 50
 #: A reviewer that hit the ceiling is asked, once, to report what it already has. It
 #: needs one call to do that and one for a tool result, so three is generous.
 REPORT_PASS_CALL_LIMIT = 3
+
+#: Share of ``FILE_REVIEW_TIMEOUT_S`` a reviewer may spend investigating before it is
+#: stopped and salvaged. The call ceiling bounds *calls*, not time, and a call's cost
+#: is wildly uneven: on `acme/shop!12798` a `glm-5.3-flash` reviewer at
+#: `xhigh` made 62 calls in which most answered in 1–3 s and fifteen spent 2–6k
+#: reasoning tokens (36–121 s each) deciding the next grep — 1119 s of model time,
+#: killed by the watchdog at call 62 of 75 with nothing recorded. The brake is checked
+#: between calls, so the remaining quarter has to absorb one slow in-flight call
+#: (~120 s observed) plus the salvage pass.
+REVIEW_TIME_BRAKE_FRACTION = 0.75
+
+#: Text of the closing message the time brake leaves, so the salvage check can tell a
+#: braked reviewer from one that finished on its own.
+TIME_BRAKE_MESSAGE = "Review time budget reached"
+
+#: Floor for the salvage pass's own bound once the file's budget is spent. The pass is
+#: one or two calls over a history that is already cached, but one of them can still
+#: be a long reasoning call.
+SALVAGE_MIN_TIMEOUT_S = 180.0
+
+
+class ReviewTimeBrakeMiddleware(AgentMiddleware):
+    """End a reviewer cleanly once it has investigated for ``budget_s`` seconds.
+
+    The wall-clock twin of ``ModelCallLimitMiddleware(exit_behavior="end")``: it jumps
+    to the end instead of raising, so the history survives and the reviewer goes
+    through the same salvage pass as one that ran out of calls. The alternative is the
+    watchdog, which cancels the invocation and loses everything it learned.
+
+    The clock starts at the first model call, i.e. per invocation — a fresh instance
+    is built for every reviewer-file pair.
+    """
+
+    def __init__(self, budget_s: float) -> None:
+        super().__init__()
+        self.budget_s = budget_s
+        self._started: Optional[float] = None
+
+    def _check(self) -> Optional[dict]:
+        now = time.monotonic()
+        if self._started is None:
+            self._started = now
+            return None
+        elapsed = now - self._started
+        if elapsed < self.budget_s:
+            return None
+        return {
+            "jump_to": "end",
+            "messages": [AIMessage(content=(
+                f"{TIME_BRAKE_MESSAGE} ({elapsed:.0f}s of {self.budget_s:.0f}s); "
+                f"stopping the investigation."))],
+        }
+
+    @hook_config(can_jump_to=["end"])
+    def before_model(self, state, runtime) -> Optional[dict]:  # noqa: ARG002
+        return self._check()
+
+    @hook_config(can_jump_to=["end"])
+    async def abefore_model(self, state, runtime) -> Optional[dict]:  # noqa: ARG002
+        return self._check()
 
 
 def reviewer_call_limit() -> int:
@@ -373,6 +436,7 @@ def build_reviewer(
     file_path: Optional[str] = None,
     call_limit: int = DEFAULT_REVIEWER_CALL_LIMIT,
     provider_policy: bool = True,
+    time_budget_s: Optional[float] = None,
 ):
     """Build one reviewer as a plain agent over the checkout.
 
@@ -419,6 +483,9 @@ def build_reviewer(
         # net over those tools rather than a replacement for that wrapper.
         tool_error_middleware(),
     ]
+    if time_budget_s and time_budget_s > 0:
+        # The call ceiling's wall-clock twin — see ReviewTimeBrakeMiddleware.
+        middleware.append(ReviewTimeBrakeMiddleware(time_budget_s))
     # One line per tool call, so a run's log shows whether a reviewer actually read
     # the file and grepped for the caller — or answered from the diff alone. Labelled
     # per reviewer-and-file because FILE_BATCH_SIZE of these run at once.
@@ -457,17 +524,18 @@ def _ai_messages(state: object) -> list:
 
 
 def _hit_call_ceiling(state: object, call_limit: int) -> bool:
-    """Whether a reviewer stopped because it ran out of model calls.
+    """Whether a reviewer was stopped by a brake rather than finishing on its own.
 
     Two signals, because either alone can be wrong: the count reaching the limit, and
     the middleware's own closing message. `exit_behavior="end"` makes this a *clean*
-    finish, indistinguishable from a real one without looking.
+    finish, indistinguishable from a real one without looking. The time brake ends
+    the same way and is recognised by its message.
     """
     ai = _ai_messages(state)
     if call_limit and len(ai) >= call_limit:
         return True
     last = " ".join(str(getattr(m, "content", "") or "") for m in ai[-1:]).lower()
-    return "model call limit" in last
+    return "model call limit" in last or TIME_BRAKE_MESSAGE.lower() in last
 
 
 def _describe_finish(state: object, call_limit: int) -> str:
@@ -502,7 +570,9 @@ REPORT_NOW_INSTRUCTION = (
 )
 
 
-async def _report_pass(build_agent, state: dict, path: str, spec_name: str) -> Optional[dict]:
+async def _report_pass(build_agent, state: dict, path: str, spec_name: str,
+                       timeout_s: Optional[float] = None,
+                       why: str = "ran out of calls") -> Optional[dict]:
     """Ask a reviewer that hit the ceiling to report what it already found.
 
     The investigation is the expensive part and it is already paid for: the file has
@@ -514,15 +584,25 @@ async def _report_pass(build_agent, state: dict, path: str, spec_name: str) -> O
     So the same history is handed back with one instruction: report now, no more tools.
     A fresh agent because ``ModelCallLimitMiddleware`` counts per invocation, with a
     ceiling of three so this can never become a second investigation.
+
+    ``timeout_s`` bounds it in wall-clock too: a reviewer is salvaged precisely when
+    its model has been slow, and an unbounded pass would hold the lane indefinitely.
     """
-    print(f"  🧷 [review] {spec_name} ran out of calls on {path} — "
+    print(f"  🧷 [review] {spec_name} {why} on {path} — "
           f"asking it to report what it already found")
     try:
         agent = build_agent(REPORT_PASS_CALL_LIMIT)
         messages = list(state.get("messages", [])) + [
             {"role": "user", "content": REPORT_NOW_INSTRUCTION}
         ]
-        return await agent.ainvoke({"messages": messages})
+        call = agent.ainvoke({"messages": messages})
+        if timeout_s and timeout_s > 0:
+            return await asyncio.wait_for(call, timeout=timeout_s)
+        return await call
+    except asyncio.TimeoutError:
+        print(f"  ⚠️  [review] {spec_name}: report pass timed out on {path} "
+              f"after {timeout_s:.0f}s")
+        return None
     except Exception as e:  # noqa: BLE001 — a failed salvage must not mask the original
         print(f"  ⚠️  [review] {spec_name}: report pass failed on {path}: {describe_error(e)}")
         return None
@@ -649,7 +729,9 @@ async def review_changed_files(
     async def _one(path: str, spec: ReviewerSpec) -> Optional[str]:
         """Run one reviewer on one file. Returns the path on failure."""
 
-        def build_agent(limit: int):
+        bounded = bool(per_file_timeout_s and per_file_timeout_s > 0)
+
+        def build_agent(limit: int, time_budget_s: Optional[float] = None):
             return build_reviewer(
                 spec,
                 clone_root=clone_root,
@@ -661,21 +743,54 @@ async def review_changed_files(
                 file_path=path,
                 call_limit=limit,
                 provider_policy=provider_policy,
+                time_budget_s=time_budget_s,
             )
 
-        agent = build_agent(limit)
-        call = agent.ainvoke(
-            {"messages": [{"role": "user", "content": f"Review {path}"}]},
-            config=config,
+        agent = build_agent(
+            limit,
+            per_file_timeout_s * REVIEW_TIME_BRAKE_FRACTION if bounded else None,
         )
+        # Streamed rather than invoked so the latest state survives a watchdog
+        # cancellation: `ainvoke` is this same stream's last value, but a cancelled
+        # `ainvoke` returns nothing, and the history is what the salvage pass needs.
+        latest: dict = {}
+
+        async def _run() -> dict:
+            async for chunk in agent.astream(
+                {"messages": [{"role": "user", "content": f"Review {path}"}]},
+                config=config,
+                stream_mode="values",
+            ):
+                latest["state"] = chunk
+            return latest.get("state") or {}
+
+        began = time.monotonic()
+
+        def salvage_budget() -> Optional[float]:
+            if not bounded:
+                return None
+            left = per_file_timeout_s - (time.monotonic() - began)
+            return max(left, SALVAGE_MIN_TIMEOUT_S)
+
         try:
-            if per_file_timeout_s and per_file_timeout_s > 0:
-                state = await asyncio.wait_for(call, timeout=per_file_timeout_s)
+            if bounded:
+                state = await asyncio.wait_for(_run(), timeout=per_file_timeout_s)
             else:
-                state = await call
+                state = await _run()
         except asyncio.TimeoutError:
-            reasons[(path, spec.name)] = f"timed out after {per_file_timeout_s:.0f}s"
             print(f"  ⏳ {spec.name} timed out on {path}")
+            state = latest.get("state") or {}
+            if path not in sink.reviewed_files and _ai_messages(state):
+                # The backstop for a call the time brake could not interrupt (it is
+                # checked between calls). What the reviewer read before the watchdog
+                # fired is still worth reporting.
+                salvaged = await _report_pass(
+                    build_agent, state, path, spec.name,
+                    timeout_s=SALVAGE_MIN_TIMEOUT_S, why="timed out")
+                if path in sink.reviewed_files:
+                    reasons[(path, spec.name)] = _describe_finish(salvaged or state, limit)
+                    return None
+            reasons[(path, spec.name)] = f"timed out after {per_file_timeout_s:.0f}s"
             return path
         except Exception as e:
             reasons[(path, spec.name)] = describe_error(e)
@@ -683,11 +798,15 @@ async def review_changed_files(
             return path
         # It returned. That is not the same as having reported: `record_findings` is
         # the only channel out, and a reviewer can finish without using it — by
-        # answering in prose, or by spending its ModelCallLimitMiddleware budget.
+        # answering in prose, or by being stopped by the call ceiling or time brake.
         if path not in sink.reviewed_files and _hit_call_ceiling(state, limit):
             # Everything it learned is in the history and cost real calls; ending here
             # would discard all of it. One bounded pass to get it recorded.
-            salvaged = await _report_pass(build_agent, state, path, spec.name)
+            braked = TIME_BRAKE_MESSAGE.lower() in " ".join(
+                str(getattr(m, "content", "") or "") for m in _ai_messages(state)[-1:]).lower()
+            salvaged = await _report_pass(
+                build_agent, state, path, spec.name, timeout_s=salvage_budget(),
+                why="ran out of time" if braked else "ran out of calls")
             if salvaged is not None:
                 state = salvaged
         reasons[(path, spec.name)] = _describe_finish(state, limit)
