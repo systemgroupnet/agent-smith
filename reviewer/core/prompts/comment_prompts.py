@@ -14,7 +14,7 @@ changes. Raising the level raises the budget, it does not open the gate.
 
 from typing import Optional
 
-from core.prompts.common import SEVERITY_RUBRIC
+from core.prompts.common import PLAIN_LANGUAGE_RULE, SEVERITY_RUBRIC
 from core.utils.review_verbosity import DEFAULT, Verbosity
 
 
@@ -201,6 +201,10 @@ You cannot fix a severity by editing the `severity` field — that field is rest
 {_closing_note(v)}
 - Before you emit `selected_issues`, re-read each one and drop it if it still asserts that something is undefined, unused, unimplemented, or would not compile.
 - For the `problem` field: Create a clear, concise summary of the issue. If multiple comments relate to the same problem, synthesize them into one coherent problem statement. **Every issue in `selected_issues` must carry one.** It is the whole text of the posted comment, so an omitted `problem` is stored as an empty string and renders as a bare 🔴 badge on someone's diff — a click that tells them nothing. Putting the description in `suggestion` does not substitute: that field is code applied to the file, and a fix with no explanation is a patch someone is asked to trust blind. An issue you cannot describe belongs in `filtered_count`, not in `selected_issues`.
+- The `problem` text you write is what gets posted, so the plain-language rule below applies to it. When you merge or shorten comments, rewrite dense or wordy input into plain English; do not copy it word for word.
+
+{PLAIN_LANGUAGE_RULE}
+
 - For the `suggestion` field: include the code only, exactly as the input comment gave it. If the input only describes the problem without providing code, leave `suggestion` EMPTY — an empty suggestion is correct and expected. Do NOT put a description of what should be done in this field: it is applied to the file verbatim, so a sentence there gets committed into the source as code. Anything you want to say about the fix belongs in `problem`.
 - For the `severity` field: copy the input comment's severity through **unchanged**. Do not re-grade it. It is rendered as a 🔴/🟠/🔵 badge on the comment a human reads and is recorded per comment in analytics — and an omitted severity is stored as "low", which would label a high-severity finding as trivial.
 - Focus on issues that, if not addressed, could cause real problems in production

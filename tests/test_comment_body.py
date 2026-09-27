@@ -231,3 +231,25 @@ def test_no_reviewer_is_left_able_to_read_padding_as_thoroughness(name):
     text = REVIEWER_PROMPTS[name](ReviewPromptContext(), "")
     assert "`record_findings` with an empty list is a correct and expected answer" in text
     assert "Never pad a report" in text
+
+
+# ── plain language: the text has to be readable, not just present ────────────
+
+@pytest.mark.parametrize("name", sorted(REVIEWER_PROMPTS))
+def test_every_reviewer_is_told_to_write_plain_english(name):
+    text = REVIEWER_PROMPTS[name](ReviewPromptContext(), "")
+    assert text.count("**Write `problem` in plain, simple English.**") == 1
+
+
+def test_the_comment_reviewer_rewrites_into_plain_english():
+    """It is the last writer before posting, so a rule only the reviewers hear
+    is undone by a ranking stage that copies dense input verbatim."""
+    text = get_comment_reviewer_prompt()
+    assert text.count("**Write `problem` in plain, simple English.**") == 1
+    assert "rewrite dense or wordy input into plain English" in text
+
+
+def test_simple_is_not_allowed_to_mean_vague():
+    from core.prompts.common import PLAIN_LANGUAGE_RULE
+    assert "Simple means easy to read, not less precise." in PLAIN_LANGUAGE_RULE
+    assert "keep every symbol in backticks" in PLAIN_LANGUAGE_RULE

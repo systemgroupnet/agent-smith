@@ -149,6 +149,32 @@ SYMBOL_FORMATTING_RULE = (
 )
 
 
+# Shared across every reviewer prompt and the comment reviewer: how `problem`
+# reads. The people reading these comments mostly read English as a second
+# language, skimming a narrow column beside the diff. A comment they have to
+# read twice is one they skip. So the rule asks for short sentences and common
+# words, and says what to keep: precise technical terms and backticked symbols.
+# Without that, "simple" would turn into "vague", which is worse.
+PLAIN_LANGUAGE_RULE = (
+    "**Write `problem` in plain, simple English.** Many readers speak English as "
+    "a second language, and they read your comment quickly beside the diff. Make "
+    "it easy to understand on the first read:\n"
+    "- Use short sentences, one idea each. Put the problem first, then what goes "
+    "wrong because of it.\n"
+    "- Use common words. Write \"use\", not \"leverage\"; \"because\", not \"due to "
+    "the fact that\"; \"can crash\", not \"may potentially result in a failure "
+    "condition\".\n"
+    "- Be concrete. Say what happens, when, and to what: \"If `order` is nil, "
+    "`Save()` panics and the request returns 500.\" Do not write \"this could "
+    "lead to issues\".\n"
+    "- No idioms, slang, sarcasm, or rhetorical questions. No filler such as "
+    "\"It is worth noting that\" or \"Please consider\".\n"
+    "- Keep the right technical terms (nil, race condition, SQL injection, "
+    "transaction) and keep every symbol in backticks. Simple means easy to read, "
+    "not less precise."
+)
+
+
 # Shared across every reviewer prompt, and interpolated LAST of the shared rules:
 # a finding is only worth what its `problem` text says, and an empty one is worth
 # less than nothing. `ReviewIssue.problem` defaults to `""` — lenient on purpose,

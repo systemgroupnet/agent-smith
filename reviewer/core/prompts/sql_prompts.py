@@ -14,6 +14,7 @@ from core.prompts.common import (
     NO_COMPILE_ERRORS_RULE,
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
+    PLAIN_LANGUAGE_RULE,
     EMPTY_FINDING_RULE,
 )
 
@@ -68,6 +69,8 @@ override the general guidance below.
 {SUGGESTION_FIELD_RULE}
 
 {SYMBOL_FORMATTING_RULE}
+
+{PLAIN_LANGUAGE_RULE}
 
 {EMPTY_FINDING_RULE}
 
