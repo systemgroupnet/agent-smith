@@ -209,7 +209,11 @@ for rec in git("log", "--all", "--format=%h%x00%an%x00%ae%x00%cn%x00%ce%x00%B%x0
         continue
     h, an, ae, cn, ce, body = rec.strip("\n").split("\x00", 5)
     for name, email in ((an, ae), (cn, ce)):
-        if email not in published or deny.search(f"{name} <{email}>"):
+        # After the mailmap rewrite, every email left is one someone wrote on the
+        # public side of .oss/mailmap, so the email is not denylist-checked here:
+        # an internal address published on purpose (the author chose to keep it)
+        # would otherwise be refused. An unmapped one still fails `not in published`.
+        if email not in published or deny.search(name):
             bad_idents.add(f"{name} <{email}>")
     for n, line in enumerate(body.splitlines(), 1):
         if deny.search(line):
