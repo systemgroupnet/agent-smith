@@ -400,7 +400,7 @@ def test_the_call_ceiling_is_configurable():
 class SlowThrasher(Thrasher):
     """Every call is slow, the way a reasoning model at high effort is.
 
-    Observed on `acme/shop!12798`: 62 calls, fifteen of them 36–121 s of
+    Observed on a large production MR: 62 calls, fifteen of them 36–121 s of
     reasoning, 1119 s of model time — the watchdog fired well before the call ceiling
     and the reviewer's whole investigation was discarded.
     """

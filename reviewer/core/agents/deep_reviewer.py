@@ -142,7 +142,7 @@ REPORT_PASS_CALL_LIMIT = 3
 
 #: Share of ``FILE_REVIEW_TIMEOUT_S`` a reviewer may spend investigating before it is
 #: stopped and salvaged. The call ceiling bounds *calls*, not time, and a call's cost
-#: is wildly uneven: on `acme/shop!12798` a `glm-5.3-flash` reviewer at
+#: is wildly uneven: on a large production MR a `glm-5.3-flash` reviewer at
 #: `xhigh` made 62 calls in which most answered in 1–3 s and fifteen spent 2–6k
 #: reasoning tokens (36–121 s each) deciding the next grep — 1119 s of model time,
 #: killed by the watchdog at call 62 of 75 with nothing recorded. The brake is checked
