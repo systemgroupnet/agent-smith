@@ -396,7 +396,51 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Avg Rating"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 6
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "7-day avg"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.gradientMode",
+                "value": "scheme"
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -414,7 +458,7 @@
         },
         "tooltip": {
           "hideZeros": false,
-          "mode": "single",
+          "mode": "multi",
           "sort": "none"
         }
       },
@@ -428,7 +472,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  date_trunc('day', received_at::timestamptz) AS \"time\",\n  AVG(score)::numeric(4,2) AS \"Avg Rating\"\nFROM comment_scores\nWHERE\n  $__timeFilter(received_at::timestamptz)\n  AND project_path IN ($project)\nGROUP BY 1\nORDER BY 1",
+          "rawSql": "-- One row per day that has ratings in the picked range. The CTE reads 6 extra\n-- days before the range so the rolling window is full from the first day.\nWITH daily AS (\n  SELECT\n    date_trunc('day', received_at::timestamptz) AS day,\n    SUM(score) AS score_sum,\n    COUNT(*) AS n,\n    AVG(score) FILTER (WHERE $__timeFilter(received_at::timestamptz)) AS in_range_avg\n  FROM comment_scores\n  WHERE\n    received_at::timestamptz >= $__timeFrom()::timestamptz - INTERVAL '6 days'\n    AND received_at::timestamptz <= $__timeTo()::timestamptz\n    AND project_path IN ($project)\n  GROUP BY 1\n)\nSELECT \"time\", \"Avg Rating\", \"7-day avg\"\nFROM (\n  SELECT\n    day AS \"time\",\n    in_range_avg::numeric(4,2) AS \"Avg Rating\",\n    (SUM(score_sum) OVER w / SUM(n) OVER w)::numeric(4,2) AS \"7-day avg\"\n  FROM daily\n  WINDOW w AS (ORDER BY day RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW)\n) t\nWHERE \"Avg Rating\" IS NOT NULL\nORDER BY 1",
           "refId": "A",
           "sql": {
             "columns": [
@@ -450,7 +494,8 @@
         }
       ],
       "title": "Average rating per day",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Grey points: the average rating of each day. Line: the 7-day rolling average, weighted by how many ratings each day had, so a day with one rating moves it less than a day with twenty. The window looks back 6 days before the picked range, so the first week of the line is a full 7-day average too."
     },
     {
       "datasource": {

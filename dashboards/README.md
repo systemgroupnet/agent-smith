@@ -91,6 +91,14 @@ Two consequences worth knowing:
   column. Both filters therefore sit on the already-joined `review_runs`
   (`r.project_path`, `r.timestamp`), i.e. *versions that ran in the window, and every
   rating of their comments*.
+* **A rolling average reads past the picked range on purpose.** The trend line in
+  `Average rating per day` is a 7-day average weighted by rating count, which is
+  not an average of the daily points: a day with one rating moves it less than a
+  day with twenty. Its CTE fetches from `$__timeFrom() - 6 days`. That way the
+  first week of the line is a full window, not a 1-, 2- or 3-day average that
+  looks like a trend. `$__timeFilter` still decides which days are *shown*: it
+  sits in a `FILTER` on the daily average, and days with no in-range rating are
+  dropped. Keep the lookback equal to the window size − 1 if you change it.
 
 **Timestamps are `TEXT`, not `timestamptz`.** Every time filter must cast:
 `$__timeFilter(received_at::timestamptz)`. Without the cast Postgres compares
