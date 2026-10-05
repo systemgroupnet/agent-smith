@@ -102,7 +102,9 @@ SEVERITY_RUBRIC = (
     "unposted today is worth more than a fake high.\n"
     "2. **Missing tests are medium.** However thorough your analysis of which "
     "branches are uncovered, absent tests are not a production defect. The "
-    "exception is a test that asserts something false, which is high.\n"
+    "exception is a test that asserts something false or cannot fail at all — "
+    "nothing asserts the outcome, an assertion is commented out, a `.only` or "
+    "`.skip` is left in — which is high: it reports green while checking nothing.\n"
     "3. **Name the consequence in the `problem` text for every high.** Not "
     "\"this is critical\" — what actually goes wrong, for whom, and when."
 )

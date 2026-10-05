@@ -10,7 +10,8 @@ replacement rubric in place and cover the ranking stage's demotion channel.
 from core.agents.review_contexts import ReviewPromptContext
 from core.prompts import (
     get_business_logic_reviewer_prompt, get_comment_reviewer_prompt,
-    get_dataview_reviewer_prompt, get_html_reviewer_prompt, get_pbook_reviewer_prompt,
+    get_dataview_reviewer_prompt, get_e2e_reviewer_prompt, get_html_reviewer_prompt,
+    get_pbook_reviewer_prompt,
     get_scss_reviewer_prompt, get_semantic_reviewer_prompt, get_sql_reviewer_prompt,
     get_test_reviewer_prompt, get_typescript_reviewer_prompt,
 )
@@ -28,6 +29,7 @@ GETTERS = {
     "business": get_business_logic_reviewer_prompt,
     "sql": get_sql_reviewer_prompt,
     "test": get_test_reviewer_prompt,
+    "e2e": get_e2e_reviewer_prompt,
     "typescript": get_typescript_reviewer_prompt,
     "html": get_html_reviewer_prompt,
     "scss": get_scss_reviewer_prompt,

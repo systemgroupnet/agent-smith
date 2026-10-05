@@ -75,8 +75,9 @@ re-posts a finding that is already on the merge request.
 4. **Post**, with retries, a fallback to a general note when a line can't be anchored, and a
    refusal to post any comment with no text in it.
 
-Nine reviewers ship built in: `service_reviewer` (technical quality), `service_business_reviewer`
-(does the code do what the ticket asked), `sql_reviewer`, `test_reviewer`, `typescript_reviewer`,
+Ten reviewers ship built in: `service_reviewer` (technical quality), `service_business_reviewer`
+(does the code do what the ticket asked), `sql_reviewer`, `test_reviewer`, `e2e_reviewer`
+(browser end-to-end specs), `typescript_reviewer`,
 `html_reviewer`, `scss_reviewer`, `dataview_reviewer` and `pbook_reviewer` (message catalogues).
 
 ## Quickstart
