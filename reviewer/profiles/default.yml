@@ -9,8 +9,8 @@
 # Matching is case-insensitive. A file matching nothing is skipped.
 #
 # Reviewers available: service_reviewer, service_business_reviewer, sql_reviewer,
-# test_reviewer, typescript_reviewer, html_reviewer, scss_reviewer,
-# dataview_reviewer, pbook_reviewer.
+# test_reviewer, e2e_reviewer, typescript_reviewer, html_reviewer,
+# scss_reviewer, dataview_reviewer, pbook_reviewer.
 version: 1
 
 # Never reviewed. REVIEW_EXCLUDE_PATTERNS (comma-separated) is added to this.
@@ -29,6 +29,12 @@ file_types:
   - name: test
     match: ["*_test.go"]
     reviewers: [test_reviewer]
+
+  # Browser end-to-end specs (Playwright and similar). Path-scoped, because a
+  # unit test is a *.spec.ts too — point this at wherever your e2e suite lives.
+  - name: e2e
+    match: ["*e2e/*.spec.ts"]
+    reviewers: [e2e_reviewer]
 
   - name: typescript
     match: ["*.ts", "*.tsx"]

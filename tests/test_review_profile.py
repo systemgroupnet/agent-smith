@@ -30,6 +30,16 @@ def test_the_default_profile_has_no_company_conventions():
     assert profile.classify("x/y_test.go") == "test"
 
 
+def test_only_an_e2e_spec_goes_to_the_e2e_reviewer():
+    """A unit test is a *.spec.ts too, so the default rule is scoped by path."""
+    profile = get_profile()
+    assert profile.classify("e2e/login.spec.ts") == "e2e"
+    assert profile.classify("apps/web-e2e/src/checkout/pay.spec.ts") == "e2e"
+    assert profile.classify("src/app/cart.component.spec.ts") == "typescript"
+    assert profile.classify("e2e/support/login.page.ts") == "typescript"
+    assert route_file("e2e") == ("e2e_reviewer",)
+
+
 def test_every_bundled_profile_loads():
     names = sorted(p.stem for p in PROFILES_DIR.glob("*.yml"))
     assert "default" in names

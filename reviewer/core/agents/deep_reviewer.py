@@ -82,6 +82,7 @@ from core.llm.gateway_middleware import ProviderPolicyMiddleware
 from core.prompts import (
     get_business_logic_reviewer_prompt,
     get_dataview_reviewer_prompt,
+    get_e2e_reviewer_prompt,
     get_html_reviewer_prompt,
     get_pbook_reviewer_prompt,
     get_scss_reviewer_prompt,
@@ -224,7 +225,7 @@ class ReviewerSpec:
     prompt_getter: object
 
 
-#: The nine reviewers. ``service`` is two of them because it always was two — a
+#: The ten reviewers. ``service`` is two of them because it always was two — a
 #: semantic reviewer and a business-logic reviewer that run against the same file
 #: and whose findings merge in the sink. Declaring them separately keeps that
 #: behaviour and keeps each prompt intact.
@@ -266,6 +267,16 @@ REVIEWER_SPECS: Tuple[ReviewerSpec, ...] = (
             "they claim and cover the behaviour changed. Use for _test.go, ts.go and *_ts.go."
         ),
         prompt_getter=get_test_reviewer_prompt,
+    ),
+    ReviewerSpec(
+        name="e2e_reviewer",
+        agent_type="e2e",
+        description=(
+            "Reviews browser end-to-end specs (Playwright): whether each spec can fail, "
+            "fixed sleeps and left-in .only/.skip, helper and selector discipline, and "
+            "whether the title matches what the spec does. Use for e2e *.spec.ts files."
+        ),
+        prompt_getter=get_e2e_reviewer_prompt,
     ),
     ReviewerSpec(
         name="pbook_reviewer",
