@@ -120,7 +120,7 @@ You cannot fix a severity by editing the `severity` field — that field is rest
 
 - Only **lowering** a severity has any effect. A correction that raises one is ignored.
 - A finding you demote below what this merge request posts is **not posted** — which is the point. If it is a real medium, it is better unposted than posted as a fake high.
-- **Demote a high that names no reachable trigger.** "If `x` were nil", "could", "in theory", "under heavy load" — with nothing saying how a real request, job or user action gets there — is a medium. So is a high about pre-existing code this merge request did not change, including any whose `problem` starts "Pre-existing, not changed by this MR:". The observed failure is inflation, not over-correction: when a high gives you no trigger, demote it.
+- **Demote a high that names no reachable trigger.** "If `x` were nil", "could", "in theory", "under heavy load" — with nothing saying how a real request, job or user action gets there — is a medium. So is a high about pre-existing code this merge request did not change, including any whose `problem` starts "Pre-existing, not changed by this MR:". A defect that holds on every run needs no trigger and stays high — a wrong formula, a test that cannot fail, a hardcoded credential: the reviewers are told the same, and demoting these would undo it. The observed failure is inflation, not over-correction: when a high gives you no trigger, demote it.
 - A high that names a real trigger and a real consequence stays. When every high does, an empty list is the right answer.
 - Judge by the rubric, not by how interesting the finding is. "Missing test coverage", however thorough the analysis, is a medium.
 

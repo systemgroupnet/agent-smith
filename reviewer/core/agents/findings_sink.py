@@ -34,6 +34,7 @@ it whatever the middleware does with context.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -122,6 +123,35 @@ class RecordFindingsArgs(BaseModel):
     )
 
 
+#: A path-shaped token: a name with a 2–5 character extension starting with a
+#: letter, optionally with directories. The extension rule keeps prose ("e.g.",
+#: "i.e.") and numbers ("0.35", "v1.2") from reading as paths.
+_PATH_TOKEN = re.compile(r"[\w.\-/]*\w\.[A-Za-z][A-Za-z0-9]{1,4}\b")
+
+
+def finding_file_name(reported: Optional[str], own_path: str) -> str:
+    """The ``file_name`` a finding is stored under.
+
+    Normally exactly what the reviewer reported (the in-diff gate resolves bare
+    and suffix forms against the MR), or the file it reviewed when it reported
+    none. But a reviewer explaining a cross-file finding sometimes writes prose
+    into the field. Observed on this agent's own MR: ``comment_prompts.py,
+    common.py (VERIFY_BEFORE_REPORTING, check 4 has the carve-out this rule
+    lacks; …)``. No gate can resolve that, so a real finding was dropped as an
+    unknown file. Such a value is reduced to the first path it names, the file it
+    is about, since prose names the defective file first; with no path in it at
+    all, to the file under review. The gate still decides whether that path and
+    line are in the MR.
+    """
+    raw = (reported or "").strip()
+    if not raw:
+        return own_path
+    if not re.search(r"[\s,;()]", raw):
+        return raw
+    match = _PATH_TOKEN.search(raw)
+    return FindingsSink._normalise(match.group(0)) if match else own_path
+
+
 @dataclass
 class FindingsSink:
     """Run-scoped collector for everything the reviewer subagents report."""
@@ -156,7 +186,8 @@ class FindingsSink:
     #: downstream it makes the in-diff gate match by basename rather than by path.
     @staticmethod
     def _normalise(path: str) -> str:
-        """Repository-relative form of whatever path the model reported."""
+        """Repository-relative form of whatever path the model reported (see also
+        :func:`finding_file_name` for a finding's own ``file_name``)."""
         cleaned = (path or "").strip().replace("\\", "/")
         while cleaned.startswith("./"):
             cleaned = cleaned[2:]
@@ -187,7 +218,7 @@ class FindingsSink:
                 issue = ReviewIssue(
                     problem=item.problem,
                     suggestion=item.suggestion,
-                    file_name=(item.file_name or path),
+                    file_name=finding_file_name(item.file_name, path),
                     line=item.line,
                     severity=item.severity,
                 )

@@ -80,6 +80,15 @@ def test_the_comment_reviewer_is_no_longer_told_to_spare_an_inflated_high():
         "the marker the reviewers are told to write is the one it demotes on"
 
 
+def test_the_comment_reviewer_keeps_the_reviewers_every_run_exception():
+    """VERIFY_BEFORE_REPORTING tells reviewers a defect that holds on every run is
+    its own trigger. The ranking stage's demotion rule left that out, so it would
+    demote exactly those highs — found by this agent reviewing its own MR."""
+    text = get_comment_reviewer_prompt()
+    assert "A defect that holds on every run needs no trigger and stays high" in text
+    assert "a test that cannot fail" in text
+
+
 def test_whether_indexes_matter_is_left_to_the_profile():
     """A house that doesn't review indexes says so in its `comment_reviewer`
     instructions; the generic ranking prompt is shared by every profile."""

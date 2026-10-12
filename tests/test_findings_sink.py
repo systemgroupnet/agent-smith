@@ -10,7 +10,8 @@ coverage ledger, which is what distinguishes "reviewed and clean" from "never ra
 import pytest
 
 from core.agents.findings_sink import (
-    MAX_FINDINGS_PER_FILE, FindingsSink, RecordedFinding, make_record_findings_tool,
+    MAX_FINDINGS_PER_FILE, FindingsSink, RecordedFinding, finding_file_name,
+    make_record_findings_tool,
 )
 from core.utils.comment_formatter import extract_issues_for_review
 
@@ -119,3 +120,40 @@ def test_the_other_spellings_of_the_same_path_also_collapse():
 
     assert sink.reviewed_files == {"svc/pay.go"}, "one file, however it was spelled"
     assert len(sink.as_all_comments()) == 1
+
+
+# ── a finding's own file_name ────────────────────────────────────────────────
+
+#: Verbatim from this agent's review of its own MR, where the in-diff gate dropped
+#: the finding as an unknown file.
+PROSE_FILE_NAME = (
+    "reviewer/core/prompts/comment_prompts.py, reviewer/core/prompts/common.py "
+    "(VERIFY_BEFORE_REPORTING, check 4 has the carve-out this rule lacks; "
+    "tests/test_severity.py asserts the current wording)"
+)
+
+
+@pytest.mark.parametrize("reported,expected", [
+    # A plain path, bare or suffixed, passes untouched: the gate resolves those.
+    ("svc/order.go", "svc/order.go"),
+    ("order.go", "order.go"),
+    ("", "svc/own.go"),
+    (None, "svc/own.go"),
+    # Prose: the first path it names, normalised.
+    (PROSE_FILE_NAME, "reviewer/core/prompts/comment_prompts.py"),
+    ("./svc/pay.go (the caller)", "svc/pay.go"),
+    (".aid/service.md, rule 3", ".aid/service.md"),
+    # Prose naming no path: the file under review, never a fragment of the prose.
+    ("e.g. the caller, see 0.35 and v1.2", "svc/own.go"),
+])
+def test_a_findings_file_name_is_a_path(reported, expected):
+    assert finding_file_name(reported, "svc/own.go") == expected
+
+
+def test_a_prose_file_name_is_stored_as_the_path_it_names():
+    sink = FindingsSink()
+    sink.record("reviewer/core/prompts/common.py",
+                [RecordedFinding(problem=LONG, line=123, severity="high",
+                                 file_name=PROSE_FILE_NAME)])
+    (issue,) = sink.findings["reviewer/core/prompts/common.py"]
+    assert issue["file_name"] == "reviewer/core/prompts/comment_prompts.py"
