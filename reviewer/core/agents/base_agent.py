@@ -9,6 +9,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Optional, Type, TypeVar, Generic
 from pydantic import BaseModel
+from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
@@ -84,9 +85,17 @@ class BaseReviewAgent(ABC, Generic[T]):
         Called by the gateway, once per provider. ``function_calling`` is forced so
         the call routes to the same providers as tool calls (avoiding the
         json-schema/strict "no endpoints match your data policy" 404 on OpenRouter).
+
+        The system prompt goes in as a ``SystemMessage``, not a ``("system", text)``
+        template: a template reads every ``{...}`` in the text as a variable, and the
+        comment reviewer's prompt carries the review profile's house rules — free
+        text a team writes, where ``if err != nil { return err }`` is an ordinary
+        thing to quote. As a template, one brace pair fails every call with a missing
+        variable, and the ranking stage falls back to its deterministic stand-in
+        on every run.
         """
         prompt = ChatPromptTemplate.from_messages([
-            ("system", self.get_system_prompt()),
+            SystemMessage(content=self.get_system_prompt()),
             ("human", "{input}"),
         ])
         return prompt | model.with_structured_output(self.output_model, method="function_calling")

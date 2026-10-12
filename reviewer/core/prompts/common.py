@@ -110,6 +110,77 @@ SEVERITY_RUBRIC = (
 )
 
 
+#: What a reviewer is reviewing: the merge request's change, not the file.
+#:
+#: About 6% of the replies developers wrote to this agent's comments rejected them
+#: as out of scope — a finding on pre-existing code, on code the MR only moved into
+#: a new `if`, on a query whose only change was a rename. A reviewer with a whole
+#: checkout reads everything around the change, which is the point of having one,
+#: and without a stated boundary it reports on everything it read. The in-diff gate
+#: in main.py does not catch this: re-indented and renamed lines *are* diff lines,
+#: so a finding about their unchanged logic anchors cleanly and is posted.
+#:
+#: The rule keeps one way in for old code — this change makes it worse or newly
+#: reachable — because that is a genuine finding *about this MR*, and it requires
+#: the finding to be anchored on, and to name, the changed line responsible.
+CHANGE_SCOPE_RULE = (
+    "## SCOPE — review what this merge request changed\n"
+    "The Git Diff section shows the lines this merge request adds or changes. Report "
+    "problems in those lines; read the rest of the file and the repository only to "
+    "understand them.\n"
+    "- Code that was only moved, only re-indented (for example wrapped in a new "
+    "`if`), or changed only by a rename is not new code.\n"
+    "- A problem in code this merge request did not change is out of scope, even if "
+    "it is real — unless this change causes it, makes it reachable on a new path, or "
+    "makes it worse. Then anchor `line` on the changed line that causes it and name "
+    "that change in `problem`.\n"
+    "- If you nonetheless report a pre-existing problem, start `problem` with "
+    "\"Pre-existing, not changed by this MR:\" and never mark it high.\n"
+    "- If the Git Diff section is empty, treat the whole file as changed."
+)
+
+
+#: The checks a high must survive before it is recorded.
+#:
+#: From the same analysis of developer replies: ~16% rejected a comment as clashing
+#: with a team convention, ~15% as factually wrong, ~7% as unreachable yet badged
+#: high. The wrong ones cluster in two shapes — library semantics stated from memory
+#: (GORM scanning NULL, protobuf getters being nil-safe, Playwright's `.not`, Angular
+#: pipe precedence) and "X is not validated / authorized" when the check lives in a
+#: caller or a helper one call away. Each check below targets one of those, and each
+#: is something the reviewer can now actually do, because it holds a checkout and
+#: `grep`. Scoped to highs: a high is what gets posted at the default verbosity, so
+#: it is where a wrong claim costs a developer's attention, and checking every
+#: medium the same way would spend the call budget on findings nobody sees.
+#:
+#: Every check has an exit that is not "drop it" — demote to medium — so the rule
+#: cannot read as "report nothing you cannot prove".
+VERIFY_BEFORE_REPORTING = (
+    "## VERIFY A HIGH BEFORE YOU RECORD IT\n"
+    "A high must pass all four checks. If one fails, drop the finding or record it "
+    "as medium.\n"
+    "1. **House pattern.** `grep` for the same construct outside the files this "
+    "merge request changes. If it is used in several places, it is a convention or "
+    "a framework guarantee: report it only if you can say why this instance is "
+    "different. Security and data-loss defects are exempt — report them and say "
+    "\"appears in N places\".\n"
+    "2. **\"Missing X\"** (not validated, authorized, checked or handled): read this "
+    "function's callers and the functions it calls — validators, `ensure*`/`check*` "
+    "helpers, middleware, the owning component — and find no check on the path. "
+    "Name what you read in `problem`.\n"
+    "3. **Library or framework behaviour** must be provable from the repository: "
+    "vendored source, a test, or existing code that relies on it. Otherwise it is at "
+    "most medium, phrased as a question.\n"
+    "4. **A trigger.** Name how an entry point (an endpoint, a job, a consumer, a UI "
+    "action) reaches this line with the bad value. \"If `x` were nil / huge / "
+    "concurrent\" is not a trigger unless you found code that makes it so, and "
+    "guaranteed values trigger nothing: identity ids, functions that never return "
+    "nil, database constraints, an earlier guard. A defect that holds on every run — "
+    "a wrong formula, a test that cannot fail — is its own trigger. No trigger means "
+    "medium."
+)
+
+
 SUGGESTION_FIELD_RULE = (
     "**IMPORTANT**: the `suggestion` field is applied to the file *verbatim* — it "
     "is rendered as a GitLab suggestion block and a reviewer clicks a button to "
@@ -157,6 +228,13 @@ SYMBOL_FORMATTING_RULE = (
 # read twice is one they skip. So the rule asks for short sentences and common
 # words, and says what to keep: precise technical terms and backticked symbols.
 # Without that, "simple" would turn into "vague", which is worse.
+#
+# The concrete example used to be "If `order` is nil, `Save()` panics" — a
+# hypothetical with no trigger, which is exactly the shape developers rejected as
+# "will not happen in real scenarios". An example is the strongest instruction in a
+# prompt, so it now names how the bad value arrives. The tone lines come from the
+# same replies: a comment that escalates ("catastrophic", "cascade") or explains the
+# author's own code back to them reads as written for someone else.
 PLAIN_LANGUAGE_RULE = (
     "**Write `problem` in plain, simple English.** Many readers speak English as "
     "a second language, and they read your comment quickly beside the diff. Make "
@@ -166,9 +244,15 @@ PLAIN_LANGUAGE_RULE = (
     "- Use common words. Write \"use\", not \"leverage\"; \"because\", not \"due to "
     "the fact that\"; \"can crash\", not \"may potentially result in a failure "
     "condition\".\n"
-    "- Be concrete. Say what happens, when, and to what: \"If `order` is nil, "
-    "`Save()` panics and the request returns 500.\" Do not write \"this could "
-    "lead to issues\".\n"
+    "- Be concrete. Say what triggers it and what happens: \"`FindOrder()` returns "
+    "`nil, nil` for an unknown id, so `order.Save()` panics and "
+    "`GET /api/orders/:id` returns 500.\" Do not write \"this could lead to "
+    "issues\".\n"
+    "- State one consequence, the most direct one. No escalation words "
+    "(\"catastrophic\", \"pileup\", \"cascade\") unless that is literally what "
+    "happens.\n"
+    "- The reader wrote this code and knows its context. Do not explain what the "
+    "code or the framework does; say only what is wrong.\n"
     "- No idioms, slang, sarcasm, or rhetorical questions. No filler such as "
     "\"It is worth noting that\" or \"Please consider\".\n"
     "- Keep the right technical terms (nil, race condition, SQL injection, "

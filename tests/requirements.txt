@@ -12,3 +12,9 @@ pytest>=8.0,<10.0
 # connection, so CI needs no PostgreSQL. The SQL itself is verified against a real
 # database by hand — see tests/README.md.
 SQLAlchemy>=2.0,<3.0
+
+# The migration tests load collector/migrations/versions/*.py to check the revision
+# chain and that a migration and storage.py agree on the columns. Every migration
+# imports `alembic.op` at module level, so loading one needs alembic installed —
+# but no database: nothing is upgraded. Same pin as collector/requirements.txt.
+alembic>=1.13,<2.0

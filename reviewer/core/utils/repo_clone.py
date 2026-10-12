@@ -60,7 +60,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -315,3 +315,34 @@ def clone_source_branch(
     shutil.rmtree(root, ignore_errors=True)
     print("  ❌ [clone] every clone strategy failed")
     return None
+
+
+def tree_blobs(repo_path: str) -> Optional[Dict[str, str]]:
+    """``{path: blob id}`` for every file in the checkout's HEAD tree.
+
+    What the review-progress record keys on (`core/utils/review_progress.py`): a
+    blob id is a file's content by definition, so "was this pair already reviewed
+    at this content?" is one dictionary lookup, with no diff and no API call. One
+    ``ls-tree`` over the whole tree is cheap next to the clone that produced it —
+    it reads the tree objects the checkout already wrote.
+
+    ``-z`` because git otherwise C-quotes a path with unusual characters, which would
+    no longer match the path the MR API reports. Submodules (``commit`` entries) are
+    not files a reviewer reads and are left out. Returns ``None`` on any failure;
+    the caller then reviews without a progress record rather than guessing.
+    """
+    try:
+        result = _run_git(["ls-tree", "-r", "-z", "--full-tree", "HEAD"], cwd=repo_path)
+    except Exception as e:  # noqa: BLE001 — a decode error or timeout loses an optimisation, not the run
+        print(f"  ⚠️  [clone] could not list the checkout's blobs: {_redact(str(e))}")
+        return None
+    if result.returncode != 0:
+        print(f"  ⚠️  [clone] could not list the checkout's blobs: {_describe(result)}")
+        return None
+    blobs: Dict[str, str] = {}
+    for entry in result.stdout.split("\0"):
+        meta, tab, path = entry.partition("\t")
+        parts = meta.split()
+        if tab and len(parts) == 3 and parts[1] == "blob":
+            blobs[path] = parts[2]
+    return blobs

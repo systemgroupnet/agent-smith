@@ -30,11 +30,19 @@ Schema (version 1)::
       all: "This codebase is ..."        # every reviewer
       sql_reviewer: |                    # one reviewer (by name)
         We do not use foreign keys.
+      comment_reviewer: |                # the comment-ranking stage
+        Drop any finding that asks for a foreign key.
 
 Instructions are how a team teaches the bundled reviewers its own conventions
 without forking a prompt. They land in the prompt's *Additional Instructions*
 section; ``.aid/<type>.md`` files in the reviewed repository are read on top of
 them, and win where the two conflict.
+
+``comment_reviewer`` is the one key that names no reviewer: it is the stage that
+ranks every reviewer's findings before posting, and the last chance to drop one
+that contradicts a house convention — a reviewer that never received the rule, or
+ignored it, is caught there. It takes instructions (``all`` included) but no file
+type can be routed to it.
 
 A pattern without a ``/`` matches the file's basename; one with a ``/`` matches
 the whole repository-relative path. A file matching no rule is ``unknown`` and
@@ -56,6 +64,9 @@ PROFILES_DIR = Path(__file__).resolve().parents[2] / "profiles"
 DEFAULT_PROFILE = "default"
 UNKNOWN_TYPE = "unknown"
 ALL_REVIEWERS = "all"
+#: Instructions key for the comment-ranking stage (`core/prompts/comment_prompts.py`).
+#: Not a reviewer: accepted under ``instructions``, never as a routing target.
+COMMENT_REVIEWER = "comment_reviewer"
 
 
 class ProfileError(ValueError):
@@ -95,7 +106,7 @@ class ReviewProfile:
         return self._routing.get((file_type or "").strip().lower(), ())
 
     def instructions_for(self, reviewer: str) -> str:
-        """The profile's house rules for one reviewer: ``all`` first, then its own."""
+        """The profile's house rules for one reviewer (or `COMMENT_REVIEWER`): ``all`` first, then its own."""
         parts = [self.instructions.get(ALL_REVIEWERS, ""), self.instructions.get(reviewer, "")]
         return "\n\n".join(p for p in parts if p)
 
@@ -165,10 +176,10 @@ def parse_profile(data, source: str, known_reviewers: Iterable[str]) -> ReviewPr
     instructions: Dict[str, str] = {}
     for key, text in raw_instructions.items():
         key = str(key).strip()
-        if key != ALL_REVIEWERS and key not in known:
+        if key not in (ALL_REVIEWERS, COMMENT_REVIEWER) and key not in known:
             raise ProfileError(
                 f"{source}: instructions for unknown reviewer {key!r}; "
-                f"use {ALL_REVIEWERS!r} or one of {sorted(known)}"
+                f"use {ALL_REVIEWERS!r}, {COMMENT_REVIEWER!r} or one of {sorted(known)}"
             )
         if not isinstance(text, str):
             raise ProfileError(f"{source}: instructions.{key} must be text")

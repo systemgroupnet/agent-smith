@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import asyncio
+import dataclasses
 import os
 import sys
 import time
@@ -41,7 +42,6 @@ from core.utils.gitlab_helpers import (
     get_review_marker,
     upsert_review_marker,
     has_review_summary,
-    get_mr_notes,
     add_mr_label,
     SCORE_REACTION_EMOJIS,
     SUMMARY_MARKER_TOKEN,
@@ -50,13 +50,28 @@ from core.agents.file_reviewer import review_comments_with_agent
 from core.agents.dedup_agent import deduplicate_comments
 from core.agents.deep_reviewer import (
     ReviewPassResult,
+    add_sql_dispatches,
+    build_dispatch_plan,
     go_files,
     review_changed_files,
     route_file,
 )
 from core.agents.route_classifier import classify_sql_involvement
-from core.utils.comment_dedup import collect_existing_comments, describe_issue
-from core.utils.repo_clone import clone_source_branch
+from core.utils.comment_dedup import describe_issue, fetch_existing_comments
+from core.utils.repo_clone import clone_source_branch, tree_blobs
+from core.utils.diff_lines import (
+    apply_changed_line_gate,
+    build_changed_line_index,
+    changed_line_radius,
+    diffs_by_path,
+)
+from core.utils.review_progress import (
+    DispatchDecision,
+    ProgressRecord,
+    decide as decide_dispatch,
+    max_file_failures,
+    settle as settle_progress,
+)
 from core.agents.effort_agent import estimate_review_effort
 from core.agents.summary_agent import SummaryContext, generate_review_summary
 from core.utils.comment_formatter import (
@@ -68,6 +83,8 @@ from core.utils.comment_formatter import (
     get_severity,
     restore_issue_severities,
     restore_issue_problems,
+    restore_issue_suggestions,
+    diff_line_text,
     apply_severity_corrections,
 )
 from core.utils.review_verbosity import (
@@ -93,7 +110,7 @@ from core.config.langchain_config import (
 from core.llm.gateway import FALLBACK, LLMGateway
 from core.utils.llm_retry import is_provider_hard_block, describe_error, parse_llm_error
 from core.analytics import send_run_analytics
-from dto.analytics import RunMetrics, record_error, record_warning
+from dto.analytics import RunMetrics, posted_comment_entry, record_error, record_warning
 
 
 async def _post_review_summary(
@@ -220,6 +237,26 @@ async def _post_review_summary(
             )
 
 
+@dataclasses.dataclass
+class _RunProgress:
+    """This run's view of the progress record, filled in as the run learns it.
+
+    Created from the marker note before the review pass, completed by the pass
+    once there is a checkout to read blob ids from, and read back at the very end
+    to write the record. See `core/utils/review_progress.py`.
+    """
+
+    record: ProgressRecord
+    #: ``Verbosity.level`` of this run.
+    verbosity: int
+    max_failures: int
+    #: ``{path: blob}`` at the reviewed commit. None until the checkout exists, and
+    #: None for good when it could not be listed — then this run skips nothing and
+    #: records nothing, which is the behaviour from before the record existed.
+    blobs: Optional[dict] = None
+    decision: Optional[DispatchDecision] = None
+
+
 #: Seconds of the overall budget held back from the deep pass for everything that
 #: has to happen after it: the in-diff gate, the comment reviewer, the dedup agent
 #: (which makes its own LLM call and a GitLab notes fetch) and posting each comment
@@ -252,6 +289,7 @@ async def _run_review_pass(
     mr_context: str,
     thread_id: str,
     deadline: float = None,
+    progress: Optional[_RunProgress] = None,
 ) -> tuple:
     """Review the merge request: check out the branch, then run the reviewers.
 
@@ -260,6 +298,9 @@ async def _run_review_pass(
     reviewer reads it, so there is nothing to review without one, and that is
     fatal rather than degraded — a run that silently reviewed nothing would
     report success and advance the marker.
+
+    ``progress`` is filled in here — the blob ids come from the checkout — and
+    decides which reviewer-file pairs an earlier run already settled.
     """
     clone = clone_source_branch(
         gitlab_url=gitlab_url,
@@ -293,6 +334,19 @@ async def _run_review_pass(
             f"checkout is at {clone.head[:8]} but the review is of {head_sha[:8]}; "
             f"line numbers may not match the merge request diff",
         )
+
+    if progress is not None:
+        # Every file's blob id at the reviewed commit, which is what a progress
+        # entry is valid against. Listed before classification so even a run with
+        # nothing to review can settle the marker on what it knows.
+        progress.blobs = tree_blobs(clone.path)
+        if progress.blobs is None:
+            record_warning(
+                metrics,
+                "review_progress",
+                "could not list the checkout's blob ids; reviewing every pair and "
+                "recording no progress this run",
+            )
 
     # Classify deterministically, with the same static classifier the graph mode
     # routes on, and apply the same exclusions. The orchestrator is handed this
@@ -339,6 +393,34 @@ async def _run_review_pass(
             context=path,
         )
 
+    # What earlier runs already settled. The plan is rebuilt here with the same two
+    # functions the pass uses, so the skip set is decided against exactly the pairs
+    # the pass will see — SQL second opinions included.
+    skip_pairs = None
+    failure_counts = None
+    if progress is not None and progress.blobs is not None:
+        plan = add_sql_dispatches(build_dispatch_plan(classified), sql_paths)
+        decision = decide_dispatch(
+            plan, progress.record, progress.blobs, progress.verbosity, progress.max_failures
+        )
+        progress.decision = decision
+        skip_pairs = decision.skip
+        failure_counts = decision.failure_counts
+        print(
+            f"📒 Review progress: {len(decision.already_done)} of {len(plan)} reviewer-file "
+            f"pair(s) already reviewed at their current content, "
+            f"{len(decision.abandoned)} given up on, {len(plan) - len(decision.skip)} to review"
+        )
+        for path, name in sorted(decision.abandoned):
+            failures = decision.failure_counts.get((path, name), 0)
+            record_warning(
+                metrics,
+                "file_review_abandoned",
+                f"{path} not reviewed by {name}: it failed {failures} time(s) at this "
+                f"content, so it is skipped until the file changes",
+                context=path,
+            )
+
     review_config = build_run_config(
         thread_id,
         run_name="review_pass",
@@ -363,6 +445,13 @@ async def _run_review_pass(
         concurrency=_review_concurrency(),
         per_file_timeout_s=float(int_env("FILE_REVIEW_TIMEOUT_S", 1200)),
         deadline=review_deadline,
+        # Each reviewer's own diff — of what *this run* reviews: `changes_to_review`
+        # holds the compare diff of the new commits on an incremental run, the MR
+        # diff otherwise, both numbered on the head side the checkout is at. The
+        # checkout shows the file, never which of its lines the MR wrote.
+        diffs=diffs_by_path(reviewable_changes.values()),
+        skip_pairs=skip_pairs,
+        failure_counts=failure_counts,
     )
 
     for path in result.failed_files:
@@ -402,10 +491,24 @@ async def _drop_duplicate_comments(
     have used, so the level's budget would be spent on comments nobody reads.
 
     Non-fatal at every step, and every failure degrades toward *posting*:
-    - notes unfetchable → intra-run dedup only, recorded as a warning;
-    - agent failure → only the exact-text matches are dropped, recorded as a
-      warning (not an error: the outcome is the pre-feature behaviour, a
-      duplicate on the MR, not a lost finding or a corrupted comment).
+    - discussions unfetchable → the flat notes list (replies not linked to the
+      comment they answer); both unfetchable → intra-run dedup only. Either is a
+      ``comment_dedup_notes`` warning;
+    - structured call failed but the plain-JSON retry answered → a
+      ``comment_dedup_retry`` warning, and the run is otherwise unaffected;
+    - both failed (or the stage ran out of time) → the rule-based drops plus the
+      positional fallback, recorded as a ``comment_dedup`` warning (not an error:
+      the outcome is at worst a duplicate on the MR, never a lost finding or a
+      corrupted comment).
+
+    The whole stage is bounded by ``COMMENT_DEDUP_TIMEOUT_S`` (default 120 s,
+    ``0`` = unbounded) so neither a GitLab instance answering the thread listing
+    slowly nor a provider failing slowly through its retries can eat the time
+    ``DEEP_REVIEW_POST_RESERVE_S`` holds back for posting. The fetch runs on a
+    worker thread under that budget (a timeout is a ``comment_dedup_notes``
+    warning and the check runs intra-run only); the model gets what is left of
+    it, and when nothing is left it is not asked at all — the rule-based drops
+    and the positional fallback run directly, as a ``comment_dedup`` warning.
     """
     if not candidates:
         return candidates
@@ -423,26 +526,55 @@ async def _drop_duplicate_comments(
         return candidates
 
     print(f"\n🧹 Checking {len(candidates)} comment(s) against what's already on the MR...")
+    budget_s = int_env("COMMENT_DEDUP_TIMEOUT_S", 120)
+    bound_s = float(budget_s) if budget_s > 0 else None
+    started = time.monotonic()
 
-    notes = await get_mr_notes(gitlab_url, project_path, mr_id, gitlab_token)
-    if notes is None:
-        # Distinguishable from "the MR has no comments": the check still runs, it
-        # just can't see across runs, and the run says so rather than reporting a
-        # clean dedup pass it did not perform.
-        record_warning(
-            metrics,
-            "comment_dedup_notes",
-            "could not list the MR's existing comments; deduplicated within this run only",
-        )
+    # Threads, not notes: a human's reply has to arrive attached to the finding it
+    # answers, or "this is by design" under last run's comment can't stop this run
+    # re-posting it. A degraded fetch is distinguishable from "the MR has no
+    # comments" — the run says so rather than reporting a clean pass it did not do.
+    # The listing is up to ten pages of blocking HTTP per endpoint, so it is bounded
+    # by the stage budget too; past it, the run moves on without the MR's comments.
+    existing, fetch_degraded = await fetch_existing_comments(
+        gitlab_url, project_path, mr_id, gitlab_token, timeout_s=bound_s
+    )
+    if fetch_degraded is not None:
+        record_warning(metrics, "comment_dedup_notes", fetch_degraded)
+    if existing is None:
         existing = []
     else:
-        existing = collect_existing_comments(notes)
-        print(f"  📖 {len(existing)} existing comment(s) on the MR to compare against")
+        replied = sum(1 for thread in existing if thread.get("replies"))
+        print(
+            f"  📖 {len(existing)} existing thread(s) on the MR to compare against "
+            f"({replied} with replies)"
+        )
 
+    # The model gets only what the fetch left of the budget. Under a second is no
+    # budget at all — no completion comes back that fast — so the model is skipped
+    # and the deterministic rules and the positional fallback decide alone.
+    remaining_s = None
+    skip_model = None
+    if bound_s is not None:
+        remaining_s = bound_s - (time.monotonic() - started)
+        if remaining_s < 1.0:
+            skip_model = (
+                f"the {budget_s}s COMMENT_DEDUP_TIMEOUT_S budget was spent listing the MR's "
+                f"comments; the dedup agent was not asked"
+            )
+
+    dedup_warnings: list = []
     kept, dropped, dedup_error = await deduplicate_comments(
-        candidates, existing, config=config
+        candidates,
+        existing,
+        config=config,
+        timeout_s=remaining_s,
+        warnings_sink=dedup_warnings,
+        skip_model=skip_model,
     )
 
+    for entry in dedup_warnings:
+        record_warning(metrics, entry.get("stage", "comment_dedup"), entry.get("message", ""))
     if dedup_error is not None:
         record_warning(metrics, "comment_dedup", dedup_error)
 
@@ -745,11 +877,34 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
     print(f"🧵 Trace session: {thread_id}\n")
 
     # Incremental review: read the marker note recording the last commit we reviewed
-    # so we only review commits added since then instead of the whole MR diff.
-    last_sha, marker_note_id = await get_review_marker(
-        gitlab_url, project_path, mr_id, gitlab_token
-    )
+    # so we only review commits added since then instead of the whole MR diff — and,
+    # in the same note, the progress record of which reviewer-file pairs of the
+    # commits since are already reviewed (see core/utils/review_progress.py).
+    marker = await get_review_marker(gitlab_url, project_path, mr_id, gitlab_token)
+    last_sha, marker_note_id = marker.sha, marker.note_id
     metrics.last_reviewed_sha = last_sha
+    if not marker.readable:
+        # Not "no marker": unknown. Reviewing in full is the safe reading; writing a
+        # marker on that basis is not, since the one that may exist went unseen.
+        record_warning(
+            metrics,
+            "review_progress",
+            "could not list the MR's notes to read the review marker; reviewing the "
+            "whole MR, and writing no marker this run so as not to create a second one",
+        )
+    if marker.progress_error:
+        record_warning(metrics, "review_progress", marker.progress_error)
+    progress = _RunProgress(
+        record=marker.progress,
+        verbosity=verbosity.level,
+        max_failures=max_file_failures(),
+    )
+    if not marker.progress.is_empty():
+        print(
+            f"📒 Progress record: {len(marker.progress.done)} reviewed pair(s), "
+            f"{len(marker.progress.fail)} with failures"
+            + (f", written at {marker.progress.head[:8]}" if marker.progress.head else "")
+        )
     if last_sha and head_sha and last_sha == head_sha:
         print(f"✅ No new commits since last review ({head_sha[:8]}). Nothing to do.")
         metrics.review_type = "none"
@@ -782,8 +937,12 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             print("⚠️  Compare failed (e.g. force-push/rebase); falling back to full MR review.")
         elif len(incremental) == 0:
             print("✅ No code changes between last reviewed commit and head; updating marker only.")
+            # The progress record rides along unchanged: nothing in the code moved,
+            # so every entry in it is exactly as valid as it was.
             await upsert_review_marker(
-                gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id
+                gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id,
+                progress=dataclasses.replace(marker.progress, head=head_sha),
+                readable=marker.readable,
             )
             metrics.review_type = "none"
             metrics.status = "no_op"
@@ -930,6 +1089,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         mr_context=mr_context,
         thread_id=thread_id,
         deadline=overall_deadline,
+        progress=progress,
     )
 
     all_comments = review_result.all_comments if review_result else []
@@ -984,26 +1144,108 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             elif severity == "low":
                 metrics.issues_low += 1
 
-    # Record that we've reviewed up to the current head, so the next pipeline run only
-    # reviews newer commits. Done here (after the review pass, before the early-returns
-    # below) so even runs that find no issues still advance the marker.
-    #
-    # Skip advancing when any file failed to review OR the run was truncated by the
-    # overall timeout: leaving the marker where it is means a re-run re-enters the
-    # incremental compare and reviews the file(s) we didn't get to, instead of
-    # short-circuiting on "no new commits" and reporting a complete review that
-    # never happened. Trade-off: on that retry, files that DID succeed get their
-    # inline comments posted again (GitLab does not de-duplicate discussions) — a
-    # visible duplicate is preferable to silently skipping un-reviewed files.
-    if head_sha and file_error_count == 0 and not timed_out:
-        if await upsert_review_marker(
-            gitlab_url, project_path, mr_id, gitlab_token, head_sha, marker_note_id
-        ):
+    # Whether this run left part of the MR unreviewed in a way the file-level counts
+    # cannot see: one of a service file's two reviewers failing still leaves the
+    # file "reviewed", and a pair given up on is skipped without being a file error.
+    # Either keeps the run from reporting "success" — a run that covered only part
+    # of the MR is not one, even when the marker advances.
+    abandoned_pairs = progress.decision.abandoned if progress.decision else set()
+    coverage_gap = bool(abandoned_pairs) or bool(
+        review_result and (review_result.failed_pairs or review_result.errored_pairs)
+    )
+
+    # Files whose comment failed to post: their pairs are not recorded as done, so a
+    # re-run reviews them again rather than losing the finding (dedup drops whatever
+    # of it did land).
+    unposted_paths: set = set()
+
+    async def _save_progress() -> None:
+        """Write the marker note — progress record, plus the commit once the MR is covered.
+
+        Called on both return paths at the end of the run, **after posting**: the
+        record says "these findings reached the MR", so a crash anywhere before
+        this point must leave it unwritten and the next run repeats the work, never
+        the reverse. It used to be written straight after the review pass, ahead of
+        the comment pipeline.
+
+        The commit marker advances when every reviewer-file pair of the plan is
+        reviewed at its current content or given up on — not, as before, only when
+        a run had zero file errors and no timeout. That rule held the marker on any
+        failure *and* remembered nothing else, so a re-run reviewed the whole diff
+        again from the same deterministic starting point: the same leading files,
+        re-found and re-posted, the same tail never reached. Now the re-run reviews
+        what is left, and a file that cannot pass the time budget is given up on
+        after ``REVIEW_MAX_FILE_FAILURES`` attempts instead of pinning the marker.
+        """
+        if review_result is None or not head_sha:
+            # No checkout means nothing was reviewed: nothing is recorded and the
+            # marker stays where it is. (It used to advance here — the rule above
+            # saw no file errors and no timeout.)
+            return
+        if progress.blobs is None:
+            # No blob ids to key a record on: the pre-record rule — advance only on a
+            # clean, complete run, otherwise write nothing — with the inherited
+            # record riding along untouched.
+            settled = file_error_count == 0 and not timed_out
+            record = marker.progress
+            pending_note = ""
+            if not settled:
+                print("⏭️  Not advancing review marker — the run was incomplete and no "
+                      "progress could be recorded; a re-run reviews the same files")
+                return
+        else:
+            current_paths = {
+                change.get("new_path") or change.get("old_path") for change in changes
+            } - {None}
+            completed = {
+                pair for pair in review_result.completed_pairs if pair[0] not in unposted_paths
+            }
+            settlement = settle_progress(
+                marker.progress,
+                review_result.plan_pairs,
+                completed,
+                review_result.failed_pairs,
+                progress.blobs,
+                current_paths,
+                verbosity=progress.verbosity,
+                head=head_sha,
+                max_failures=progress.max_failures,
+            )
+            settled, record = settlement.settled, settlement.record
+            if settlement.outage:
+                print(
+                    f"  ⚠️  {len(review_result.failed_pairs)} pair(s) failed "
+                    f"({len(review_result.errored_pairs)} raised) against {len(completed)} "
+                    f"completed — treated as an outage; no file's failure count moves"
+                )
+            for path, name in sorted(settlement.newly_abandoned):
+                record_warning(
+                    metrics,
+                    "file_review_abandoned",
+                    f"{path} could not be reviewed by {name} {progress.max_failures} "
+                    f"time(s) at this content; giving up on it until the file changes",
+                    context=path,
+                )
+            pending_note = f"{len(settlement.pending)} reviewer-file pair(s) left for a re-run"
+
+        sha = head_sha if settled else last_sha
+        written = await upsert_review_marker(
+            gitlab_url, project_path, mr_id, gitlab_token, sha, marker_note_id,
+            progress=record, readable=marker.readable,
+        )
+        if written and settled:
             print(f"🔖 Review marker updated to {head_sha[:8]}")
-    elif head_sha and timed_out:
-        print("⏭️  Not advancing review marker — run hit the overall timeout; a re-run will review the remaining files")
-    elif head_sha and file_error_count:
-        print(f"⏭️  Not advancing review marker — {file_error_count} file(s) failed; a re-run will retry them")
+        elif written:
+            print(
+                f"📒 Review progress saved at {head_sha[:8]}; marker stays at "
+                f"{last_sha[:8] if last_sha else 'none'} — {pending_note}"
+            )
+        elif marker.readable:
+            record_warning(
+                metrics,
+                "review_progress",
+                "could not write the review marker note; the next run repeats this one",
+            )
 
     # The review pass is done — label the MR so it's visible the agent ran, and
     # apply the review-effort estimate. All non-fatal (a label failure never
@@ -1136,6 +1378,60 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         )
     issues_for_review = in_diff_issues
 
+    # Changed-line gate. The in-diff gate accepts any line GitLab can anchor a
+    # comment to, which includes the unchanged context a hunk carries and code the
+    # MR merely moved or re-indented — a median 58% of gate-passing lines measured
+    # on this repo were unchanged context, and ~6% of developer replies reject a
+    # comment for exactly that ("this was already there before this PR"). A finding
+    # on a new line, or within REVIEW_CHANGED_LINE_RADIUS of one or of a removal,
+    # stands; anything else is demoted one level, which at the default verbosity is
+    # a drop.
+    # Before the comment reviewer, for the same reason as the gate above: a dropped
+    # finding must not occupy one of the level's slots. On an incremental run "new"
+    # means new in the commits under review (the compare diff), falling back to the
+    # MR diff for a file the compare did not return.
+    changed_line_index = build_changed_line_index(
+        diffs_by_path(changes),
+        review_diffs=(
+            diffs_by_path(changes_to_review) if metrics.review_type == "incremental" else None
+        ),
+    )
+    line_radius = changed_line_radius()
+
+    def _real_path(issue):
+        name = issue.get("file_name") if isinstance(issue, dict) else issue.file_name
+        line = issue.get("line") if isinstance(issue, dict) else issue.line
+        return resolve_inline_position(name, line, position_maps)[0]
+
+    issues_for_review, line_demotions = apply_changed_line_gate(
+        issues_for_review,
+        changed_line_index,
+        _real_path,
+        verbosity.severities,
+        line_radius,
+    )
+    for demotion in line_demotions:
+        where = f"{demotion.file_name}:{demotion.line}"
+        kind = "moved code" if demotion.moved else "unchanged line"
+        if demotion.dropped:
+            print(f"  🚫 Dropping issue {where} — {kind}; demoted to "
+                  f"'{demotion.now or 'below low'}', out of scope")
+        else:
+            print(f"  ⤵️  Demoting issue {where} — {kind}; {demotion.was} → {demotion.now}")
+        record_warning(
+            metrics,
+            demotion.stage,
+            demotion.describe(line_radius, verbosity.name),
+            context=where,
+        )
+    if line_demotions:
+        dropped_lines = sum(1 for d in line_demotions if d.dropped)
+        print(
+            f"🎯 Changed-line gate: demoted {len(line_demotions)} issue(s) on code this MR "
+            f"did not change ({dropped_lines} out of scope, dropped); "
+            f"{len(issues_for_review)} remain"
+        )
+
     # Apply comment reviewer agent if there are high-severity issues
     if issues_for_review:
         comment_config = build_run_config(
@@ -1213,6 +1509,39 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                     f"posting a comment with no text",
                     context=f"{file_name}:{line}",
                 )
+        # The same synthesis, one field over, and the one with a button attached:
+        # the ranking stage re-emits `suggestion` freely, so a fix can land on a
+        # line it was never written for and Apply commits it. The reviewers wrote
+        # it with the code open, so their own finding's suggestion always wins; a
+        # suggestion no finding vouches for is posted without the Apply button.
+        filtered_issues, suggestion_fixes, unverified, unverified_issues = (
+            restore_issue_suggestions(filtered_issues, issues_for_review)
+        )
+        # By identity: two comments can share a line, and only the one whose fix
+        # nothing vouches for loses its Apply button. Dedup and the cap filter these
+        # same objects, never copies, so the identity holds through to posting.
+        unverified_suggestions = {id(issue) for issue in unverified_issues}
+        if suggestion_fixes:
+            print(
+                f"  🩹 Restored the reviewers' suggestion on {len(suggestion_fixes)} "
+                f"comment(s) the comment reviewer rewrote"
+            )
+            for file_name, line in suggestion_fixes:
+                record_warning(
+                    metrics,
+                    "comment_suggestion_restored",
+                    f"{file_name}:{line} came back from the comment reviewer with a "
+                    f"different suggestion; restored the reviewers' own",
+                    context=f"{file_name}:{line}",
+                )
+        for file_name, line in unverified:
+            record_warning(
+                metrics,
+                "comment_suggestion_unverified",
+                f"{file_name}:{line} carries a suggestion that matches no reviewer "
+                f"finding; kept as text, never offered with an Apply button",
+                context=f"{file_name}:{line}",
+            )
 
         # Duplicate suppression, against the MR's existing comments and within
         # this batch. Runs *before* the cap so a repeat never occupies a slot a
@@ -1299,6 +1628,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
             )
     else:
         print(f"ℹ️  No {scope}-severity issues to filter")
+        # Nothing to post, so this is the point where everything reviewed is also
+        # everything said.
+        await _save_progress()
         # A timeout truncation is a partial review (marker held), but it exits 0 —
         # it posted what it could, by design; only real file errors exit non-zero.
         if provider_blocked:
@@ -1306,7 +1638,9 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         elif timed_out:
             metrics.status = "timeout"
         else:
-            metrics.status = "partial_failure" if file_error_count else "success"
+            metrics.status = (
+                "partial_failure" if (file_error_count or coverage_gap) else "success"
+            )
         return 1 if file_error_count else 0
 
     # Post comments to GitLab
@@ -1329,6 +1663,13 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         "COMMENT_REACTIONS_ENABLED", "true"
     ).strip().lower() not in ("false", "0", "no", "off", "")
 
+    # The same full MR diff position_maps was built from, keyed the same way, so
+    # the formatter can read the commented line's own text (anchor checks).
+    diff_by_path = {
+        (change.get("new_path") or change.get("old_path")): change.get("diff", "") or ""
+        for change in changes
+    }
+
     print(f"💬 Posting {len(filtered_issues)} comment(s) to GitLab...\n")
 
     for issue in filtered_issues:
@@ -1346,8 +1687,14 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         )
         # Formatted after resolution: only a comment landing on a diff line can
         # carry an applyable ```suggestion block (GitLab ignores the syntax on a
-        # note off the diff), so in_diff decides how the fix is rendered.
-        comment = format_single_issue(issue, applyable=in_diff)
+        # note off the diff), so in_diff decides how the fix is rendered — and the
+        # diff line's own text lets the formatter refuse a no-op and keep the
+        # line's indentation (comment_formatter.anchor_suggestion).
+        comment = format_single_issue(
+            issue,
+            applyable=in_diff and id(issue) not in unverified_suggestions,
+            original_line=diff_line_text(diff_by_path.get(real_path, ""), line) if in_diff else None,
+        )
 
         # Drop issues whose file isn't part of this MR at all. Each reviewer
         # reviews one real changed file but self-reports file_name on every issue
@@ -1448,22 +1795,28 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
                 )
             else:
                 canonical = real_path or file_name
-                metrics.posted_comments.append({
-                    "note_id": note_id,
-                    "discussion_id": posted_note.get("discussion_id"),
-                    "comment_type": posted_note.get("comment_type"),
-                    "file": canonical,  # canonical MR path when resolved
-                    "line": line,
-                    "severity": severity,
+                metrics.posted_comments.append(posted_comment_entry(
+                    posted_note,
+                    file=canonical,  # canonical MR path when resolved
+                    line=line,
+                    severity=severity,
                     # The model that reviewed this file. Falls back to whatever is
                     # active now if the path can't be matched (e.g. the comment
                     # reviewer rewrote file_name while synthesizing its output).
-                    "model": (
+                    model=(
                         model_by_file.get(canonical)
                         or model_by_file.get(file_name)
                         or LLMGateway.effective_model()
                     ),
-                })
+                    # The finding's own text, as formatted into this comment — not
+                    # the rendered body, whose suggestion block is source code.
+                    problem=(
+                        issue.get("problem") if isinstance(issue, dict)
+                        else getattr(issue, "problem", None)
+                    ),
+                    # Which .aid/<type>.md a lesson from this comment belongs in.
+                    file_type=get_profile().classify(canonical) if canonical else None,
+                ))
                 if reactions_enabled:
                     failed_emojis = await add_note_award_emojis(
                         gitlab_url, project_path, mr_id, gitlab_token, note_id
@@ -1480,6 +1833,7 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         else:
             print(f"  ❌ Failed to post comment for line {line}")
             total_failed += 1
+            unposted_paths.add(real_path or file_name)
             record_error(metrics, "comment_post", post_error, context=f"{file_name}:{line}")
     
     print(f"\n{'=' * 60}")
@@ -1490,6 +1844,8 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
 
     metrics.comments_posted = total_posted
     metrics.comments_failed = total_failed
+    # Everything this run will ever post is posted: now the record can say so.
+    await _save_progress()
     if provider_blocked:
         metrics.status = "config_error"
     elif timed_out:
@@ -1498,13 +1854,14 @@ async def _run_review(mr_url: str, metrics: RunMetrics):
         # A failed comment reviewer counts as a partial failure: the run posted, but
         # what it posted skipped the ranking and the compile-time purge. Without this
         # the status stayed "success" and nothing distinguished it from a clean run.
-        degraded = file_error_count or total_failed or comment_review_failed
+        degraded = file_error_count or total_failed or comment_review_failed or coverage_gap
         metrics.status = "partial_failure" if degraded else "success"
 
     # Non-zero exit if any file failed to review or any comment failed to post, so
     # GitLab CI reflects the failure instead of showing a green job. A timeout
     # truncation exits 0 on purpose — it degraded gracefully and posted its
-    # findings; the held marker makes a later run pick up the remaining files.
+    # findings; the progress record makes a later run review exactly the pairs this
+    # one did not reach.
     return 1 if (file_error_count or total_failed) else 0
 
 

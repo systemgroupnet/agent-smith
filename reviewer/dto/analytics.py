@@ -26,6 +26,10 @@ from pydantic import BaseModel, Field
 _MAX_RUN_EVENTS = 100
 _MAX_MESSAGE_CHARS = 2000
 _MAX_TRACEBACK_CHARS = 8000
+# A finding's text rides in every posted_comments entry. ~10 comments a run at a
+# few hundred characters each is the norm; the cap only stops one runaway
+# synthesis from carrying a whole file into the event.
+_MAX_PROBLEM_CHARS = 2000
 
 
 # Bump when the meaning of existing fields changes (not merely when adding new
@@ -141,14 +145,21 @@ class RunMetrics(BaseModel):
 
     # One entry per comment actually posted to the MR this run, so the collector
     # can key human emoji-reaction scores (gathered via its GitLab webhook
-    # endpoint) back to a specific comment and run. Entry shape:
+    # endpoint) back to a specific comment and run. Entry shape (built by
+    # ``posted_comment_entry``):
     # {note_id, discussion_id, comment_type: "inline"|"note", file, line,
-    # severity, model}. ``model`` is the model that actually reviewed that file
-    # (captured when the file review finished), which is not necessarily
-    # ``RunMetrics.model`` once a rate-limit failover has happened mid-run.
-    # ``note_id`` is the GitLab note id — the same value an emoji
-    # webhook event reports as ``object_attributes.awardable_id``, which is the
-    # join key. Bounded in practice by the comment-reviewer filter (~10/run).
+    # severity, model, problem, file_type}. ``model`` is the model that actually
+    # reviewed that file (captured when the file review finished), which is not
+    # necessarily ``RunMetrics.model`` once a rate-limit failover has happened
+    # mid-run. ``problem`` is the finding's text as it was formatted into the
+    # comment (after the severity/problem restores, before markdown rendering),
+    # clipped to ``_MAX_PROBLEM_CHARS`` — without it a human reply to the comment
+    # can be read but not what it answered. ``file_type`` is the review profile's
+    # classification of ``file`` (``service``, ``sql``, ...), the ``.aid/<type>.md``
+    # a lesson drawn from that reply would belong in. ``note_id`` is the GitLab
+    # note id — the same value an emoji webhook event reports as
+    # ``object_attributes.awardable_id``, which is the join key. Bounded in
+    # practice by the comment-reviewer filter (~10/run).
     posted_comments: list = Field(default_factory=list)
 
     # True when this run posted the MR's review-summary comment (the orientation
@@ -186,6 +197,43 @@ class RunMetrics(BaseModel):
     # Same shape as ``errors`` (severity="warning"). The collector stores errors
     # and warnings together in a dedicated table, keyed to the run.
     warnings: list = Field(default_factory=list)
+
+
+def posted_comment_entry(
+    posted_note: dict,
+    *,
+    file: Optional[str],
+    line,
+    severity: Optional[str],
+    model: Optional[str],
+    problem=None,
+    file_type: Optional[str] = None,
+) -> dict:
+    """One ``RunMetrics.posted_comments`` entry for a comment GitLab accepted.
+
+    ``posted_note`` is what ``post_gitlab_comment`` returned ({note_id,
+    discussion_id, comment_type}). ``problem`` must be the finding's own text —
+    the ``problem`` field the comment was formatted from — and never the rendered
+    body: the body's suggestion block is the reviewed repository's source code
+    verbatim, and what a reply is answering is the claim, not the patch.
+
+    Blank text becomes ``None`` (an empty string would read as "the agent said
+    nothing", which the posting loop already guarantees it did not). NUL bytes are
+    removed because PostgreSQL rejects them in both TEXT and JSONB, and one in a
+    model-quoted snippet would make the collector refuse the whole run event.
+    """
+    text = None if problem is None else str(problem).replace("\x00", "").strip()
+    return {
+        "note_id": posted_note.get("note_id"),
+        "discussion_id": posted_note.get("discussion_id"),
+        "comment_type": posted_note.get("comment_type"),
+        "file": file,
+        "line": line,
+        "severity": severity,
+        "model": model,
+        "problem": text[:_MAX_PROBLEM_CHARS] if text else None,
+        "file_type": file_type or None,
+    }
 
 
 def _record_event(

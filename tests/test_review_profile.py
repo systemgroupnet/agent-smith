@@ -7,7 +7,8 @@ import yaml
 
 from core.agents.deep_reviewer import REVIEWER_SPECS, build_dispatch_plan, go_files, route_file
 from core.config.review_profile import (
-    PROFILES_DIR, ProfileError, get_profile, load_profile, parse_profile, reset_profile,
+    COMMENT_REVIEWER, PROFILES_DIR, ProfileError, get_profile, load_profile, parse_profile,
+    reset_profile,
 )
 from core.utils.file_classifier import StaticFileClassifier
 
@@ -138,11 +139,40 @@ def test_instructions_reach_the_reviewer_prompt(tmp_path, monkeypatch):
     assert profile.instructions_for("test_reviewer") == "EVERYONE-RULE"
 
 
-def test_instructions_for_an_unknown_reviewer_are_rejected():
-    with pytest.raises(ProfileError, match="instructions for unknown reviewer"):
+@pytest.mark.parametrize("key", ["sql_reviwer", "comment_reviewers", "comments", "ranker"])
+def test_instructions_for_an_unknown_reviewer_are_rejected(key):
+    with pytest.raises(ProfileError, match="instructions for unknown reviewer") as err:
         parse_profile({
             "file_types": [{"name": "x", "match": ["*.x"], "reviewers": ["sql_reviewer"]}],
-            "instructions": {"sql_reviwer": "typo"},
+            "instructions": {key: "typo"},
+        }, "t", KNOWN)
+    assert repr(COMMENT_REVIEWER) in str(err.value), "the error lists every accepted key"
+
+
+def test_the_comment_reviewer_takes_instructions(tmp_path, monkeypatch):
+    """`comment_reviewer` is the ranking stage, not a reviewer: a profile teaches it
+    which findings contradict a house convention, so it can drop them before posting."""
+    path = tmp_path / "p.yml"
+    path.write_text(textwrap.dedent("""
+        version: 1
+        file_types:
+          - {name: sql, match: ["*.sql"], reviewers: [sql_reviewer]}
+        instructions:
+          all: EVERYONE-RULE
+          comment_reviewer: RANKING-RULE
+    """))
+    _use(monkeypatch, str(path))
+    profile = get_profile()
+    assert COMMENT_REVIEWER == "comment_reviewer"
+    assert profile.instructions_for(COMMENT_REVIEWER) == "EVERYONE-RULE\n\nRANKING-RULE"
+    assert profile.instructions_for("sql_reviewer") == "EVERYONE-RULE"
+
+
+def test_no_file_type_can_be_routed_to_the_comment_reviewer():
+    assert COMMENT_REVIEWER not in KNOWN
+    with pytest.raises(ProfileError, match="unknown reviewer"):
+        parse_profile({
+            "file_types": [{"name": "x", "match": ["*.x"], "reviewers": [COMMENT_REVIEWER]}],
         }, "t", KNOWN)
 
 

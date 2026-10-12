@@ -55,7 +55,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 # deepagents supplies the filesystem layer only — a real-FS backend, a tool
 # allowlist, permissions, and a read_file that numbers its output. Its agent
@@ -92,6 +92,7 @@ from core.prompts import (
     get_typescript_reviewer_prompt,
 )
 from core.prompts.deep_prompts import format_checkout_addendum
+from core.utils.diff_lines import clip_diff_for_prompt
 from core.utils.llm_retry import describe_error, maybe_print_traceback
 
 
@@ -371,15 +372,47 @@ def build_dispatch_plan(classified: Sequence[Tuple[str, str]]) -> List[Tuple[str
     return plan
 
 
+def order_by_prior_failures(
+    plan: Sequence[Tuple[str, str]],
+    failure_counts: Optional[Mapping[Tuple[str, str], int]] = None,
+) -> List[Tuple[str, str]]:
+    """Queue order: files never failed first, then by ascending prior failures.
+
+    The order used to be the plan's — GitLab's changes order, SQL second opinions
+    appended last — which is deterministic, so a run that truncated stopped at the
+    same tail every time and every re-run spent its budget on the same leading files.
+    With the progress record the done pairs are skipped anyway; what this adds is
+    that a pair that already failed (most often a file too big for the time budget)
+    no longer takes a lane before a pair that has never been tried.
+
+    A file's reviewers stay adjacent, keyed on the worst count among them, so a
+    truncation is less likely to leave a file half-reviewed — and a file's SQL
+    second opinion now runs beside its service reviewers instead of at the very end.
+    The sort is stable, so ties keep plan order.
+    """
+    counts = failure_counts or {}
+    by_file: Dict[str, List[Tuple[str, str]]] = {}
+    for pair in plan:
+        by_file.setdefault(pair[0], []).append(pair)
+    files = sorted(by_file, key=lambda path: max(counts.get(p, 0) for p in by_file[path]))
+    return [pair for path in files for pair in by_file[path]]
+
+
 def _prompt_context(**shared) -> ReviewPromptContext:
-    """Build the prompt context with **no file content in it**.
+    """Build the prompt context with **no file content in it** — but with the diff.
 
     The getters render `content`/`diff` inline because they were written for a
-    world where the file arrived in the prompt. Here the subagent reads the file
-    itself, so those stay empty and the deep-mode addendum tells the model where
-    the code actually is. ``file_name`` is empty for the same reason: one subagent
-    serves every file of its type, and the file under review is named in the
-    `task` message it receives.
+    world where the file arrived in the prompt. Here the reviewer reads the file
+    itself, so `content` stays empty and the deep-mode addendum tells the model
+    where the code actually is.
+
+    The diff is different: it is not on disk. A checkout holds the post-MR file,
+    which says nothing about which of its lines the merge request wrote, so without
+    the diff a reviewer reviews the whole file and comments on code that was
+    already there. That is what happened from eb3308c until the diff was threaded
+    back in: every prompt rendered an empty `=== Git Diff ===` block, and
+    developers rejected findings on unchanged lines ("this was already there before
+    this PR"). It is capped (:func:`clip_diff_for_prompt`) and says when it was cut.
     """
     return ReviewPromptContext(**shared)
 
@@ -448,14 +481,16 @@ def build_reviewer(
     call_limit: int = DEFAULT_REVIEWER_CALL_LIMIT,
     provider_policy: bool = True,
     time_budget_s: Optional[float] = None,
+    diff: str = "",
 ):
     """Build one reviewer as a plain agent over the checkout.
 
     The prompt is the specialist's own, rendered with **no file content** — the
-    reviewer reads the file it is given from disk — plus the addendum that tells it
-    where the code is, how `read_file` numbers lines, which `.aid` files to look
-    for, and that `record_findings` is the only channel that reaches the merge
-    request.
+    reviewer reads the file it is given from disk — but with the file's unified
+    ``diff`` (capped), which is the only statement of what the merge request
+    changed. Plus the addendum that tells it where the code is, how `read_file`
+    numbers lines, which `.aid` files to look for, and that `record_findings` is
+    the only channel that reaches the merge request.
 
     Built with `create_deep_agent`, so each reviewer gets the full harness: a
     `write_todos` planning tool, context summarization, dangling-tool-call repair
@@ -510,7 +545,12 @@ def build_reviewer(
         # that matter.
         middleware.append(ProviderPolicyMiddleware(label=f"review {spec.name}"))
 
-    context = _prompt_context(source_branch=source_branch, mr_context=mr_context)
+    context = _prompt_context(
+        source_branch=source_branch,
+        mr_context=mr_context,
+        file_path=file_path,
+        diff=clip_diff_for_prompt(diff),
+    )
     return create_deep_agent(
         model=model,
         system_prompt=spec.prompt_getter(context, get_profile().instructions_for(spec.name)) + format_checkout_addendum(
@@ -572,12 +612,20 @@ def _describe_finish(state: object, call_limit: int) -> str:
 #: What a reviewer that ran out of calls is told. It has already read the file and
 #: done its greps; what it has *not* done is report, and `record_findings` is the only
 #: channel out — so the investigation is worth nothing until this happens.
+#:
+#: A reviewer cut short is also one that may not have finished the checks a high has
+#: to pass (`VERIFY_BEFORE_REPORTING`): the trigger it was tracing, the caller it was
+#: about to read. "Report now" must not read as "report it as high anyway", so an
+#: unverified finding is capped at medium — kept, and not posted at default verbosity.
 REPORT_NOW_INSTRUCTION = (
     "You have used your entire tool budget for this file, so stop investigating now.\n\n"
     "Do not call any tool except `record_findings`. Call it exactly once, with the "
-    "findings you have already established from what you read above. If you genuinely "
-    "found nothing worth reporting, call it with an empty findings list — that is how "
-    "a clean review is recorded, and saying so in prose instead records nothing at all."
+    "findings you have already established from what you read above. Record anything "
+    "you did not finish verifying — a trigger you did not find, a caller or callee you "
+    "did not read, library behaviour you did not confirm — as medium at most, never "
+    "high. If you genuinely found nothing worth reporting, call it with an empty "
+    "findings list — that is how a clean review is recorded, and saying so in prose "
+    "instead records nothing at all."
 )
 
 
@@ -641,6 +689,33 @@ class ReviewPassResult:
     truncated: bool = False
     sink: Optional[FindingsSink] = None
     summary: str = ""
+    # ── Per pair, for the progress record (`core/utils/review_progress.py`). The
+    # file-level fields above answer "did anything report on this file?", which is
+    # right for the run's errors and exit code and wrong for remembering what was
+    # done: one of a service file's two reviewers recording leaves the file
+    # "reviewed" while the other half never ran.
+    #: The whole plan, ``skip_pairs`` included — what "every pair settled" is
+    #: checked against.
+    plan_pairs: List[Tuple[str, str]] = field(default_factory=list)
+    #: Pairs whose own reviewer called ``record_findings`` for its own file.
+    completed_pairs: Set[Tuple[str, str]] = field(default_factory=set)
+    #: Every dispatched pair that did not record on its own: timed out, braked or
+    #: ceilinged with a salvage that recorded nothing, answered in prose — or raised
+    #: (those are also in ``errored_pairs``). All of it counts toward abandoning the
+    #: pair, unless the run as a whole looks like an outage
+    #: (``review_progress.is_outage``).
+    failed_pairs: Set[Tuple[str, str]] = field(default_factory=set)
+    #: The subset of ``failed_pairs`` whose reviewer raised, kept apart for the log
+    #: and the run's error. It used to be excluded from ``failed_pairs`` as "a
+    #: provider fault, not the file's", which meant it was never charged: a reviewer
+    #: that raises on one file every time — a context-length 400, which is never
+    #: retried, or a tool bug on that file's content — held the marker forever, the
+    #: exact problem the record exists to remove. Provider weather is retried inside
+    #: the gateway before it gets here, and a provider that is down fails most of the
+    #: run, which the outage guard already refuses to charge.
+    errored_pairs: Set[Tuple[str, str]] = field(default_factory=set)
+    #: Pairs the pool never started because the deadline came first.
+    never_dispatched: Set[Tuple[str, str]] = field(default_factory=set)
 
 
 async def review_changed_files(
@@ -656,6 +731,9 @@ async def review_changed_files(
     per_file_timeout_s: Optional[float] = None,
     deadline: Optional[float] = None,
     provider_policy: bool = True,
+    diffs: Optional[Mapping[str, str]] = None,
+    skip_pairs: Optional[Set[Tuple[str, str]]] = None,
+    failure_counts: Optional[Mapping[Tuple[str, str], int]] = None,
 ) -> ReviewPassResult:
     """Review every classified file with its specialist reviewer.
 
@@ -696,25 +774,46 @@ async def review_changed_files(
             the provider per call and overrides ``request.model`` with it — right
             for a real run (the run's policy decides, not a captured model) and
             exactly what makes a fake-model test impossible otherwise.
+        diffs: ``{file_path: unified diff}`` of what this run reviews — the MR
+            diff, or on an incremental run the compare diff of the new commits.
+            Each reviewer is shown its own file's entry; a missing one renders
+            an empty Git Diff block, as before.
+        skip_pairs: ``(path, reviewer)`` pairs not to dispatch — the ones the
+            progress record says are already reviewed at this content, or given up
+            on. Applied after the SQL dispatches are added, so a SQL second opinion
+            is skipped exactly like any other pair.
+        failure_counts: Prior failures per pair, from the progress record. Orders
+            the queue (see :func:`order_by_prior_failures`).
 
     Returns:
         A :class:`ReviewPassResult`. Never raises: a reviewer that fails costs its
         file, not the run.
     """
     plan = add_sql_dispatches(build_dispatch_plan(classified), sql_paths)
+    plan_pairs = list(plan)
     sink = FindingsSink()
+    skip = set(skip_pairs or ())
+    if skip:
+        plan = [pair for pair in plan if pair not in skip]
+        skipped = len(plan_pairs) - len(plan)
+        if skipped:
+            print(f"\n⏭️  Review pass: skipping {skipped} reviewer-file pair(s) the progress "
+                  f"record settled in an earlier run")
     if not plan:
-        return ReviewPassResult(sink=sink, summary="nothing to review")
+        return ReviewPassResult(
+            sink=sink,
+            summary="nothing left to review" if plan_pairs else "nothing to review",
+            plan_pairs=plan_pairs,
+        )
 
     jobs: List[Tuple[str, ReviewerSpec]] = []
-    for path, name in plan:
+    for path, name in order_by_prior_failures(plan, failure_counts):
         spec = _SPECS_BY_NAME.get(name)
         if spec is not None:
             jobs.append((path, spec))
 
     backend = FilesystemBackend(root_dir=clone_root, virtual_mode=True)
     resolved = model if model is not None else resolve_model()
-    record_tool = make_record_findings_tool(sink)
     # `FILE_BATCH_SIZE` names a concurrency ceiling, not a batch — the variable is
     # kept because it is deployed, and lowering it is still the documented answer to
     # a provider's concurrency limit.
@@ -736,11 +835,30 @@ async def review_changed_files(
     failed: List[str] = []
     truncated = False
     reasons: Dict[Tuple[str, str], str] = {}
+    # Per pair. `completed` is written by the record tool's callback, so it is true
+    # the moment the reviewer reports — before the invocation even returns, and
+    # whether or not the watchdog later cancels it.
+    completed: Set[Tuple[str, str]] = set()
+    errored: Set[Tuple[str, str]] = set()
+    dispatched: Set[Tuple[str, str]] = set()
+    never_dispatched: Set[Tuple[str, str]] = set()
 
     async def _one(path: str, spec: ReviewerSpec) -> Optional[str]:
         """Run one reviewer on one file. Returns the path on failure."""
 
         bounded = bool(per_file_timeout_s and per_file_timeout_s > 0)
+        pair = (path, spec.name)
+
+        def _mark(reported: str) -> None:
+            # Only a report on its *own* file completes the pair. A reviewer that
+            # records under a sibling's path has put findings in the sink for that
+            # file, but has not reviewed the one it was given.
+            if reported == path:
+                completed.add(pair)
+
+        # One tool per pair — same sink, own callback — because the sink keys on the
+        # file and cannot say which of a service file's two reviewers reported.
+        record_tool = make_record_findings_tool(sink, on_record=_mark)
 
         def build_agent(limit: int, time_budget_s: Optional[float] = None):
             return build_reviewer(
@@ -755,6 +873,7 @@ async def review_changed_files(
                 call_limit=limit,
                 provider_policy=provider_policy,
                 time_budget_s=time_budget_s,
+                diff=(diffs or {}).get(path, ""),
             )
 
         agent = build_agent(
@@ -791,26 +910,29 @@ async def review_changed_files(
         except asyncio.TimeoutError:
             print(f"  ⏳ {spec.name} timed out on {path}")
             state = latest.get("state") or {}
-            if path not in sink.reviewed_files and _ai_messages(state):
+            # Per pair, not per file: a service file's other reviewer having
+            # reported says nothing about whether this one did.
+            if pair not in completed and _ai_messages(state):
                 # The backstop for a call the time brake could not interrupt (it is
                 # checked between calls). What the reviewer read before the watchdog
                 # fired is still worth reporting.
                 salvaged = await _report_pass(
                     build_agent, state, path, spec.name,
                     timeout_s=SALVAGE_MIN_TIMEOUT_S, why="timed out")
-                if path in sink.reviewed_files:
-                    reasons[(path, spec.name)] = _describe_finish(salvaged or state, limit)
+                if pair in completed:
+                    reasons[pair] = _describe_finish(salvaged or state, limit)
                     return None
-            reasons[(path, spec.name)] = f"timed out after {per_file_timeout_s:.0f}s"
+            reasons[pair] = f"timed out after {per_file_timeout_s:.0f}s"
             return path
         except Exception as e:
-            reasons[(path, spec.name)] = describe_error(e)
+            reasons[pair] = describe_error(e)
+            errored.add(pair)
             print(f"  ❌ {spec.name} failed on {path}: {describe_error(e)}")
             return path
         # It returned. That is not the same as having reported: `record_findings` is
         # the only channel out, and a reviewer can finish without using it — by
         # answering in prose, or by being stopped by the call ceiling or time brake.
-        if path not in sink.reviewed_files and _hit_call_ceiling(state, limit):
+        if pair not in completed and _hit_call_ceiling(state, limit):
             # Everything it learned is in the history and cost real calls; ending here
             # would discard all of it. One bounded pass to get it recorded.
             braked = TIME_BRAKE_MESSAGE.lower() in " ".join(
@@ -820,7 +942,7 @@ async def review_changed_files(
                 why="ran out of time" if braked else "ran out of calls")
             if salvaged is not None:
                 state = salvaged
-        reasons[(path, spec.name)] = _describe_finish(state, limit)
+        reasons[pair] = _describe_finish(state, limit)
         return None
 
     # A queue, not batches. `asyncio.gather` over a slice is a barrier, and these
@@ -858,8 +980,10 @@ async def review_changed_files(
                         f"\n⏳ Review budget reached with {queue.qsize() + 1} review(s) "
                         f"still queued; skipping them and proceeding to posting"
                     )
+                never_dispatched.add((path, spec.name))
                 continue
             started.add(path)
+            dispatched.add((path, spec.name))
             print(f"  ▶️  [{position}/{len(jobs)}] {spec.name} on {path}")
             began = time.monotonic()
             try:
@@ -869,6 +993,7 @@ async def review_changed_files(
                 # must not take the other lanes down with it. CancelledError is a
                 # BaseException and deliberately passes through, so the run's own
                 # watchdogs still stop the pool.
+                errored.add((path, spec.name))
                 print(f"  ❌ review raised: {describe_error(e)}")
                 continue
             if outcome is not None:
@@ -888,9 +1013,10 @@ async def review_changed_files(
     attempted = {path for path, _spec in jobs}
     if truncated:
         # Files we never got to are not failures — the marker is held and a re-run
-        # picks them up, same contract as the overall timeout has always had. The
-        # pool records what it dispatched, so this is the exact set rather than the
-        # approximation a batch index could give.
+        # picks them up, same contract as the overall timeout has always had (and,
+        # with the progress record, picks up *only* them). The pool records what it
+        # dispatched, so this is the exact set rather than the approximation a batch
+        # index could give.
         attempted = set(started)
     unreported = sorted(attempted - sink.reviewed_files)
 
@@ -917,4 +1043,11 @@ async def review_changed_files(
         truncated=truncated,
         sink=sink,
         summary=sink.describe(),
+        plan_pairs=plan_pairs,
+        completed_pairs=set(completed),
+        # Errored pairs included: one set is what the record charges, so a consumer
+        # passing `failed_pairs` cannot leave the raised ones out by accident.
+        failed_pairs=dispatched - completed,
+        errored_pairs=errored - completed,
+        never_dispatched=never_dispatched,
     )

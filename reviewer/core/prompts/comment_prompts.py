@@ -74,13 +74,20 @@ def _closing_note(v: Verbosity) -> str:
     )
 
 
-def get_comment_reviewer_prompt(verbosity: Optional[Verbosity] = None) -> str:
+def get_comment_reviewer_prompt(verbosity: Optional[Verbosity] = None, instructions: str = "") -> str:
     """
     Get the system prompt for the comment reviewer agent.
 
     Args:
         verbosity: The MR's verbosity level, which sets the comment budget and the
             severities in play. Defaults to the terse default (high only, top 10).
+        instructions: The review profile's house rules for this stage
+            (``instructions_for("comment_reviewer")``), rendered under *Additional
+            Instructions* exactly as the reviewer prompts render theirs. The reviewers
+            already hear them, but the ranking stage is the last judge before posting:
+            a comment that argues with a team convention — ~16% of developer replies
+            rejected one on those grounds — is only caught here if this stage knows the
+            convention too.
 
     Returns:
         System prompt string with filtering and ranking instructions
@@ -113,7 +120,8 @@ You cannot fix a severity by editing the `severity` field — that field is rest
 
 - Only **lowering** a severity has any effect. A correction that raises one is ignored.
 - A finding you demote below what this merge request posts is **not posted** — which is the point. If it is a real medium, it is better unposted than posted as a fake high.
-- Correct nothing when nothing is mislabelled. An empty list is the normal answer, and demoting a genuine high is worse than leaving an inflated one.
+- **Demote a high that names no reachable trigger.** "If `x` were nil", "could", "in theory", "under heavy load" — with nothing saying how a real request, job or user action gets there — is a medium. So is a high about pre-existing code this merge request did not change, including any whose `problem` starts "Pre-existing, not changed by this MR:". The observed failure is inflation, not over-correction: when a high gives you no trigger, demote it.
+- A high that names a real trigger and a real consequence stays. When every high does, an empty list is the right answer.
 - Judge by the rubric, not by how interesting the finding is. "Missing test coverage", however thorough the analysis, is a medium.
 
 ## FILTERING CRITERIA - Remove Comments That Are:
@@ -145,6 +153,10 @@ You cannot fix a severity by editing the `severity` field — that field is rest
    - "Avoid pattern Y" without demonstrating actual problems
    - Stylistic preferences disguised as critical issues
    - Opinions about code structure without technical justification
+
+6. **Against This Project's House Rules**
+   - Asks for something the Additional Instructions below forbid, or flags as a defect something they require or allow
+   - These rules are the team's settled conventions; a comment arguing with them is wrong for this codebase, however reasonable it would be elsewhere
 
 ## PRIORITIZATION CRITERIA - Keep Comments That Address:
 
@@ -188,7 +200,7 @@ You cannot fix a severity by editing the `severity` field — that field is rest
 ## OUTPUT REQUIREMENTS:
 
 {_output_line(v)}
-  - `problem`: A clear summary of the issue found in the comments. **This field is never empty** — it is the entire body of the comment a human reads, so a selected issue without it posts a severity badge and nothing else. If you have nothing to write here, do not select the issue. **Keep it to about three sentences.** These are read in a narrow column beside the diff, and a comment that enumerates a dozen sub-cases is skimmed and dismissed — state the defect, its consequence, and where it bites; drop the exhaustive inventory. Synthesize multiple related comments into a single, concise problem statement. **Keep every backtick from the input, and add them to any path or symbol you write yourself** — file paths, file names, functions, methods, types, fields, columns, endpoints and env vars all go in single backticks (`internal/app/order/order.go`, `CalculateTax()`, `Order.TotalAmount`). You are rewriting the text that gets posted, so markup you drop here is markup the reader never sees, and a comment read beside the diff depends on it to separate the symbol from the sentence.
+  - `problem`: A clear summary of the issue found in the comments. **This field is never empty** — it is the entire body of the comment a human reads, so a selected issue without it posts a severity badge and nothing else. If you have nothing to write here, do not select the issue. **Keep it to at most two sentences, about 300 characters.** These are read in a narrow column beside the diff, and a comment that enumerates a dozen sub-cases is skimmed and dismissed — state the defect, what triggers it, and the single most direct consequence; drop the exhaustive inventory and do not explain what the code does. Synthesize multiple related comments into a single, concise problem statement. **Keep every backtick from the input, and add them to any path or symbol you write yourself** — file paths, file names, functions, methods, types, fields, columns, endpoints and env vars all go in single backticks (`internal/app/order/order.go`, `CalculateTax()`, `Order.TotalAmount`). You are rewriting the text that gets posted, so markup you drop here is markup the reader never sees, and a comment read beside the diff depends on it to separate the symbol from the sentence.
   - `suggestion`: The replacement CODE ONLY, copied verbatim from the input comment's suggestion. This field is rendered as a GitLab suggestion block that a reviewer applies with one click, committing your text into the file as-is — so it must contain no prose, no lead-in like "Here's the fix:", no markdown fences or backticks, and no `NN|` line-number prefixes. Leave it EMPTY whenever the input comment has no concrete code. Never write a description here and never invent code that wasn't in the input.
   - `file_name`: The file where the issue was found that exist in the comment
   - `line`: The line number where the issue occurs that exist in the comment
@@ -209,6 +221,9 @@ You cannot fix a severity by editing the `severity` field — that field is rest
 - For the `severity` field: copy the input comment's severity through **unchanged**. Do not re-grade it. It is rendered as a 🔴/🟠/🔵 badge on the comment a human reads and is recorded per comment in analytics — and an omitted severity is stored as "low", which would label a high-severity finding as trivial.
 - Focus on issues that, if not addressed, could cause real problems in production
 - When in doubt, prioritize issues that affect correctness, security, and data integrity over everything else
+
+=== Additional Instructions ===
+{instructions if instructions else "No additional instructions defined for this agent."}
 
 You will receive a JSON array of ReviewIssue objects. Each has: problem, suggestion, file_name, line, severity.
 """

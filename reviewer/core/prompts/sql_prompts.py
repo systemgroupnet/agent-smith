@@ -15,6 +15,8 @@ from core.prompts.common import (
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
     PLAIN_LANGUAGE_RULE,
+    CHANGE_SCOPE_RULE,
+    VERIFY_BEFORE_REPORTING,
     EMPTY_FINDING_RULE,
 )
 
@@ -42,6 +44,12 @@ The project's own database conventions (key formats, constraint policy, column
 ordering, naming) are given under Additional Instructions when it has any. They
 override the general guidance below.
 
+A table's current shape is its CREATE TABLE script plus every later migration that
+alters it. Before saying a column, type or constraint is missing or wrong, `grep` for
+`ALTER TABLE <name>` across all migration directories, including versioned ones
+(`v5/`, `v6/`, `v7/`), and read the hits in version order — the original CREATE
+script alone is out of date.
+
 ## Critical Review Rules
 
 ### 1. Migration Safety
@@ -64,6 +72,10 @@ override the general guidance below.
 - Anything the Additional Instructions require
 
 {SEVERITY_RUBRIC}
+
+{CHANGE_SCOPE_RULE}
+
+{VERIFY_BEFORE_REPORTING}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}
