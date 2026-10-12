@@ -15,6 +15,8 @@ from core.prompts.common import (
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
     PLAIN_LANGUAGE_RULE,
+    CHANGE_SCOPE_RULE,
+    VERIFY_BEFORE_REPORTING,
     EMPTY_FINDING_RULE,
 )
 
@@ -61,12 +63,16 @@ def get_e2e_reviewer_prompt(context: "ReviewPromptContext", additional_content: 
 - A spec never imports from another spec file; shared types and helpers live in their own modules
 
 ### 5. Scope
-- In a new spec, review the whole file. In an existing spec, review only what the diff adds or changes
+- The SCOPE section below decides what you review; in a new spec every line is new, so that is the whole file
 - Never comment on shared test infrastructure the project instructions mark as read-only
 
 A spec that cannot fail — no outcome assertion, a commented-out assertion, a left-in `.only` — reports green while verifying nothing. That is the exception for tests in the rubric below, and it is high.
 
 {SEVERITY_RUBRIC}
+
+{CHANGE_SCOPE_RULE}
+
+{VERIFY_BEFORE_REPORTING}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}

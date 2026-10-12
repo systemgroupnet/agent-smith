@@ -8,9 +8,18 @@ using direct REST API calls, including the GitLab REST API client.
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 from urllib.parse import quote
 import requests
+
+from core.utils.diff_lines import parse_unified_diff
+from core.utils.review_progress import (
+    PROGRESS_TOKEN,
+    ProgressRecord,
+    decode as decode_progress,
+    encode as encode_progress,
+)
 
 
 def _comment_retry_delays() -> List[float]:
@@ -111,37 +120,12 @@ def build_diff_position_map(diff_text: str) -> Dict[int, Optional[int]]:
     is what triggers the ``line_code can't be blank`` 400 we were hitting. Lines
     that are not in any hunk are absent from the map: they are not valid inline
     positions at all (comment must fall back to a general note).
-    """
-    positions: Dict[int, Optional[int]] = {}
-    if not diff_text:
-        return positions
 
-    old_ln = new_ln = 0
-    in_hunk = False
-    for raw in diff_text.split("\n"):
-        if raw.startswith("@@"):
-            m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw)
-            if m:
-                old_ln, new_ln = int(m.group(1)), int(m.group(2))
-                in_hunk = True
-            else:
-                in_hunk = False
-            continue
-        if not in_hunk or raw == "":
-            continue
-        tag = raw[0]
-        if tag == "+":            # added line — valid on the new side alone
-            positions[new_ln] = None
-            new_ln += 1
-        elif tag == "-":          # removed line — old side only; skip
-            old_ln += 1
-        elif tag == "\\":         # "\ No newline at end of file"
-            continue
-        else:                     # context line — needs both old & new
-            positions[new_ln] = old_ln
-            old_ln += 1
-            new_ln += 1
-    return positions
+    The hunk walk itself lives in :func:`core.utils.diff_lines.parse_unified_diff`,
+    shared with the changed-line gate so the two can never disagree about which
+    line a number names.
+    """
+    return parse_unified_diff(diff_text).positions()
 
 
 def resolve_inline_position(
@@ -262,8 +246,11 @@ __all__ = [
     'get_gitlab_compare',
     'get_review_marker',
     'upsert_review_marker',
+    'format_review_marker',
+    'ReviewMarker',
     'has_review_summary',
     'get_mr_notes',
+    'get_mr_discussions',
     'add_mr_label',
     'MARKER_TOKEN',
     'SUMMARY_MARKER_TOKEN',
@@ -295,7 +282,19 @@ class GitLabAPIClient:
     def _build_api_url(self, endpoint: str) -> str:
         """Build full API URL."""
         return f"{self.gitlab_url}/api/v4/{endpoint.lstrip('/')}"
-    
+
+    def get_current_user(self) -> Optional[Dict]:
+        """The user this client's token authenticates as (``GET /user``), or None."""
+        try:
+            response = requests.get(self._build_api_url("/user"), headers=self.headers, timeout=30)
+            response.raise_for_status()
+            user = response.json()
+            return user if isinstance(user, dict) else None
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            print(f"  ⚠️  [GitLab API] Could not identify the token's user: {e}")
+            return None
+
     def get_merge_request(self, project_path: str, mr_iid: str) -> Optional[Dict]:
         """
         Get merge request information.
@@ -687,6 +686,65 @@ class GitLabAPIClient:
             print(f"  ❌ [GitLab API] Error awarding :{name}: on note {note_id}: {e}")
             return None
 
+    def list_merge_request_discussions(
+        self, project_path: str, mr_iid: str
+    ) -> Optional[List[Dict]]:
+        """
+        List the merge request's discussions — every note, grouped into its thread.
+
+        The notes endpoint returns a flat list with no ``discussion_id``, so a
+        human's "this is by design" under one of the agent's findings arrives as
+        an unrelated comment, and nothing can tell which finding it answers. A
+        discussion is ``{"id", "individual_note", "notes": [...]}`` with the
+        thread's first comment at ``notes[0]`` and every reply after it, which is
+        the shape the dedup stage needs to treat a human's answer as an answer.
+
+        Paginated and capped like :meth:`list_merge_request_notes` (100 per page,
+        MAX_DISCUSSION_PAGES pages), for the same reason: bounded, and a later
+        page failing returns what was collected rather than discarding it.
+
+        Returns:
+            List of discussion dictionaries, or None if the first request failed
+            (sets ``last_error``).
+        """
+        project_id = quote(project_path, safe="")
+        url = self._build_api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/discussions")
+        per_page = 100
+        discussions: List[Dict] = []
+
+        for page in range(1, MAX_DISCUSSION_PAGES + 1):
+            try:
+                response = requests.get(
+                    url,
+                    headers=self.headers,
+                    params={"per_page": per_page, "page": page},
+                    timeout=30,
+                )
+                response.raise_for_status()
+                batch = response.json()
+            except Exception as e:
+                self.last_error = f"{type(e).__name__}: {e}"
+                print(f"  ❌ [GitLab API] Error listing discussions (page {page}): {e}")
+                return discussions if discussions else None
+
+            if not isinstance(batch, list) or not batch:
+                break
+            discussions.extend(batch)
+            if len(batch) < per_page:
+                break
+        else:
+            print(
+                f"  ⚠️  [GitLab API] Stopped listing discussions at {MAX_DISCUSSION_PAGES} "
+                f"pages ({len(discussions)} threads); older threads are not visible."
+            )
+
+        return discussions
+
+
+#: Page cap for listing MR discussions (100/page → up to 1000 threads). Same
+#: bound as MAX_NOTE_PAGES; a separate name so the two can move independently.
+MAX_DISCUSSION_PAGES = 10
+
 
 def get_gitlab_api_client(gitlab_url: str, token: str) -> GitLabAPIClient:
     """
@@ -1063,6 +1121,27 @@ async def add_note_award_emojis(
     return failed
 
 
+async def get_mr_discussions(
+    gitlab_url: str, project_path: str, mr_id: str, token: str
+) -> Optional[List[Dict]]:
+    """List every discussion (thread) on the MR, or None when they can't be fetched.
+
+    The comment dedup stage's preferred view of what is already on the MR: each
+    reply arrives attached to the comment it answers, so "a human already
+    rejected this finding" is something the stage can see rather than infer.
+    Fetched fresh at dedup time for the same reason as :func:`get_mr_notes`.
+
+    None (rather than []) means the call failed, so the caller can fall back to
+    the flat notes list and say so. Never raises.
+    """
+    try:
+        api_client = get_gitlab_api_client(gitlab_url, token)
+        return api_client.list_merge_request_discussions(project_path, mr_id)
+    except Exception as e:
+        print(f"  ⚠️  [GitLab] Could not list MR discussions: {e}")
+        return None
+
+
 async def get_gitlab_compare(
     gitlab_url: str, project_path: str, from_sha: str, to_sha: str, token: str
 ) -> Optional[list]:
@@ -1087,11 +1166,46 @@ async def get_gitlab_compare(
     return result.get("diffs", [])
 
 
+@dataclass
+class ReviewMarker:
+    """What the agent's marker note says, and whether it could be read at all.
+
+    One note carries both halves of what a run remembers: the commit the whole MR
+    was last reviewed up to (``sha``), and the per-pair progress record for the
+    commits since (``progress``, see `core/utils/review_progress.py`). One note
+    rather than two because they are written together — one GET at the start of the
+    run, one PUT at the end — and a second note would be a second thing to find on
+    page one of a busy MR.
+    """
+
+    #: The last commit the whole MR was reviewed up to; None for an MR whose first
+    #: run has not yet finished every pair.
+    sha: Optional[str] = None
+    note_id: Optional[int] = None
+    progress: ProgressRecord = field(default_factory=ProgressRecord)
+    #: Set when a progress comment was present but unreadable — the caller records
+    #: it as a ``review_progress`` warning and reviews as though it were absent.
+    progress_error: Optional[str] = None
+    #: False when the MR's notes could not be listed. Then "no marker" is unknown
+    #: rather than true, and the caller must not write one: creating a note on that
+    #: basis is how an MR ends up with two markers and two diverging histories.
+    readable: bool = True
+
+
 async def get_review_marker(
     gitlab_url: str, project_path: str, mr_id: str, token: str
-) -> Tuple[Optional[str], Optional[int]]:
+) -> ReviewMarker:
     """
-    Find the agent's review marker note on the MR and read the last-reviewed SHA.
+    Find the agent's review marker note on the MR and read what it records.
+
+    **Only the agent's own note counts**, where that is knowable: the marker decides
+    what a run skips, so a copy of it in someone else's comment — quoted in a reply,
+    pasted from another MR — must not be able to tell the agent that files were
+    already reviewed. The token's user is one ``GET /user``, made only when some
+    note carries a marker at all; if that call fails the check is skipped and any
+    marker is accepted, which is the behaviour this had before. Skipping the foreign
+    note also keeps the eventual write away from a note GitLab would refuse to let
+    this token edit.
 
     Args:
         gitlab_url: GitLab instance URL
@@ -1100,21 +1214,52 @@ async def get_review_marker(
         token: GitLab access token
 
     Returns:
-        Tuple of (last_reviewed_sha, note_id). Both are None when no marker exists.
+        A :class:`ReviewMarker`. ``readable`` is False when the notes could not be
+        listed — distinct from an MR that simply has no marker yet.
     """
     print(f"  🔍 [GitLab] Looking up review marker note...")
-    api_client = get_gitlab_api_client(gitlab_url, token)
-    notes = api_client.list_merge_request_notes(project_path, mr_id)
-    if not notes:
-        return None, None
+    try:
+        api_client = get_gitlab_api_client(gitlab_url, token)
+        notes = api_client.list_merge_request_notes(project_path, mr_id)
+    except Exception as e:
+        print(f"  ⚠️  [GitLab] Could not list MR notes for the review marker: {e}")
+        notes = None
+    if notes is None:
+        return ReviewMarker(readable=False)
+
+    candidates = [
+        note for note in notes
+        if MARKER_TOKEN in (note.get("body") or "") or PROGRESS_TOKEN in (note.get("body") or "")
+    ]
+    if not candidates:
+        return ReviewMarker()
+
+    me = api_client.get_current_user()
+    owner_id = (me or {}).get("id")
+    if owner_id is None:
+        print("  ⚠️  [GitLab] Accepting the review marker without checking its author")
 
     pattern = re.compile(re.escape(MARKER_TOKEN) + r"=([0-9a-fA-F]+)")
-    for note in notes:
-        body = note.get("body", "") or ""
+    # Most recently updated first, so a stale duplicate left by an older version
+    # loses to the note the last run actually wrote.
+    for note in candidates:
+        author = note.get("author") or {}
+        if owner_id is not None and author.get("id") != owner_id:
+            print(
+                f"  ⚠️  [GitLab] Ignoring a review marker in note {note.get('id')} by "
+                f"@{author.get('username', '?')} — not written by this agent's user"
+            )
+            continue
+        body = note.get("body") or ""
         match = pattern.search(body)
-        if match:
-            return match.group(1), note.get("id")
-    return None, None
+        progress, progress_error = decode_progress(body)
+        return ReviewMarker(
+            sha=match.group(1) if match else None,
+            note_id=note.get("id"),
+            progress=progress,
+            progress_error=progress_error,
+        )
+    return ReviewMarker()
 
 
 async def has_review_summary(
@@ -1160,33 +1305,70 @@ async def get_mr_notes(
         return None
 
 
+def format_review_marker(sha: Optional[str], progress: Optional[ProgressRecord] = None) -> str:
+    """The marker note's body: the commit line, the progress comment, one visible line.
+
+    The commit line is written even when no commit is fully reviewed yet
+    (``=none``, which the SHA pattern deliberately does not match): every consumer
+    that filters the agent's bookkeeping out of the MR's comments — the dedup stage
+    among them — recognises this note by ``MARKER_TOKEN``, so it has to be present
+    whatever the note currently records.
+    """
+    lines = [f"<!-- {MARKER_TOKEN}={sha or 'none'} -->"]
+    if progress is not None and not progress.is_empty():
+        lines.append(encode_progress(progress))
+    if not sha:
+        lines.append(
+            "🤖 Code Review Agent has reviewed part of this merge request; "
+            "the next run continues where this one stopped."
+        )
+    elif progress is not None and progress.head and progress.head != sha:
+        lines.append(
+            f"🤖 Code Review Agent reviewed up to commit `{sha[:8]}`; "
+            f"the changes since are partly reviewed."
+        )
+    else:
+        lines.append(f"🤖 Code Review Agent reviewed up to commit `{sha[:8]}`.")
+    return "\n".join(lines)
+
+
 async def upsert_review_marker(
     gitlab_url: str,
     project_path: str,
     mr_id: str,
     token: str,
-    sha: str,
+    sha: Optional[str],
     note_id: Optional[int] = None,
+    progress: Optional[ProgressRecord] = None,
+    readable: bool = True,
 ) -> bool:
     """
-    Create or update the review marker note recording the last-reviewed SHA.
+    Create or update the review marker note: the last-reviewed SHA and the progress record.
 
     Args:
         gitlab_url: GitLab instance URL
         project_path: Project path (e.g., "group/project")
         mr_id: Merge request IID
         token: GitLab access token
-        sha: The commit SHA that was just reviewed (the current MR head)
+        sha: The last commit the whole MR is reviewed up to — the current head when
+            this run settled every pair, otherwise whatever the marker already said
+            (None when no run has settled the MR yet).
         note_id: Existing marker note id to update in place; None to create a new note.
+        progress: The progress record to carry; None or empty writes none.
+        readable: ``ReviewMarker.readable`` from the lookup. False refuses the write:
+            the lookup could not see the notes, so ``note_id`` being None says
+            nothing about whether a marker exists, and creating one could leave the
+            MR with two.
 
     Returns:
         True if the marker was written successfully, False otherwise.
     """
+    if not readable:
+        print("  ⏭️  Not writing the review marker — the MR's notes could not be read, "
+              "so writing could create a second marker note")
+        return False
     api_client = get_gitlab_api_client(gitlab_url, token)
-    body = (
-        f"<!-- {MARKER_TOKEN}={sha} -->\n"
-        f"🤖 Code Review Agent reviewed up to commit `{sha[:8]}`."
-    )
+    body = format_review_marker(sha, progress)
     try:
         if note_id is not None:
             result = api_client.update_merge_request_note(project_path, mr_id, note_id, body)

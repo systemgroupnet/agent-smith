@@ -14,11 +14,13 @@ constructions collapse into one. The alternative was moving eight classes into a
 new module purely so the deep-agent path could import them, which is the shape of
 a refactor that never finishes.
 
-**Content and diff are normally empty here.** A reviewer reads the file
+**Content is normally empty here; the diff is not.** A reviewer reads the file
 itself, from the checkout, so the prompt carries instructions and merge-request
 context but not the code. ``format_file_content_section("")`` renders
 "(file content unavailable)" and the deep-mode addendum immediately tells the
-model where the code actually is.
+model where the code actually is. The diff *is* filled in (capped): the checkout
+cannot say which lines the merge request changed, and a reviewer without it
+reviews code that was already there.
 """
 
 from typing import Optional
@@ -37,6 +39,7 @@ class ReviewPromptContext(BaseModel):
 
     # The reviewed file. Empty in practice — the reviewer reads it from disk.
     content: str = ""
+    # The file's unified diff for this run, capped. The one input not on disk.
     diff: str = ""
     file_name: str = ""
     file_path: Optional[str] = None

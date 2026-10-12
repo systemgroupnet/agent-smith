@@ -66,7 +66,25 @@ def test_the_comment_reviewer_is_told_how_to_correct_a_severity():
     assert "STEP 0b" in text
     assert "severity_corrections" in text
     assert "Only **lowering** a severity has any effect" in text
-    assert "about three sentences" in text, "the live run produced 1000-char essays"
+    assert "at most two sentences, about 300 characters" in text, \
+        "the live run produced 1000-char essays"
+    assert "about three sentences" not in text
+
+
+def test_the_comment_reviewer_is_no_longer_told_to_spare_an_inflated_high():
+    """The observed failure is inflation; this sentence protected it."""
+    text = get_comment_reviewer_prompt()
+    assert "demoting a genuine high is worse than leaving an inflated one" not in text
+    assert "**Demote a high that names no reachable trigger.**" in text
+    assert "Pre-existing, not changed by this MR:" in text, \
+        "the marker the reviewers are told to write is the one it demotes on"
+
+
+def test_whether_indexes_matter_is_left_to_the_profile():
+    """A house that doesn't review indexes says so in its `comment_reviewer`
+    instructions; the generic ranking prompt is shared by every profile."""
+    text = get_comment_reviewer_prompt()
+    assert "Missing indexes" in text
 
 
 def test_a_demotion_below_the_level_drops_the_comment():

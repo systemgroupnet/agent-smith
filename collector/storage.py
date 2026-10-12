@@ -50,6 +50,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    Text,
     create_engine,
     func,
     select,
@@ -167,6 +168,13 @@ review_comments = Table(
     # distinction survives — review_runs.model is the *configured* model.
     Column("model", String),
     Column("mr_author_username", String),  # whose MR the comment is on
+    # What the comment said: the finding's text as formatted into it, never the
+    # rendered body (whose suggestion block is source code). Without it a reply in
+    # comment_replies can be read but not what it answered. NULL = pre-0013 row.
+    Column("problem", Text),
+    # The review profile's type for ``file`` (service, sql, ...): which
+    # .aid/<type>.md a lesson drawn from this comment's replies belongs in.
+    Column("file_type", String),
     Index("idx_review_comments_run_id", "run_id"),
     Index("idx_review_comments_note_id", "note_id", unique=True),
     Index("idx_review_comments_project_mr", "project_path", "mr_id"),
@@ -472,43 +480,19 @@ def insert_event(payload: dict[str, Any]) -> int:
 
         comment_rows = []
         for c in posted:
-            if not isinstance(c, dict):
-                continue
-            note_id = _as_int(c.get("note_id"))
-            if note_id is None:  # a comment we can't key reactions to is useless here
-                continue
-            comment_rows.append({
-                "received_at": received_at,
-                "run_id": _text(run_id),
-                "review_run_id": review_run_id,
-                "project_path": project_path,
-                "mr_id": mr_id,
-                "note_id": note_id,
-                "discussion_id": _text(c.get("discussion_id")),
-                "comment_type": _text(c.get("comment_type")),
-                "file": _text(c.get("file")),
-                "line": _as_int(c.get("line")),
-                "severity": _text(c.get("severity")),
-                "model": _text(c.get("model")),
-                "mr_author_username": mr_author,
-            })
-        if comment_rows:
-            # A run can be re-emitted (retries) and note ids are stable, so upsert
-            # on note_id keeps this idempotent rather than erroring on the unique idx.
-            stmt = pg_insert(review_comments).values(comment_rows)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["note_id"],
-                set_={
-                    "run_id": stmt.excluded.run_id,
-                    "review_run_id": stmt.excluded.review_run_id,
-                    "comment_type": stmt.excluded.comment_type,
-                    "file": stmt.excluded.file,
-                    "line": stmt.excluded.line,
-                    "severity": stmt.excluded.severity,
-                    "mr_author_username": stmt.excluded.mr_author_username,
-                },
+            row = _comment_row(
+                c,
+                received_at=received_at,
+                run_id=run_id,
+                review_run_id=review_run_id,
+                project_path=project_path,
+                mr_id=mr_id,
+                mr_author=mr_author,
             )
-            conn.execute(stmt)
+            if row is not None:
+                comment_rows.append(row)
+        if comment_rows:
+            conn.execute(_upsert_review_comments(comment_rows))
 
         # The review summary goes to its own table, never review_comments — see
         # the review_summaries definition. Upserted on note_id for the same
@@ -541,9 +525,91 @@ def insert_event(payload: dict[str, Any]) -> int:
     return review_run_id
 
 
+def _comment_row(
+    entry: Any,
+    *,
+    received_at: str,
+    run_id: Any,
+    review_run_id: int,
+    project_path: Optional[str],
+    mr_id: Optional[str],
+    mr_author: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """Map one ``posted_comments`` entry to a review_comments row, or None to skip.
+
+    Lenient like the rest of ingest: a malformed field becomes NULL and only an
+    entry with no usable ``note_id`` is skipped (a comment that reactions and
+    replies cannot be keyed to is useless here). ``problem`` and ``file_type`` are
+    absent from every event sent before the reviewer carried them, and that must
+    store NULL rather than fail.
+    """
+    if not isinstance(entry, dict):
+        return None
+    note_id = _as_int(entry.get("note_id"))
+    if note_id is None:
+        return None
+    return {
+        "received_at": received_at,
+        "run_id": _text(run_id),
+        "review_run_id": review_run_id,
+        "project_path": project_path,
+        "mr_id": mr_id,
+        "note_id": note_id,
+        "discussion_id": _text(entry.get("discussion_id")),
+        "comment_type": _text(entry.get("comment_type")),
+        "file": _text(entry.get("file")),
+        "line": _as_int(entry.get("line")),
+        "severity": _text(entry.get("severity")),
+        "model": _text(entry.get("model")),
+        "mr_author_username": mr_author,
+        "problem": _prose(entry.get("problem")),
+        "file_type": _prose(entry.get("file_type")),
+    }
+
+
+def _upsert_review_comments(rows: list[dict[str, Any]]):
+    """INSERT … ON CONFLICT (note_id) DO UPDATE for review_comments rows.
+
+    A run can be re-emitted (retries) and note ids are stable, so upserting on
+    note_id keeps ingest idempotent rather than erroring on the unique index.
+
+    ``problem`` and ``file_type`` are COALESCEd rather than overwritten: a
+    re-sent event from an older reviewer, or one whose text was lost, carries no
+    value for them, and overwriting would erase the only stored copy of what the
+    comment said — the one thing those columns exist to keep.
+    """
+    stmt = pg_insert(review_comments).values(rows)
+    return stmt.on_conflict_do_update(
+        index_elements=["note_id"],
+        set_={
+            "run_id": stmt.excluded.run_id,
+            "review_run_id": stmt.excluded.review_run_id,
+            "comment_type": stmt.excluded.comment_type,
+            "file": stmt.excluded.file,
+            "line": stmt.excluded.line,
+            "severity": stmt.excluded.severity,
+            "mr_author_username": stmt.excluded.mr_author_username,
+            "problem": func.coalesce(stmt.excluded.problem, review_comments.c.problem),
+            "file_type": func.coalesce(stmt.excluded.file_type, review_comments.c.file_type),
+        },
+    )
+
+
 def _text(value: Any) -> Optional[str]:
     """Lenient text coercion: None stays None, everything else becomes str."""
     return None if value is None else str(value)
+
+
+def _prose(value: Any) -> Optional[str]:
+    """A free-text field, or None: only a non-blank string is kept.
+
+    Stricter than :func:`_text` on purpose. ``str()`` of a dict or a number is a
+    value nobody wrote, and storing it as a comment's text would be read later as
+    something the agent said.
+    """
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 def _review_comment_exists(note_id: int) -> bool:
@@ -1002,6 +1068,8 @@ def list_review_comments(
 ) -> list[dict[str, Any]]:
     """Return posted review comments (newest first), each with its scores and replies.
 
+    Every review_comments column is returned, including ``problem`` (what the
+    comment said) and ``file_type`` — NULL on rows written before migration 0013.
     Each comment dict carries a ``scores`` list (the rows from ``comment_scores``
     for that note) plus a convenience ``score_count`` and ``score_avg``, and a
     ``replies`` list (the rows from ``comment_replies`` in that comment's thread,

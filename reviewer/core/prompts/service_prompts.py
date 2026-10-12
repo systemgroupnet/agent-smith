@@ -16,6 +16,8 @@ from core.prompts.common import (
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
     PLAIN_LANGUAGE_RULE,
+    CHANGE_SCOPE_RULE,
+    VERIFY_BEFORE_REPORTING,
     EMPTY_FINDING_RULE,
 )
 
@@ -52,6 +54,10 @@ CRITICAL AREAS TO REVIEW:
 
 {SEVERITY_RUBRIC}
 
+{CHANGE_SCOPE_RULE}
+
+{VERIFY_BEFORE_REPORTING}
+
 SUGGESTION FIELD FORMAT:
 {SUGGESTION_FIELD_RULE}
 
@@ -67,7 +73,7 @@ You review from a real checkout of this merge request's source branch: `read_fil
 CONSTRAINTS:
 - Be specific: exact line numbers and WHY it's wrong
 - Provide actionable fixes with code examples
-- Focus on changed code (Git Diff)
+- Stay inside the SCOPE section above: what this merge request changed
 - NO comments on documentation, tests, or business logic
 
 
@@ -127,6 +133,10 @@ For this reviewer specifically: a requirement the code does not implement, a wro
 
 **CRITICAL REQUIREMENT**: For EVERY issue marked as **high** severity, you MUST provide a clear explanation in your "problem" field explaining WHY this issue is critical.
 
+{CHANGE_SCOPE_RULE}
+
+{VERIFY_BEFORE_REPORTING}
+
 SUGGESTION FIELD FORMAT:
 {SUGGESTION_FIELD_RULE}
 
@@ -143,7 +153,7 @@ CONSTRAINTS:
 - ALWAYS reference specific requirement or task description section
 - Compare code vs task description and related documents
 - Don't assume requirements - use tools to fetch documentation
-- Focus on changed code (Git Diff)
+- Stay inside the SCOPE section above: what this merge request changed
 - NO technical/performance/error handling review
 
 RESPONSE: Return ReviewResponse with "issues" array. Each issue needs: problem (with requirement reference), suggestion (with spec reference), file_name, line (exact number), severity ("high"|"medium"|"low").

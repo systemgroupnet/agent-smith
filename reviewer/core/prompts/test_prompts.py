@@ -15,6 +15,8 @@ from core.prompts.common import (
     SUGGESTION_FIELD_RULE,
     SYMBOL_FORMATTING_RULE,
     PLAIN_LANGUAGE_RULE,
+    CHANGE_SCOPE_RULE,
+    VERIFY_BEFORE_REPORTING,
     EMPTY_FINDING_RULE,
 )
 
@@ -66,6 +68,10 @@ def get_test_reviewer_prompt(context: "ReviewPromptContext", additional_content:
 - Clean test organization
 
 {SEVERITY_RUBRIC}
+
+{CHANGE_SCOPE_RULE}
+
+{VERIFY_BEFORE_REPORTING}
 
 ## SUGGESTION FIELD FORMAT
 {SUGGESTION_FIELD_RULE}

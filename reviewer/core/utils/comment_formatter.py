@@ -11,7 +11,9 @@ the code in their own markdown fence, or copy the ``NN|`` line-number gutter out
 of the file content. Any of those would be committed into the source, so
 ``sanitize_suggestion`` below strips the recognizable damage and, when what
 remains is not code at all, tells the caller to post it as plain text rather
-than as an applyable suggestion.
+than as an applyable suggestion. Clean code is still only applyable when it fits
+the one line the block replaces (``anchor_suggestion``) and when a reviewer's
+own finding vouches for it (``restore_issue_suggestions``).
 """
 
 import re
@@ -235,18 +237,67 @@ def _issue_field(issue: Any, name: str) -> Any:
     return issue.get(name) if isinstance(issue, dict) else getattr(issue, name, None)
 
 
-def _set_severity(issue: Any, severity: str) -> None:
+def _set_field(issue: Any, name: str, value: Any) -> None:
     if isinstance(issue, dict):
-        issue["severity"] = severity
+        issue[name] = value
     else:
-        setattr(issue, "severity", severity)
+        setattr(issue, name, value)
+
+
+def _set_severity(issue: Any, severity: str) -> None:
+    _set_field(issue, "severity", severity)
 
 
 def _set_problem(issue: Any, problem: str) -> None:
-    if isinstance(issue, dict):
-        issue["problem"] = problem
-    else:
-        setattr(issue, "problem", problem)
+    _set_field(issue, "problem", problem)
+
+
+def _position_keys(issue: Any) -> Tuple[tuple, tuple]:
+    """``(file_name, line)`` and ``(basename, line)`` — the two keys every restore
+    matches on, exact first. The basename form exists because the ranking stage
+    may drop the directory from a path it rewrites."""
+    file_name = str(_issue_field(issue, "file_name") or "")
+    line = _issue_field(issue, "line")
+    return (file_name, line), (file_name.rsplit("/", 1)[-1], line)
+
+
+def _index_findings(originals: list, accept=None) -> Tuple[dict, dict]:
+    """Index the reviewers' findings by position, for the restore functions below.
+
+    Returns ``(by_pos, by_base)`` mapping each position key to ``(rank, finding)``.
+    A position carrying several findings resolves to the **most severe** — a merged
+    comment ("if multiple comments relate to the same problem, synthesize them into
+    one") inherits the most severe of its group — and the *first* on a tie: the
+    input is ordered highs-first in file order, so the earliest is the one the
+    ranking stage read first. One index for both restores is what keeps a comment's
+    badge and text coming from the same finding. The fix does not use it: see
+    :func:`restore_issue_suggestions` for why "most severe" is too coarse there.
+
+    ``accept`` narrows which findings may be matched at all (a severity outside the
+    level, a finding with no text); a finding without a ``file_name`` never can be.
+    """
+    by_pos: dict = {}
+    by_base: dict = {}
+    for issue in originals or []:
+        if accept is not None and not accept(issue):
+            continue
+        if not str(_issue_field(issue, "file_name") or ""):
+            continue
+        rank = _rank(_norm(get_severity(issue)))
+        for index, key in zip((by_pos, by_base), _position_keys(issue)):
+            held = index.get(key)
+            # Strictly greater, so the first finding wins a tie.
+            if held is None or rank > held[0]:
+                index[key] = (rank, issue)
+    return by_pos, by_base
+
+
+def _match_finding(issue: Any, index: Tuple[dict, dict]) -> Optional[Any]:
+    """The finding at ``issue``'s position — exact path first, then basename."""
+    by_pos, by_base = index
+    exact, base = _position_keys(issue)
+    hit = by_pos.get(exact) or by_base.get(base)
+    return hit[1] if hit else None
 
 
 def restore_issue_severities(
@@ -278,22 +329,12 @@ def restore_issue_severities(
     if not allowed or not selected:
         return selected, []
 
-    # A merged comment ("if multiple comments relate to the same problem, synthesize
-    # them into one") inherits the most severe of the group, so a position that
-    # carried several findings resolves to the highest rather than the first seen.
-    by_pos: dict = {}
-    by_base: dict = {}
-    for issue in originals:
-        severity = _norm(get_severity(issue))
-        if severity not in allowed:
-            continue
-        file_name = str(_issue_field(issue, "file_name") or "")
-        line = _issue_field(issue, "line")
-        if not file_name:
-            continue
-        for index, key in ((by_pos, (file_name, line)), (by_base, (file_name.rsplit("/", 1)[-1], line))):
-            if _rank(severity) > _rank(index.get(key, "")):
-                index[key] = severity
+    # A merged comment inherits the most severe of its group (see _index_findings),
+    # so a position that carried several findings resolves to the highest rather
+    # than the first seen.
+    index = _index_findings(
+        originals, accept=lambda issue: _norm(get_severity(issue)) in allowed
+    )
 
     fallback = max(allowed, key=_rank)
     changes = []
@@ -301,7 +342,8 @@ def restore_issue_severities(
         current = _norm(get_severity(issue))
         file_name = str(_issue_field(issue, "file_name") or "")
         line = _issue_field(issue, "line")
-        want = by_pos.get((file_name, line)) or by_base.get((file_name.rsplit("/", 1)[-1], line))
+        hit = _match_finding(issue, index)
+        want = _norm(get_severity(hit)) if hit is not None else None
         if want is None:
             # No positional match: the model rewrote file_name or line. Keep its own
             # value when the level could have produced it, otherwise assume the most
@@ -351,24 +393,10 @@ def restore_issue_problems(selected: list, originals: list) -> Tuple[list, list,
     if not selected:
         return selected, [], []
 
-    by_pos: dict = {}
-    by_base: dict = {}
-    for issue in originals or []:
-        problem = str(_issue_field(issue, "problem") or "")
-        if not problem.strip():
-            continue
-        file_name = str(_issue_field(issue, "file_name") or "")
-        if not file_name:
-            continue
-        line = _issue_field(issue, "line")
-        rank = _rank(_norm(get_severity(issue)))
-        for index, key in ((by_pos, (file_name, line)),
-                           (by_base, (file_name.rsplit("/", 1)[-1], line))):
-            # Strictly greater, so the first finding wins a tie: the input is
-            # ordered highs-first in file order, so the earliest is the one the
-            # ranking stage read first.
-            if rank > index.get(key, (-1, ""))[0]:
-                index[key] = (rank, problem)
+    index = _index_findings(
+        originals,
+        accept=lambda issue: bool(str(_issue_field(issue, "problem") or "").strip()),
+    )
 
     kept, restored, dropped = [], [], []
     for issue in selected:
@@ -378,15 +406,208 @@ def restore_issue_problems(selected: list, originals: list) -> Tuple[list, list,
             continue
         file_name = str(_issue_field(issue, "file_name") or "")
         line = _issue_field(issue, "line")
-        hit = (by_pos.get((file_name, line))
-               or by_base.get((file_name.rsplit("/", 1)[-1], line)))
+        hit = _match_finding(issue, index)
         if hit is None:
             dropped.append((file_name, line))
             continue
-        _set_problem(issue, hit[1])
+        _set_problem(issue, str(_issue_field(hit, "problem") or ""))
         restored.append((file_name, line))
         kept.append(issue)
     return kept, restored, dropped
+
+
+def _problem_key(issue: Any) -> str:
+    return " ".join(str(_issue_field(issue, "problem") or "").split()).lower()
+
+
+def _suggestion_key(text: Any) -> str:
+    """A suggestion as code, whitespace-insensitive — so the model's echo of a
+    reviewer's fix (re-fenced, re-indented) still reads as that fix."""
+    cleaned, _ = sanitize_suggestion(text)
+    return " ".join((cleaned or "").split())
+
+
+#: Words that say nothing about *which* finding a sentence describes. Short words
+#: (two letters or fewer) are dropped by length before this is consulted.
+_SIMILARITY_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "are", "was", "were", "but", "not", "with", "this",
+        "that", "these", "those", "from", "into", "than", "then", "when", "which",
+        "will", "would", "could", "should", "can", "may", "might", "has", "have",
+        "had", "its", "there", "here", "also", "any", "all", "each", "only", "just",
+        "been", "being", "does", "because", "since", "before", "after", "while",
+        "where", "what", "how", "you", "your", "our", "they", "their", "such",
+        "more", "very", "instead", "ensure", "consider",
+    }
+)
+
+#: A reworded comment is attributed to the finding whose words it shares most,
+#: but only on a clear win — at least this Jaccard similarity (over content
+#: words)... The comment reviewer is told to cut a finding to two short
+#: plain-language sentences, and Jaccard punishes the length difference: the
+#: rewrites in ``tests/test_suggestions.py`` score 0.29 (nil deref) and 0.23 (SQL
+#: injection) against their own findings, and 0.0 against the *other* finding on
+#: the same line. A floor of 0.3 would call both ambiguous, so the floor only rules
+#: out noise; the margin below is what tells two findings apart.
+SUGGESTION_MATCH_MIN_SIMILARITY = 0.2
+#: ...and at least this far ahead of the runner-up. A rewording that is about as
+#: close to two findings is not evidence for either, and guessing is exactly the
+#: failure this exists to stop: one finding's fix posted under another's text.
+SUGGESTION_MATCH_MIN_MARGIN = 0.1
+
+
+def _problem_words(issue: Any) -> frozenset:
+    text = str(_issue_field(issue, "problem") or "").lower()
+    return frozenset(
+        w for w in re.findall(r"[a-z0-9_]+", text)
+        if len(w) > 2 and w not in _SIMILARITY_STOPWORDS
+    )
+
+
+def _closest_by_text(issue: Any, candidates: list) -> Optional[Any]:
+    """The candidate whose ``problem`` the issue's reads most like, on a clear win."""
+    words = _problem_words(issue)
+    if not words:
+        return None
+    scores = []
+    for finding in candidates:
+        theirs = _problem_words(finding)
+        union = words | theirs
+        scores.append(len(words & theirs) / len(union) if union else 0.0)
+    ranked = sorted(range(len(candidates)), key=lambda i: scores[i], reverse=True)
+    best = scores[ranked[0]]
+    runner_up = scores[ranked[1]] if len(ranked) > 1 else 0.0
+    if best >= SUGGESTION_MATCH_MIN_SIMILARITY and best - runner_up >= SUGGESTION_MATCH_MIN_MARGIN:
+        return candidates[ranked[0]]
+    return None
+
+
+def _infer_suggestion_source(issue: Any, candidates: list) -> Optional[Any]:
+    """Which finding at the position a *reworded* comment is, or ``None`` if unclear.
+
+    Evidence in decreasing strength: the only finding there; the one whose fix
+    the comment still carries; the one whose text it reads like. When the carried
+    fix and the text point at different findings, that is the failure itself —
+    the model put one finding's fix under another's words — so it is ambiguous.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    by_text = _closest_by_text(issue, candidates)
+    carried = _suggestion_key(_issue_field(issue, "suggestion"))
+    if carried:
+        same = [f for f in candidates if _suggestion_key(_issue_field(f, "suggestion")) == carried]
+        if len(same) == 1:
+            if by_text is not None and by_text is not same[0]:
+                return None
+            return same[0]
+    return by_text
+
+
+def restore_issue_suggestions(selected: list, originals: list) -> Tuple[list, list, list, list]:
+    """Put the reviewers' own ``suggestion`` back over the comment reviewer's.
+
+    Returns ``(selected, restored, unverified, unverified_issues)``; ``selected``
+    is the same list, updated in place. ``restored`` and ``unverified`` are
+    ``(file_name, line)`` positions, for warnings. ``unverified_issues`` are the
+    comments themselves whose suggestion no finding vouches for — the caller posts
+    *those* without an Apply button. Identity, not position: two comments can
+    share a line, and one ambiguous suggestion there must not cost the other,
+    verified one its button.
+
+    The ranking stage *synthesizes* ``selected_issues`` and re-emits
+    ``suggestion`` freely, so a fix could arrive on a line it was never written
+    for — one finding's fix on another finding's line, which is the worst thing
+    an Apply button can commit. A suggestion is a fact the reviewers established
+    with the code open; the ranking stage only ever saw the finding list. So,
+    unlike :func:`restore_issue_problems` (which repairs only an *empty* field),
+    the original wins whenever there is one, **including an original that had no
+    suggestion** — a fix invented downstream of the code is not one to offer.
+
+    The hard part is *which* original, because two service sub-agents routinely
+    flag the same line with different findings. In order:
+
+    1. a finding at the position with the **same ``problem`` text** — a comment
+       passed through verbatim, and every comment on the deterministic fallback
+       path, which posts the reviewers' own findings;
+    2. the **only** finding at the position;
+    3. the one finding whose fix the comment still carries;
+    4. the finding whose text the rewording clearly reads like
+       (:data:`SUGGESTION_MATCH_MIN_SIMILARITY`, :data:`SUGGESTION_MATCH_MIN_MARGIN`).
+
+    Anything else is **ambiguous**. The "most severe finding at the position" rule
+    the badge and the restored text use is deliberately *not* used here: a badge
+    or a sentence from the wrong finding is a mislabel, while a fix from the wrong
+    finding is code someone commits with one click — under that rule a nil-check
+    finding and an SQL-injection finding on one line, both reworded, both got the
+    nil-check fix. For the same reason one finding's fix is
+    never given to two comments with different text: if a second comment at the
+    position resolves to a finding another comment already resolved to, the
+    resolution is contested and neither inferred claim stands.
+
+    No match and ambiguity both keep the model's suggestion and report the
+    position as ``unverified``: there is nothing safe to restore from, and the
+    text may still help a reader, but nothing vouches that it fits the line it
+    would be applied to. A difference in surrounding whitespace only is put back
+    silently — it is the original text, and a warning for it would be noise.
+    """
+    if not selected:
+        return selected, [], [], []
+
+    by_text: dict = {}
+    at_exact: dict = {}
+    at_base: dict = {}
+    for finding in originals or []:
+        if not _issue_field(finding, "file_name"):
+            continue
+        exact, base = _position_keys(finding)
+        at_exact.setdefault(exact, []).append(finding)
+        at_base.setdefault(base, []).append(finding)
+        text = _problem_key(finding)
+        if text:
+            for key in (exact, base):
+                by_text.setdefault((key, text), finding)
+
+    # Decide every comment's source before writing any, so whether a claim is
+    # contested does not depend on the order the comments come in.
+    sources = []  # (finding or None, proven by identical text)
+    for issue in selected:
+        exact, base = _position_keys(issue)
+        text = _problem_key(issue)
+        hit = (by_text.get((exact, text)) or by_text.get((base, text))) if text else None
+        if hit is not None:
+            sources.append((hit, True))
+            continue
+        candidates = at_exact.get(exact) or at_base.get(base) or []
+        sources.append((_infer_suggestion_source(issue, candidates), False))
+
+    # The texts each finding was claimed under. More than one means two different
+    # comments resolved to the same finding, and at most one of them is it.
+    claims: dict = {}
+    for issue, (hit, _) in zip(selected, sources):
+        if hit is not None:
+            claims.setdefault(id(hit), set()).add(_problem_key(issue))
+
+    restored, unverified, unverified_issues = [], [], []
+    for issue, (hit, proven) in zip(selected, sources):
+        current = str(_issue_field(issue, "suggestion") or "")
+        file_name = str(_issue_field(issue, "file_name") or "")
+        line = _issue_field(issue, "line")
+        if hit is not None and not proven and len(claims[id(hit)]) > 1:
+            hit = None
+        if hit is None:
+            if current.strip():
+                unverified.append((file_name, line))
+                unverified_issues.append(issue)
+            continue
+        original = str(_issue_field(hit, "suggestion") or "")
+        if current == original:
+            continue
+        _set_field(issue, "suggestion", original)
+        if current.strip() != original.strip():
+            restored.append((file_name, line))
+    return selected, restored, unverified, unverified_issues
 
 
 def apply_severity_corrections(
@@ -452,7 +673,80 @@ def apply_severity_corrections(
     return kept, dropped
 
 
-def format_single_issue(issue: Any, applyable: bool = True) -> str:
+def _indentation(text: str) -> str:
+    return text[: len(text) - len(text.lstrip(" \t"))]
+
+
+def anchor_suggestion(code: str, original_line: Optional[str] = None) -> Tuple[Optional[str], bool]:
+    """Decide whether cleaned suggestion code may carry an Apply button.
+
+    Returns ``(text, applyable)``; ``text`` is ``None`` when there is nothing worth
+    showing at all.
+
+    The block is always ```` ```suggestion:-0+0 ````, which replaces **exactly the
+    commented line** with every line of the block. A one-line fix fits that; a
+    multi-line one does not — a rewritten ``if`` block anchored on its first line
+    leaves the old body and its closing brace in place, and Apply commits broken
+    code (observed: "applying the code suggestion was wrong syntactically", "it
+    causes syntax error in my query"). So more than one line is **never**
+    applyable; it is shown as a plain block the reader can copy by hand. A range
+    suggestion is deliberately not attempted — it needs a line count the model
+    would have to get exactly right, and getting it wrong deletes code.
+
+    When ``original_line`` (the commented line's own text, from the MR diff) is
+    known, two cheap checks on a one-line fix:
+
+    * **Indentation** — a fix with *no* leading whitespace on a line that has some
+      gets the line's indentation: the model stripped it (the indentation lost in
+      a JSON string, or a fix written as a bare statement), and committing it as
+      written would dedent the line. A fix that carries its *own* indentation is
+      left exactly as written, because then the indentation may be the fix — a
+      YAML key under the wrong parent, a Python statement in the wrong block.
+      The reader sees exactly what Apply commits either way. A blank original
+      line has no indentation to give.
+    * **No-op** — identical to the line, trailing whitespace aside: there is no
+      fix, and a "Suggested Fix" equal to the code it sits on only makes the
+      reader hunt for a difference. Nothing is shown. Leading and internal
+      whitespace count — ``"Hello  World"`` → ``"Hello World"`` is a fix, and so
+      is a re-indent — which is why this compares after the indentation step
+      rather than on whitespace-collapsed text.
+    """
+    lines = code.splitlines()
+    if len(lines) != 1:
+        return code, False
+    if original_line is None:
+        return code, True
+    original = str(original_line).rstrip("\r\n")
+    if original.strip() and not _indentation(code):
+        code = _indentation(original) + code
+    if code.rstrip() == original.rstrip():
+        return None, False
+    return code, True
+
+
+def diff_line_text(diff_text: str, line: Any) -> Optional[str]:
+    """The text of new-side ``line`` in a unified diff, or ``None`` if it is not in a hunk.
+
+    For :func:`anchor_suggestion`: the commented line is by definition a diff line
+    (an applyable comment has passed ``resolve_inline_position``), so the MR diff
+    already in memory holds its text and no file has to be read. A lookup on the
+    shared parser that ``gitlab_helpers.build_diff_position_map`` is built on, so
+    the line found is the one GitLab anchors the comment on.
+    """
+    # Imported here, not at module level: diff_lines imports get_severity from
+    # this module, so a top-level import would be circular whichever is first.
+    from core.utils.diff_lines import parse_unified_diff
+
+    try:
+        target = int(line)
+    except (TypeError, ValueError):
+        return None
+    return parse_unified_diff(diff_text or "").new_text.get(target)
+
+
+def format_single_issue(
+    issue: Any, applyable: bool = True, original_line: Optional[str] = None
+) -> str:
     """
     Format a single issue for GitLab comment.
 
@@ -462,11 +756,14 @@ def format_single_issue(issue: Any, applyable: bool = True) -> str:
             GitLab honors a ```suggestion block and renders "Apply suggestion".
             False for the general-note fallback — a note off the diff cannot be
             applied, so the code is shown as a plain block instead of dangling an
-            inert Apply affordance.
+            inert Apply affordance — and for a suggestion no reviewer finding
+            vouches for (see ``restore_issue_suggestions``).
+        original_line: The commented line's current text, when known, for the
+            anchor checks in :func:`anchor_suggestion`.
 
     Returns:
-        Formatted comment string, with GitLab suggestion syntax when the
-        suggestion is code that can safely be committed as-is.
+        Formatted comment string, with GitLab suggestion syntax only when the
+        suggestion is a single line of code that can safely be committed as-is.
     """
     # Handle both dict and object formats
     problem = issue.get("problem", "") if isinstance(issue, dict) else issue.problem
@@ -489,7 +786,12 @@ def format_single_issue(issue: Any, applyable: bool = True) -> str:
         # below never does, since a backtick inside a suggestion block is a
         # character that gets committed into the file rather than markup.
         return comment + f"**Suggested Fix:**\n{_comment_prose(cleaned)}"
-    fence = "suggestion:-0+0" if applyable else ""
+    cleaned, fits = anchor_suggestion(cleaned, original_line)
+    if cleaned is None:
+        return comment
+    # A multi-line fix (or an unvouched-for one) gets the same plain block the
+    # general-note fallback does: readable and copyable, with no Apply button.
+    fence = "suggestion:-0+0" if applyable and fits else ""
     return comment + f"**Suggested Fix:**\n```{fence}\n{cleaned}\n```"
 
 

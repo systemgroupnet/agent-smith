@@ -35,7 +35,7 @@ it whatever the middleware does with context.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, field_validator
@@ -224,13 +224,21 @@ class FindingsSink:
         return ", ".join(parts)
 
 
-def make_record_findings_tool(sink: FindingsSink) -> BaseTool:
+def make_record_findings_tool(
+    sink: FindingsSink, on_record: Optional[Callable[[str], None]] = None
+) -> BaseTool:
     """Build the ``record_findings`` tool bound to ``sink``.
 
     Built per run, because the sink is per run. The description is written for the
     model: it states the empty-list contract explicitly, since "call me even when
     you found nothing" is the part a model will otherwise optimise away, and that
     is the signal the coverage check depends on.
+
+    ``on_record`` is called with the normalised path after every accepted call. The
+    sink keys on the *file*, which cannot say which reviewer reported — and a Go
+    service file has two. The review pass builds one tool per reviewer-file pair
+    with a callback that marks that pair, which is what makes per-pair completion
+    observable for the progress record.
     """
 
     def _record(file_path: str, findings: Optional[List[RecordedFinding]] = None) -> str:
@@ -245,7 +253,11 @@ def make_record_findings_tool(sink: FindingsSink) -> BaseTool:
                     sink.rejected += 1
             else:
                 sink.rejected += 1
-        return sink.record(file_path, parsed)
+        message = sink.record(file_path, parsed)
+        reported = FindingsSink._normalise(file_path)
+        if on_record is not None and reported:
+            on_record(reported)
+        return message
 
     return StructuredTool.from_function(
         func=_record,
