@@ -41,6 +41,26 @@ def test_only_an_e2e_spec_goes_to_the_e2e_reviewer():
     assert route_file("e2e") == ("e2e_reviewer",)
 
 
+def test_the_house_rules_go_to_the_rules_reviewer():
+    """Root and module `.aid/*.md`; any other Markdown stays unreviewed."""
+    profile = get_profile()
+    assert profile.classify(".aid/service.md") == "aid"
+    assert profile.classify("billing/.aid/sql.md") == "aid"
+    assert profile.classify("docs/guide.md") == "unknown"
+    assert route_file("aid") == ("rules_reviewer",)
+
+
+def test_the_rules_reviewer_knows_every_rules_file_name():
+    """Its list of names is a copy of REVIEWER_SPECS: a reviewer added without it
+    would have its rules file reported as read by nobody."""
+    from core.agents.review_contexts import ReviewPromptContext
+    from core.prompts import get_rules_reviewer_prompt
+
+    prompt = get_rules_reviewer_prompt(ReviewPromptContext())
+    for agent_type in {s.agent_type for s in REVIEWER_SPECS}:
+        assert f"`{agent_type}.md`" in prompt, agent_type
+
+
 def test_every_bundled_profile_loads():
     names = sorted(p.stem for p in PROFILES_DIR.glob("*.yml"))
     assert "default" in names

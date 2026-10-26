@@ -89,8 +89,8 @@ def _reviewer(checkout, model, sink=None, record_tool=None):
     )
 
 
-def test_there_are_ten_reviewers_and_routing_is_total():
-    assert len(REVIEWER_SPECS) == 10
+def test_there_are_eleven_reviewers_and_routing_is_total():
+    assert len(REVIEWER_SPECS) == 11
     assert route_file("service") == ("service_reviewer", "service_business_reviewer")
     assert route_file("unknown") == (), "an unreviewable type has no reviewer"
 

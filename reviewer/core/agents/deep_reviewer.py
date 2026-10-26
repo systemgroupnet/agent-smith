@@ -85,6 +85,7 @@ from core.prompts import (
     get_e2e_reviewer_prompt,
     get_html_reviewer_prompt,
     get_pbook_reviewer_prompt,
+    get_rules_reviewer_prompt,
     get_scss_reviewer_prompt,
     get_semantic_reviewer_prompt,
     get_sql_reviewer_prompt,
@@ -226,7 +227,7 @@ class ReviewerSpec:
     prompt_getter: object
 
 
-#: The ten reviewers. ``service`` is two of them because it always was two — a
+#: The eleven reviewers. ``service`` is two of them because it always was two — a
 #: semantic reviewer and a business-logic reviewer that run against the same file
 #: and whose findings merge in the sink. Declaring them separately keeps that
 #: behaviour and keeps each prompt intact.
@@ -308,6 +309,16 @@ REVIEWER_SPECS: Tuple[ReviewerSpec, ...] = (
         agent_type="scss",
         description="Reviews SCSS/CSS for correctness and maintainability. Use for .scss and .css files.",
         prompt_getter=get_scss_reviewer_prompt,
+    ),
+    ReviewerSpec(
+        name="rules_reviewer",
+        agent_type="rules",
+        description=(
+            "Reviews the house rules the other reviewers read (.aid/<agent_type>.md): whether "
+            "each file and rule reaches its reviewer, is true of the code base, agrees with the "
+            "other rules, and can be checked from one file. Use for .aid/*.md files."
+        ),
+        prompt_getter=get_rules_reviewer_prompt,
     ),
 )
 

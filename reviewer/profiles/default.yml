@@ -10,7 +10,7 @@
 #
 # Reviewers available: service_reviewer, service_business_reviewer, sql_reviewer,
 # test_reviewer, e2e_reviewer, typescript_reviewer, html_reviewer,
-# scss_reviewer, dataview_reviewer, pbook_reviewer.
+# scss_reviewer, dataview_reviewer, pbook_reviewer, rules_reviewer.
 version: 1
 
 # Never reviewed. REVIEW_EXCLUDE_PATTERNS (comma-separated) is added to this.
@@ -22,6 +22,13 @@ exclude:
   - "*.min.js"
 
 file_types:
+  # The reviewers' own house rules (.aid/<agent_type>.md): a wrong rule puts a
+  # wrong comment on every merge request it applies to. `*` also crosses "/", so
+  # exclude any other tool's files kept under .aid.
+  - name: aid
+    match: [".aid/*.md", "*/.aid/*.md"]
+    reviewers: [rules_reviewer]
+
   - name: sql
     match: ["*.sql"]
     reviewers: [sql_reviewer]

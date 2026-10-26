@@ -13,6 +13,7 @@ Exports:
         - get_sql_reviewer_prompt
         - get_test_reviewer_prompt
         - get_e2e_reviewer_prompt
+        - get_rules_reviewer_prompt
         - get_typescript_reviewer_prompt
         - get_scss_reviewer_prompt
         - get_html_reviewer_prompt
@@ -34,6 +35,7 @@ from .service_prompts import (
 from .sql_prompts import get_sql_reviewer_prompt
 from .test_prompts import get_test_reviewer_prompt
 from .e2e_prompts import get_e2e_reviewer_prompt
+from .rules_prompts import get_rules_reviewer_prompt
 from .typescript_prompts import get_typescript_reviewer_prompt
 from .scss_prompts import get_scss_reviewer_prompt
 from .html_prompts import get_html_reviewer_prompt
@@ -54,6 +56,7 @@ __all__ = [
     "get_sql_reviewer_prompt",
     "get_test_reviewer_prompt",
     "get_e2e_reviewer_prompt",
+    "get_rules_reviewer_prompt",
     "get_typescript_reviewer_prompt",
     "get_scss_reviewer_prompt",
     "get_html_reviewer_prompt",
